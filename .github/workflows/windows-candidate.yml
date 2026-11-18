@@ -23,8 +23,6 @@ jobs:
   build:
     runs-on: windows-2022
     timeout-minutes: 80
-    outputs:
-      tag: ${{ steps.source.outputs.tag }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -73,33 +71,59 @@ jobs:
         with:
           path: build/windows-sdk-cache
           key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
-      - name: Archive matching source and checksums
-        id: source
-        shell: bash
+      - name: Hash the Windows ZIP
+        shell: pwsh
         run: |
-          set -euo pipefail
-          version=$(tr -d '\r\n' < loader/VERSION)
-          tag="v$version"
-          # Local to the runner only: no tag or release gets published.
-          git tag "$tag" "$GITHUB_SHA"
-          sh tools/release/make_source_archive.sh "dist/gtav-recomp-src-$tag.tar.xz" "$tag" \
-            rexglue-sdk thirdparty/XenosRecomp thirdparty/plume
-          tar -tf "dist/gtav-recomp-src-$tag.tar.xz" > "$RUNNER_TEMP/packed-source.txt"
-          grep -Fx 'gtav-recomp-src/SOURCE.txt' "$RUNNER_TEMP/packed-source.txt"
-          (cd dist && sha256sum gtav-recomp-windows-x64.zip "gtav-recomp-src-$tag.tar.xz" > SHA256SUMS)
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          $zip = Get-Item 'dist/gtav-recomp-windows-x64.zip'
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($zip.Name)" | Set-Content -Encoding ascii 'dist/SHA256SUMS.windows'
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: windows-x64-release-candidate
           path: |
             dist/gtav-recomp-windows-x64.zip
+            dist/SHA256SUMS.windows
+          if-no-files-found: error
+          compression-level: 0
+
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tag: ${{ steps.archive.outputs.tag }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Archive the source from the same commit and dependency pins
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GITHUB_ACTIONS
+          PYTHONPATH=tools/release python3 -c 'from build_windows_candidate import checkout_dependencies, REPO; checkout_dependencies(REPO)'
+          tag="v$(tr -d '\r\n' < loader/VERSION)"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          # Local to the runner only: no tag or release gets published.
+          git tag "$tag" "$GITHUB_SHA"
+          mkdir -p dist
+          sh tools/release/make_source_archive.sh "dist/gtav-recomp-src-$tag.tar.xz" "$tag" \
+            rexglue-sdk thirdparty/XenosRecomp thirdparty/plume
+          tar -tf "dist/gtav-recomp-src-$tag.tar.xz" > "$RUNNER_TEMP/packed-source.txt"
+          grep -Fx 'gtav-recomp-src/SOURCE.txt' "$RUNNER_TEMP/packed-source.txt"
+          (cd dist && sha256sum "gtav-recomp-src-$tag.tar.xz" > SHA256SUMS.source)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: matching-source
+          path: |
             dist/gtav-recomp-src-*.tar.xz
-            dist/SHA256SUMS
+            dist/SHA256SUMS.source
           if-no-files-found: error
           compression-level: 0
 
   stage-draft:
-    needs: build
+    needs: [build, source]
     # This is opt-in: builds alone cannot change a release.
     if: >-
       github.repository == 'NuxsGit/hooky-GTA-Recomp' &&
@@ -114,19 +138,39 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: windows-x64-release-candidate
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: matching-source
       - name: Attach candidate only if the draft still has no assets
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.build.outputs.tag }}
+          TAG: ${{ needs.source.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
+          checked_gh() {
+            local output
+            if output=$(gh "$@" 2>&1); then
+              printf '%s\n' "$output"
+            else
+              output=${output//%/%25}
+              output=${output//$'\n'/%0A}
+              output=${output//$'\r'/%0D}
+              echo "::error title=Release staging::$output" >&2
+              return 1
+            fi
+          }
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          sha256sum --check SHA256SUMS
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets,body > release.json
-          jq -e '.isDraft and (.assets | length == 0)' release.json > /dev/null
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA"
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
+          tr -d '\r' < SHA256SUMS.windows > SHA256SUMS
+          cat SHA256SUMS.source >> SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          checked_gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets,body > release.json
+          if ! jq -e '.isDraft and (.assets | length == 0)' release.json > /dev/null; then
+            echo '::error::Refusing to replace an existing candidate or modify a published release'
+            exit 1
+          fi
+          checked_gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA"
+          checked_gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
             gtav-recomp-windows-x64.zip "gtav-recomp-src-$TAG.tar.xz" SHA256SUMS
           {
             echo '> **Brouillon — paquet Windows x64 à valider en jeu.**'
@@ -135,4 +179,4 @@ jobs:
             printf '\n'
             jq -r .body release.json | sed '/^> \*\*Brouillon /d; /^Les tests du launcher Linux /d'
           } > notes.md
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft --notes-file notes.md
+          checked_gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft --notes-file notes.md
