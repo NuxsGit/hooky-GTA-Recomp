@@ -7,7 +7,8 @@
 #include <rex/input/input_system.h>
 #include <rex/rex_app.h>
 
-#include "native/menu.h"
+#include "native/input.h"
+#include "native/renderer.h"
 #include "native/touch_controls.h"
 #include <rex/system/kernel_state.h>
 #include <rex/ui/presenter.h>
@@ -42,11 +43,15 @@ class GtavApp : public rex::ReXApp {
 
   // Override virtual hooks for customization:
   // void OnPostInitLogging() override {}
-  // Adds the on-screen gamepad (gtav_touch_controls) next to the SDK's pad and keyboard drivers.
   void OnPreSetup(rex::RuntimeConfig& config) override {
+    gtav::native::input::Configure();
     config.input_factory = [](bool tool_mode) -> std::unique_ptr<rex::system::IInputSystem> {
       auto input = rex::input::CreateDefaultInputSystem(tool_mode);
-      if (!tool_mode) input->AddDriver(gtav::native::touch::CreateDriver());
+      if (!tool_mode) {
+        // Single-player: any connected gamepad, keyboard or touch can drive guest user 0.
+        input->SetDeviceAssignment(std::make_unique<rex::input::SharedAssignment>());
+        input->AddDriver(gtav::native::touch::CreateDriver());
+      }
       return input;
     };
   }
@@ -66,11 +71,11 @@ class GtavApp : public rex::ReXApp {
   // GTAV_SHOT_DIR=<dir> [GTAV_SHOT_SECS=<n>, default 30]: every n seconds save the guest
   // output as <dir>/shot_<seconds>.ppm. For checking unattended boots (no screen capture needed).
   void OnPostSetup() override {
-#ifdef __ANDROID__
-    // The settings menu (controller: RB + Back) takes the pad while open: the game sees no input.
-    if (auto* input = static_cast<rex::input::InputSystem*>(runtime() ? runtime()->input_system() : nullptr))
-      input->SetActiveCallback([] { return !gtav::native::menu::IsOpen(); });
-#endif
+    // Don't pass gameplay input through the native settings overlay, or replace the SDK's own gate.
+    if (gtav::native::Active()) {
+      if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system()))
+        input->AddActiveCallback(gtav::native::input::GameplayActive);
+    }
     const char* dir = std::getenv("GTAV_SHOT_DIR");
     if (!dir) return;
     const char* secs_env = std::getenv("GTAV_SHOT_SECS");
@@ -98,7 +103,10 @@ class GtavApp : public rex::ReXApp {
       }
     }).detach();
   }
-  void OnShutdown() override { shutting_down_ = true; }
+  void OnShutdown() override {
+    shutting_down_ = true;
+    gtav::native::input::Shutdown();
+  }
 #if defined(__APPLE__) && TARGET_OS_IPHONE
   // iPhone release: the game data is installed on the phone by the setup screen (ios_setup.h) into
   // Documents/data, the Mac install's layout. A dev build passes its own roots in args.txt.

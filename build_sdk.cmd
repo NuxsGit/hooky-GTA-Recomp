@@ -8,3 +8,4 @@ echo SDK_DONE
 rem The game loads the GPU plugin from its own folder (build.cmd does not copy it).
 copy /y E:\gtav-rex\rexglue-sdk\out\install\win-amd64\bin\rexgpu-xenosrd.dll E:\gtav-native\build\ >nul
 copy /y E:\gtav-rex\rexglue-sdk\out\install\win-amd64\bin\rexruntimerd.dll E:\gtav-native\build\ >nul
+copy /y E:\gtav-rex\rexglue-sdk\out\install\win-amd64\bin\SDL3rd.dll E:\gtav-native\build\ >nul

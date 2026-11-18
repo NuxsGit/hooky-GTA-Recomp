@@ -6,6 +6,7 @@
 #include "deferred_list.h"
 #include "capture.h"
 #include "frame.h"
+#include "input.h"
 #include "menu.h"
 #include "paths.h"
 #include "shader_compiler.h"
@@ -13,8 +14,7 @@
 #include <plume_render_interface.h>
 
 #ifdef _WIN32
-// rexruntime.dll links SDL statically and exports none of it, so on Windows the native window is a
-// plain Win32 window (Plume's HWND path) instead of an SDL one.
+// The Windows native renderer owns a Win32 window on its own message thread.
 #include <windows.h>
 #else
 #include <SDL3/SDL.h>
@@ -255,7 +255,7 @@ class Renderer {
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // F9 (dump the next frame to logs/native_dump) and F10 (screenshot to logs/shots) are polled
     // by the window thread's timer, so they work from the SDK's window too (shadow mode).
-    // Settings menu: Esc toggles it; mouse and navigation keys while it is open (menu.h).
+    // F1 toggles the settings overlay; Esc closes it or pauses the game.
     switch (msg) {
       case WM_MOUSEMOVE: menu::OnMouseMove(float(short(LOWORD(lp))), float(short(HIWORD(lp)))); break;
       case WM_LBUTTONDOWN: case WM_LBUTTONUP: menu::OnMouseButton(0, msg == WM_LBUTTONDOWN); break;
@@ -264,7 +264,14 @@ class Renderer {
       case WM_KEYDOWN:
       case WM_KEYUP: {
         bool down = msg == WM_KEYDOWN;
-        if (wp == VK_ESCAPE && down && !(lp & (1 << 30))) menu::OnEscape();
+        if (wp == VK_F1 || (wp == VK_ESCAPE && menu::IsOpen())) {
+          if (down && !(lp & (1L << 30))) {
+            if (wp == VK_F1) menu::Toggle();
+            else menu::Close();
+            input::UpdateMouseCapture(hwnd);
+          }
+          return 0;
+        }
         if (wp == VK_UP) menu::OnKey(menu::Key::kUp, down);
         if (wp == VK_DOWN) menu::OnKey(menu::Key::kDown, down);
         if (wp == VK_LEFT) menu::OnKey(menu::Key::kLeft, down);
@@ -275,6 +282,7 @@ class Renderer {
         break;
       }
     }
+    if (input::HandleMessage(hwnd, msg, wp, lp)) return TRUE;
     if (msg == WM_CLOSE) {  // the native window is the game window: closing it quits
       REXLOG_INFO("[native] window closed, exiting");
       ExitProcess(0);
@@ -343,6 +351,7 @@ class Renderer {
           if (msg.wParam == 1) {
             if (on || hidden) HideSdkWindows();
           } else {
+            input::UpdateMouseCapture(hwnd);
             DWORD pid = 0;
             GetWindowThreadProcessId(GetForegroundWindow(), &pid);
             bool ours = pid == GetCurrentProcessId();
@@ -365,87 +374,6 @@ class Renderer {
     cv.wait(lock, [&] { return done; });
     if (!window_) REXLOG_ERROR("[native] CreateWindowEx failed: {}", GetLastError());
     return window_ != nullptr;
-  }
-#endif
-
-#ifndef _WIN32
-  // Settings menu input (menu.h queues it while the menu is open): the native window's mouse and
-  // the navigation keys.
-  // Mouse (and touch-made mouse) events are in window points; the menu is laid out in swap chain
-  // pixels (iPhone: 2.9 pixels a point).
-  static float PixelDensity(SDL_WindowID id) {
-#if defined(__APPLE__) && TARGET_OS_IPHONE
-    if (SDL_Window* w = SDL_GetWindowFromID(id)) return SDL_GetWindowPixelDensity(w);
-#else
-    (void)id;
-#endif
-    return 1.0f;
-  }
-
-  static void MenuInput(const SDL_Event* e) {
-    switch (e->type) {
-      // Controller: RB + Back (View) opens or closes the menu (in either order); while it is
-      // open the D-pad moves, A activates and B closes.
-      case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
-      case SDL_EVENT_GAMEPAD_BUTTON_UP: {
-        static bool rb = false, back = false;
-        const bool down = e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
-        const auto button = SDL_GamepadButton(e->gbutton.button);
-        if (button == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER || button == SDL_GAMEPAD_BUTTON_BACK) {
-          bool& held = button == SDL_GAMEPAD_BUTTON_BACK ? back : rb;
-          if (down && !held && (button == SDL_GAMEPAD_BUTTON_BACK ? rb : back)) menu::OnEscape();
-          held = down;
-          break;
-        }
-        if (!menu::IsOpen()) break;
-        if (button == SDL_GAMEPAD_BUTTON_EAST) {
-          if (down) menu::OnEscape();
-          break;
-        }
-        menu::Key key;
-        switch (button) {
-          case SDL_GAMEPAD_BUTTON_DPAD_UP: key = menu::Key::kUp; break;
-          case SDL_GAMEPAD_BUTTON_DPAD_DOWN: key = menu::Key::kDown; break;
-          case SDL_GAMEPAD_BUTTON_DPAD_LEFT: key = menu::Key::kLeft; break;
-          case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: key = menu::Key::kRight; break;
-          case SDL_GAMEPAD_BUTTON_SOUTH: key = menu::Key::kSpace; break;
-          default: return;
-        }
-        menu::OnKey(key, down);
-        break;
-      }
-      case SDL_EVENT_MOUSE_MOTION: {
-        const float k = PixelDensity(e->motion.windowID);
-        menu::OnMouseMove(e->motion.x * k, e->motion.y * k);
-        break;
-      }
-      case SDL_EVENT_MOUSE_BUTTON_DOWN:
-      case SDL_EVENT_MOUSE_BUTTON_UP: {
-        // A tap arrives as button down / up with no motion before it: move the pointer there first.
-        const float k = PixelDensity(e->button.windowID);
-        menu::OnMouseMove(e->button.x * k, e->button.y * k);
-        int b = e->button.button == SDL_BUTTON_LEFT ? 0 : e->button.button == SDL_BUTTON_RIGHT ? 1 : 2;
-        menu::OnMouseButton(b, e->type == SDL_EVENT_MOUSE_BUTTON_DOWN);
-        break;
-      }
-      case SDL_EVENT_MOUSE_WHEEL: menu::OnMouseWheel(e->wheel.y); break;
-      case SDL_EVENT_KEY_DOWN:
-      case SDL_EVENT_KEY_UP: {
-        bool down = e->type == SDL_EVENT_KEY_DOWN;
-        switch (e->key.scancode) {
-          case SDL_SCANCODE_UP: menu::OnKey(menu::Key::kUp, down); break;
-          case SDL_SCANCODE_DOWN: menu::OnKey(menu::Key::kDown, down); break;
-          case SDL_SCANCODE_LEFT: menu::OnKey(menu::Key::kLeft, down); break;
-          case SDL_SCANCODE_RIGHT: menu::OnKey(menu::Key::kRight, down); break;
-          case SDL_SCANCODE_RETURN: menu::OnKey(menu::Key::kEnter, down); break;
-          case SDL_SCANCODE_SPACE: menu::OnKey(menu::Key::kSpace, down); break;
-          case SDL_SCANCODE_TAB: menu::OnKey(menu::Key::kTab, down); break;
-          default: break;
-        }
-        break;
-      }
-      default: break;
-    }
   }
 #endif
 
@@ -539,18 +467,16 @@ class Renderer {
               },
               nullptr);
 #endif
+          if (!r->window_) return;
+          input::AttachWindow(r->window_);
           SDL_AddEventWatch(
               [](void*, SDL_Event* e) {
                 if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {
                   if (e->key.scancode == SDL_SCANCODE_F8) key_replay_ = true;
-                  if (e->key.scancode == SDL_SCANCODE_F9 || e->key.scancode == SDL_SCANCODE_N) key_dump_ = true;
-                  // M as well: no fn key needed on Mac laptops, and no pad button uses it (mnk_mode).
-                  if (e->key.scancode == SDL_SCANCODE_F10 || e->key.scancode == SDL_SCANCODE_M) key_shot_ = true;
+                  if (e->key.scancode == SDL_SCANCODE_F9) key_dump_ = true;
+                  if (e->key.scancode == SDL_SCANCODE_F10) key_shot_ = true;
                   if (e->key.scancode == SDL_SCANCODE_F11) CycleDiagMode();
-                  // Android's Back button arrives as AC_BACK: it opens the settings menu too.
-                  if (e->key.scancode == SDL_SCANCODE_ESCAPE || e->key.scancode == SDL_SCANCODE_AC_BACK) menu::OnEscape();
                 }
-                MenuInput(e);
                 return true;
               },
               nullptr);
@@ -972,6 +898,9 @@ class Renderer {
   // Two frames in flight: frame N+1 is recorded while the GPU runs frame N, so a frame costs
   // max(record, GPU) instead of record + GPU. Shot and dump frames are waited for at once.
   void Present(const FramePacket& frame) {
+#ifndef _WIN32
+    input::UpdateMouseCapture();
+#endif
     if (vsync_ != REXCVAR_GET(gtav_native_vsync)) {  // switched from the menu
       vsync_ = REXCVAR_GET(gtav_native_vsync);
       submitter_.Drain();
@@ -1044,11 +973,11 @@ class Renderer {
         std::filesystem::remove(request, ec);
         key_dump_ = true;
       }
-      // logs/menu_toggle (any content): same as Esc, for testing the menu without a keyboard.
+      // logs/menu_toggle (any content): same as F1, for testing the menu without a keyboard.
       auto toggle = std::filesystem::path(LogPath("menu_toggle"));
       if (std::filesystem::exists(toggle, ec)) {
         std::filesystem::remove(toggle, ec);
-        menu::OnEscape();
+        menu::Toggle();
       }
       // logs/menu_set ("name=value"): sets a menu setting the way its control does.
       auto set = std::filesystem::path(LogPath("menu_set"));

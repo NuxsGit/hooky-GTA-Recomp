@@ -1,4 +1,4 @@
-// Settings menu of the native renderer: Esc opens it over the game (Dear ImGui, drawn by the
+// Settings menu of the native renderer: F1 opens it over the game (Dear ImGui, drawn by the
 // backend into the swap chain). Input arrives from the window thread (SDL event watch / WndProc)
 // and is queued; the render thread builds the UI once per presented frame.
 #pragma once
@@ -11,7 +11,8 @@ struct ImDrawData;
 namespace gtav::native::menu {
 
 // Window thread. Coordinates are window pixels; buttons 0 left, 1 right, 2 middle.
-void OnEscape();
+void Toggle();
+void Close();
 bool IsOpen();
 void OnMouseMove(float x, float y);
 void OnMouseButton(int button, bool down);

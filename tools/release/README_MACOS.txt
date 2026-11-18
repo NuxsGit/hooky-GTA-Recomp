@@ -24,7 +24,7 @@ What you need
   with disc002/default.xexp and disc002/update.rpf.
 - A Mac with Apple silicon (M1 or newer) and macOS 15 (Sequoia) or newer. 8 GB RAM works; 16 GB is
   more comfortable. Nothing else to install: the compiler that builds the game is inside the app.
-- A controller (Xbox or PlayStation, through SDL), or the keyboard.
+- A keyboard and mouse, or a gamepad recognized by SDL.
 - About 25 GB free during setup (about 17 GB once installed) on a normal, case-insensitive volume
   (the macOS default). The internal SSD loads much faster than a USB drive.
 
@@ -45,9 +45,24 @@ First run
 
 Later runs: opening GTAV.app starts the game directly. Hold Option while opening it to get the
 setup window again (for example after moving your discs, or to repair the install).
-Esc in game opens the settings menu (quality presets, frame rate limit, VSync, FPS counter).
-Keyboard: Space = A, Backspace = B, Return = Start, WASD = left stick, arrows = right stick.
 Logs: <game folder>/data/logs (gtav.log for the game, install.log for setup).
+
+Controls
+--------
+Gamepads and keyboard/mouse are enabled by default. SDL handles mapped USB/Bluetooth gamepads
+(including Xbox, PlayStation, Switch and compatible third-party models; support varies by OS).
+The game uses Xbox 360 button prompts. Hot-plugged pads and keyboard/mouse control the same player.
+Default bindings (physical positions):
+- WASD (ZQSD on AZERTY) = left stick; mouse or IJKL = right stick.
+- Shift or Enter = A; R or Backspace = B; Space = X; F = Y.
+- Right click or Q = LT; left click or E = RT; Ctrl = L3; middle click or C = R3.
+- 1 or Mouse4 = LB; 3 or Mouse5 = RB; arrows = D-pad; Tab = Back; Esc = Start.
+F1 opens/closes the native settings overlay. Esc closes it when open. On an SDL gamepad use
+RB + Back to toggle it, D-pad and A to navigate, and B to close.
+If a pad isn't mapped, try the community gamecontrollerdb.txt from
+https://github.com/mdqinc/SDL_GameControllerDB next to the game executable. Customize keybind_*
+options and mnk_sensitivity in gtav.toml in the same folder. Set mnk_mode = false to opt out.
+The game executable and gtav.toml are in your installed game folder, not in GTAV.app.
 
 iPhone (experimental)
 ---------------------

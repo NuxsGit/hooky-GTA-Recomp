@@ -64,6 +64,7 @@ set(GTAV_SOURCES
     src/native/d3d_hooks.cpp
     src/native/renderer.cpp
     src/native/shaders.cpp
+    src/native/input.cpp
     src/native/menu.cpp
     src/native/backend.cpp
     src/native/deferred_list.cpp
@@ -246,10 +247,9 @@ elseif(GTAV_PGO STREQUAL "USE")
                            -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date)
 endif()
 
-# Native renderer: Plume (Vulkan, SDL3 surface). SDL3 itself comes from librexruntime, which
-# exports it, so only the headers are needed here.
-# Windows: rexruntime.dll exports none of its static SDL3, so the native window is Win32 (Plume's
-# HWND path) and no SDL is linked here.
+# Native renderer: Plume (Vulkan). On Windows keep the Win32 HWND path; the host and
+# rexruntime share an SDL DLL for input. On other platforms only the SDK's SDL headers
+# are needed by Plume (librexruntime exports the symbols).
 if(NOT WIN32)
     find_package(SDL3 REQUIRED CONFIG COMPONENTS Headers)
     set(PLUME_SDL3_VULKAN_ENABLED ON CACHE BOOL "" FORCE)
