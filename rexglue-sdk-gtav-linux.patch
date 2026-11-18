@@ -32,7 +32,7 @@ index 9b3cdf5..b3199ce 100644
 +if(NOT REX_IOS)
 +    add_subdirectory(src/rexglue)
 +endif()
- 
+
  # Add tests subdirectory if tests are enabled
  if(REXGLUE_BUILD_TESTS)
 diff --git a/CMakePresets.json b/CMakePresets.json
@@ -57,7 +57,7 @@ index 41e6dce..a46a433 100644
 @@ -166,7 +166,7 @@ function(rexglue_configure_target target_name)
          unset(_plugin_target)
      endforeach()
- 
+
 -    if(APPLE AND REXGLUE_USE_VULKAN)
 +    if(APPLE AND REXGLUE_USE_VULKAN AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
          _rexglue_stage_macos_vulkan_runtime(${target_name})
@@ -83,7 +83,7 @@ diff --git a/cmake/rexglue_install.cmake b/cmake/rexglue_install.cmake
 +++ b/cmake/rexglue_install.cmake
 @@ -52,11 +52,17 @@ install(TARGETS ${REXGLUE_INSTALL_TARGETS}
  )
- 
+
 -# A Debug codegen tool runs an order of magnitude slower, so only Release ships.
 -install(TARGETS rexglue
 -    EXPORT rexglueTargets
@@ -102,13 +102,13 @@ diff --git a/cmake/rexglue_install.cmake b/cmake/rexglue_install.cmake
 +        CONFIGURATIONS ${_rex_codegen_configs}
 +    )
 +endif()
- 
+
  if(REXGLUE_INSTALL_FIDELITYFX_TARGETS)
      install(TARGETS ${REXGLUE_INSTALL_FIDELITYFX_TARGETS}
 @@ -137,7 +143,7 @@ if(REXGLUE_USE_D3D12)
      )
  endif()
- 
+
 -if(APPLE AND REXGLUE_USE_VULKAN)
 +if(APPLE AND REXGLUE_USE_VULKAN AND NOT REX_IOS)
      install(FILES "$<TARGET_FILE:Vulkan::Loader>"
@@ -119,15 +119,15 @@ index f8949ca..dfab846 100644
 --- a/include/rex/audio/sdl/sdl_audio_driver.h
 +++ b/include/rex/audio/sdl/sdl_audio_driver.h
 @@ -11,9 +11,11 @@
- 
+
  #pragma once
- 
+
 +#include <atomic>
  #include <mutex>
  #include <queue>
  #include <stack>
 +#include <thread>
- 
+
  #include <rex/audio/audio_driver.h>
  #include <rex/thread.h>
 @@ -49,6 +51,21 @@ class SDLAudioDriver : public AudioDriver {
@@ -150,7 +150,7 @@ index f8949ca..dfab846 100644
 +  std::atomic<int32_t> pending_releases_{0};
 +  bool pacing_ = false;
  };
- 
+
  }  // namespace rex::audio::sdl
 diff --git a/include/rex/audio/xma/context.h b/include/rex/audio/xma/context.h
 index 8426798..90eabaa 100644
@@ -165,33 +165,33 @@ index 8426798..90eabaa 100644
 +  std::array<AVCodecContext*, 1> spare_contexts_{};  // ~450 KB each (8 channels of output)
 +  uint32_t next_spare_ = 0;
    AVFrame* av_frame_ = nullptr;
- 
+
    // Packet data buffer (two packets worth for split frame handling)
 diff --git a/include/rex/chrono/chrono.h b/include/rex/chrono/chrono.h
 index d876846..549bdf8 100644
 --- a/include/rex/chrono/chrono.h
 +++ b/include/rex/chrono/chrono.h
 @@ -116,8 +116,8 @@ using XSystemClock = detail::NtSystemClock<detail::Domain::Guest>;
- 
+
  namespace std::chrono {
- 
+
 -#ifdef __APPLE__
 -// Apple libc++ does not expose clock_time_conversion or clock_cast.
 +#if defined(__APPLE__) || defined(__ANDROID__)
 +// libc++ (Apple, Android NDK) does not expose clock_time_conversion or clock_cast.
  template <class, class>
  struct clock_time_conversion {};
- 
+
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
 index da8e432..749f0ba 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
 @@ -254,6 +254,7 @@ class CommandProcessor {
- 
+
    std::unique_ptr<rex::thread::Event> write_ptr_index_event_;
    std::atomic<uint32_t> write_ptr_index_;
 +  uint32_t lagged_ptr_ = 0;  // --gpu_skip_rendering_lag_ms: last write pointer old enough to run
- 
+
    // Some titles submit writes beyond the emulated register file range in PM4
    // packets. Preserve these values so dependent packet logic can still observe
 diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
@@ -215,13 +215,13 @@ index 96d362b..0cb73ed 100644
 +  uint64_t emu_draw_constants_frame_ = 0;
    bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
    bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
- 
+
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
 index 696ff48..d087448 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -426,6 +426,12 @@ class VulkanCommandProcessor : public CommandProcessor {
- 
+
    void ClearTransientDescriptorPools();
    bool IssueCopy_ReadbackResolvePath();
 +  void DumpResolveForComparison(uint32_t address, uint32_t length, const uint8_t* data);
@@ -232,7 +232,7 @@ index 696ff48..d087448 100644
 +  bool EmuDumpActive();
    bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
    bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
- 
+
 diff --git a/include/rex/input/input_driver.h b/include/rex/input/input_driver.h
 index 52116f1..0765fe5 100644
 --- a/include/rex/input/input_driver.h
@@ -377,7 +377,7 @@ index e90418d..9f5d0f8 100644
 @@ -28,7 +28,12 @@
  #include <TargetConditionals.h>
  #endif
- 
+
 -#if defined(TARGET_OS_MAC) && TARGET_OS_MAC
 +// iOS is Darwin too: REX_PLATFORM_MAC stays set (BSD libc, Mach, MoltenVK on Metal) and
 +// REX_PLATFORM_IOS subtracts the desktop-only pieces (AppKit, shm_open, a loader to dlopen).
@@ -403,9 +403,9 @@ index 0a43f07..a9bf21f 100644
 --- a/include/rex/system/xobject.h
 +++ b/include/rex/system/xobject.h
 @@ -189,6 +189,8 @@ class XObject {
- 
+
    void SetAttributes(uint32_t obj_attributes_ptr);
- 
+
 +  void ReportLongWait();
 +  void TraceHandleOp(const char* op);
    X_STATUS Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t alertable,
@@ -512,13 +512,13 @@ index 50638d6..feec200 100644
 @@ -24,10 +24,7 @@
  #include <rex/platform.h>
  #include <rex/ui/windowed_app_context.h>
- 
+
 -#if REX_PLATFORM_ANDROID
 -// Multiple apps in a single library instead of separate executables.
 -#define XE_UI_WINDOWED_APPS_IN_LIBRARY 1
 -#endif
 +// Android: one app per library too (the game's libmain.so; SDL's activity calls its SDL_main).
- 
+
  namespace rex {
  namespace ui {
 diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
@@ -526,9 +526,9 @@ index 68274d2..610fab2 100644
 --- a/resources/templates/codegen/pch_h.inja
 +++ b/resources/templates/codegen/pch_h.inja
 @@ -262,6 +262,12 @@ extern PPCFuncMapping PPCFuncMappings[];
- 
+
  #define REX_QUERY_TIMEBASE() rex::chrono::Clock::QueryGuestTickCount()
- 
+
 +// Memory barriers (sync, lwsync, eieio). x86: lwsync/eieio need no instruction, only a compiler
 +// barrier; ARM64: dmb ish (lwsync orders everything but store->load, which a full dmb covers).
 +#define REX_SYNC() __atomic_thread_fence(__ATOMIC_SEQ_CST)
@@ -544,12 +544,12 @@ index 0c334f8..8a62c96 100644
 +++ b/resources/templates/test/ppc_config_h.inja
 @@ -118,6 +118,9 @@
    throw std::runtime_error("Unimplemented PPC instruction: " opcode)
- 
+
  #define REX_QUERY_TIMEBASE() rex::chrono::Clock::QueryGuestTickCount()
 +#define REX_SYNC() __atomic_thread_fence(__ATOMIC_SEQ_CST)
 +#define REX_LWSYNC() __atomic_thread_fence(__ATOMIC_ACQ_REL)
 +#define REX_EIEIO() __atomic_thread_fence(__ATOMIC_RELEASE)
- 
+
  //=============================================================================
  // Setjmp/Longjmp
 diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
@@ -557,7 +557,7 @@ index 20a2cd8..6aef51f 100644
 --- a/src/audio/sdl/sdl_audio_driver.cpp
 +++ b/src/audio/sdl/sdl_audio_driver.cpp
 @@ -11,10 +11,19 @@
- 
+
  #include <algorithm>
  #include <array>
 +#include <chrono>
@@ -568,7 +568,7 @@ index 20a2cd8..6aef51f 100644
 +#include <string>
 +#include <thread>
 +#include <vector>
- 
+
  #include <rex/assert.h>
  #include <rex/audio/conversion.h>
 +#include <cmath>
@@ -579,7 +579,7 @@ index 20a2cd8..6aef51f 100644
 @@ -24,7 +33,36 @@
  #include <rex/perf/counter.h>
  #include <SDL3/SDL.h>
- 
+
 +#ifdef _WIN32
 +#ifndef NOMINMAX
 +#define NOMINMAX
@@ -610,9 +610,9 @@ index 20a2cd8..6aef51f 100644
 +                     "Audio device period in samples (0 = SDL default); one guest frame is 256");
 +REXCVAR_DEFINE_STRING(audio_dump_raw, "", "Audio",
 +                      "Append the device mix (float32, interleaved, device rate/channels) to this file, also when muted");
- 
+
  namespace rex::audio::sdl {
- 
+
 @@ -39,6 +77,12 @@ SDLAudioDriver::~SDLAudioDriver() {
  bool SDLAudioDriver::Initialize() {
    // Set audio category for proper OS audio handling
@@ -623,13 +623,13 @@ index 20a2cd8..6aef51f 100644
 +  // update thread) then ran at most two frames per period.
 +  if (REXCVAR_GET(audio_device_frames) > 0)
 +    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, std::to_string(REXCVAR_GET(audio_device_frames)).c_str());
- 
+
    // Set app name for audio device identification
    SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, "rexglue");
 @@ -49,6 +93,25 @@ bool SDLAudioDriver::Initialize() {
    }
    sdl_initialized_ = true;
- 
+
 +  // iOS refuses the audio session now and then (app launched while not in front, another app
 +  // holding the audio): without a device the game's audio objects stayed null and it crashed at
 +  // start (guest read of 0x6C). Without a device the frames are consumed silently at the device
@@ -659,16 +659,16 @@ index 20a2cd8..6aef51f 100644
 +    CloseDevice();
      return false;
    }
- 
+
    SDL_AudioDeviceID sdl_device = SDL_GetAudioStreamDevice(sdl_stream_);
    if (!sdl_device) {
      REXAPU_ERROR("SDL_GetAudioStreamDevice() failed: {}", SDL_GetError());
 +    CloseDevice();
      return false;
    }
- 
+
 @@ -75,7 +140,7 @@ bool SDLAudioDriver::Initialize() {
- 
+
    // A 1-channel device gets the stereo fold too, then SDL collapses to mono.
    // Handing it a 6ch stream instead would use SDL's own downmix.
 -  if (obtained_spec.channels <= 2) {
@@ -692,18 +692,18 @@ index 20a2cd8..6aef51f 100644
 +    return false;
      }
    }
- 
+
 @@ -103,12 +170,93 @@ bool SDLAudioDriver::Initialize() {
- 
+
    if (!SDL_ResumeAudioDevice(sdl_device)) {
      REXAPU_ERROR("SDL_ResumeAudioDevice() failed: {}", SDL_GetError());
 +    CloseDevice();
      return false;
    }
- 
+
    return true;
  }
- 
+
 +void SDLAudioDriver::CloseDevice() {
 +  if (sdl_stream_) {
 +    SDL_DestroyAudioStream(sdl_stream_);
@@ -789,7 +789,7 @@ index 20a2cd8..6aef51f 100644
    float* output_frame;
 @@ -139,6 +287,14 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
  }
- 
+
  void SDLAudioDriver::Shutdown() {
 +  if (silent_.joinable()) {
 +    silent_stop_ = true;
@@ -805,7 +805,7 @@ index 20a2cd8..6aef51f 100644
 @@ -158,6 +314,58 @@ void SDLAudioDriver::Shutdown() {
    }
  }
- 
+
 +namespace {
 +// --audio_dump_raw: the callback only appends to memory; a writer thread does the file I/O
 +// (fwrite on a busy disk inside the callback stalled the device to ~0.4x real time).
@@ -923,7 +923,7 @@ index 20a2cd8..6aef51f 100644
 @@ -219,8 +450,12 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
        }
        driver->frames_unused_.push(buffer);
- 
+
 -      auto ret = driver->semaphore_->Release(1, nullptr);
 -      assert_true(ret);
 +      if (driver->pacing_) {
@@ -942,7 +942,7 @@ index 11b83be..e2bb4c2 100644
 @@ -9,12 +9,20 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
- 
+
 +#include <chrono>
 +#include <condition_variable>
 +#include <mutex>
@@ -952,7 +952,7 @@ index 11b83be..e2bb4c2 100644
 +#include <thread>
 +#include <utility>
 +#include <vector>
- 
+
  #include <rex/audio/xma/context.h>
  #include <rex/audio/xma/decoder.h>
  #include <rex/audio/xma/helpers.h>
@@ -963,7 +963,7 @@ index 11b83be..e2bb4c2 100644
 @@ -36,10 +44,130 @@ extern "C" {
  // Credits for most of this code goes to:
  // https://github.com/koolkdev/libertyv/blob/master/libav_wrapper/xma2dec.c
- 
+
 +// Loud audio burst hunt (gtav): xma_trace logs each context's decoded frames that are near full
 +// scale or jump 20 dB over that context's previous frame, plus every "starved on input" reset;
 +// xma_starved_reset=false turns that reset off for an A/B run.
@@ -983,9 +983,9 @@ index 11b83be..e2bb4c2 100644
 +                    "Reset output write_offset to read_offset when a context runs out of input");
 +
  namespace rex::audio {
- 
+
  using stream::BitStream;
- 
+
 +namespace {
 +// Peak |sample| of a converted frame (big-endian int16).
 +uint32_t FramePeak(const uint8_t* frame, size_t bytes) {
@@ -1090,7 +1090,7 @@ index 11b83be..e2bb4c2 100644
 +
  const uint32_t XmaContext::kBitsPerPacketHeader;
  const uint32_t XmaContext::kOutputMaxSizeBytes;
- 
+
 @@ -50,6 +178,9 @@ XmaContext::~XmaContext() {
    if (av_context_) {
      avcodec_free_context(&av_context_);
@@ -1113,14 +1113,14 @@ index 11b83be..e2bb4c2 100644
    }
 @@ -133,17 +267,42 @@ bool XmaContext::Work() {
    }
- 
+
    while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
 +    const uint32_t pre_decode_offset = data.input_buffer_read_offset;
 +    const uint8_t pre_remaining_subframes = current_frame_remaining_subframes_;
 +
      Decode(&data);
      Consume(&output_rb, &data);
- 
+
 -    if (!data.IsAnyInputBufferValid() || data.error_status == 4) {
 +    // Don't abandon a partially consumed frame (xenia-canary fix). Consume() hands over at most
 +    // subframe_decode_count blocks per pass, so the pass that exhausts the input usually leaves
@@ -1137,7 +1137,7 @@ index 11b83be..e2bb4c2 100644
        break;
      }
    }
- 
+
 -  data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
 +  if (initial_data.IsAnyInputBufferValid()) {
 +    data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
@@ -1150,13 +1150,13 @@ index 11b83be..e2bb4c2 100644
 +    data.output_buffer_write_offset = data.output_buffer_read_offset;
 +    data.output_buffer_valid = 0;
 +  }
- 
+
 -  if (output_rb.empty()) {
 +  // Output buffer full.
 +  if (remaining_subframe_blocks_in_output_buffer_ == 0 && output_rb.empty()) {
      data.output_buffer_valid = 0;
    }
- 
+
 @@ -192,13 +351,16 @@ void XmaContext::ClearLocked(XMA_CONTEXT_DATA* data) {
  void XmaContext::ResetDecoderState() {
    // A freed or re-initialized context is a new logical stream, so the previous
@@ -1211,7 +1211,7 @@ index 11b83be..e2bb4c2 100644
 +      avcodec_free_context(&av_context_);
 +    }
      av_context_ = avcodec_alloc_context3(av_codec_);
- 
+
      av_context_->sample_rate = sample_rate;
 @@ -670,6 +855,35 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
    if (decoded) {
@@ -1246,7 +1246,7 @@ index 11b83be..e2bb4c2 100644
 +                    uint32_t(data->output_buffer_write_offset), uint32_t(data->output_buffer_read_offset));
 +      last = peak;
 +    }
- 
+
      // Realign the decoder's output onto the bitstream's sample numbering: the
      // samples of the frame just decoded run from kDecoderStartPadding into this
 diff --git a/src/codegen/builders/system.cpp b/src/codegen/builders/system.cpp
@@ -1256,7 +1256,7 @@ index b2d70f5..a101ca6 100644
 @@ -30,21 +30,22 @@ bool build_attn(BuilderContext& ctx) {
    return true;
  }
- 
+
 +// The barriers become REX_SYNC / REX_LWSYNC / REX_EIEIO (pch_h.inja): on x86 (strongly
 +// ordered) lwsync and eieio only stop the compiler moving guest loads and stores across them,
 +// but ARM64 reorders stores, so a lock released with "lwsync; stw 0" would publish the unlock
@@ -1267,21 +1267,21 @@ index b2d70f5..a101ca6 100644
 +  ctx.println("\tREX_SYNC();");
    return true;
  }
- 
+
  bool build_lwsync(BuilderContext& ctx) {
 -  // Lightweight memory barrier, x86 has strong ordering so this is a no-op
 -  (void)ctx;
 +  ctx.println("\tREX_LWSYNC();");
    return true;
  }
- 
+
  bool build_eieio(BuilderContext& ctx) {
 -  // Enforce in-order execution of I/O, x86 has strong ordering so this is a no-op
 -  (void)ctx;
 +  ctx.println("\tREX_EIEIO();");
    return true;
  }
- 
+
 diff --git a/src/codegen/builders/vector.cpp b/src/codegen/builders/vector.cpp
 index cbdd7f7..6b9067c 100644
 --- a/src/codegen/builders/vector.cpp
@@ -1289,7 +1289,7 @@ index cbdd7f7..6b9067c 100644
 @@ -113,15 +113,29 @@ bool build_vnmsubfp(BuilderContext& ctx) {
    return true;
  }
- 
+
 +// AltiVec vmaxfp/vminfp return a QNaN when either operand is a NaN; SSE maxps/minps return the
 +// second operand instead, so a clamp like max(min(x, 1), 0) turned NaN into 1.0 (GTA V: audio
 +// gains/filters that are NaN on the console played at full level). Select a NaN (a + b) there.
@@ -1310,14 +1310,14 @@ index cbdd7f7..6b9067c 100644
 +  emit_vec_fp_minmax_nan(ctx, "max");
    return true;
  }
- 
+
  bool build_vminfp(BuilderContext& ctx) {
    ctx.emit_set_flush_mode(true);
 -  ctx.emit_vec_fp_binary("min");
 +  emit_vec_fp_minmax_nan(ctx, "min");
    return true;
  }
- 
+
 @@ -163,9 +177,18 @@ bool build_vexptefp(BuilderContext& ctx) {
    ctx.println("\t\tsimde__m128i exp_bits = simde_mm_slli_epi32(");
    ctx.println("\t\t\tsimde_mm_add_epi32(simde_mm_cvttps_epi32(n), simde_mm_set1_epi32(127)), 23);");
@@ -1347,7 +1347,7 @@ index 1ddafd0..055910f 100644
 @@ -98,7 +98,10 @@ target_include_directories(rexcore PRIVATE
      ${PROJECT_SOURCE_DIR}/thirdparty/cli11/include
  )
- 
+
 -if(APPLE)
 +if(ANDROID)
 +    # Bionic has pthread and rt in libc.
@@ -1369,9 +1369,9 @@ index 8b1c76a..ff8bff1 100644
 +#include <unistd.h>
 +#include <cstdio>
 +#endif
- 
+
  #include <ucontext.h>
- 
+
 @@ -225,6 +230,12 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
          access_violation_operation = (mcontext_esr->esr & (UINT64_C(1) << 6))
                                           ? Exception::AccessViolationOperation::kWrite
@@ -1437,16 +1437,16 @@ index 8b1c76a..ff8bff1 100644
 +      break;
 +  }
  }
- 
+
  void ExceptionHandler::Install(Handler fn, void* data) {
 diff --git a/src/core/fiber_posix.cpp b/src/core/fiber_posix.cpp
 index 4fe1ca6..c5a4199 100644
 --- a/src/core/fiber_posix.cpp
 +++ b/src/core/fiber_posix.cpp
 @@ -27,6 +27,89 @@ namespace rex::thread {
- 
+
  thread_local Fiber* Fiber::tls_current_ = nullptr;
- 
+
 +#if REX_PLATFORM_ANDROID
 +// rex_fiber_switch(&from->sp_, to->sp_): push x19-x30 and d8-d15 (AAPCS64 callee-saved) on the
 +// current stack, store sp, load the target's sp, pop its registers and return into it.
@@ -1538,7 +1538,7 @@ index 4fe1ca6..c5a4199 100644
    swapcontext(&from->context_, &target->context_);
  }
 +#endif  // REX_PLATFORM_ANDROID
- 
+
  void Fiber::Destroy() {
    // Thread fibers are destroyed from the owning thread itself.
 diff --git a/src/core/filesystem_posix.cpp b/src/core/filesystem_posix.cpp
@@ -1547,7 +1547,7 @@ index ef5bdf4..7a6cf2e 100644
 +++ b/src/core/filesystem_posix.cpp
 @@ -303,4 +303,21 @@ std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
  }
- 
+
  }  // namespace filesystem
 +#if REX_PLATFORM_ANDROID
 +namespace filesystem {
@@ -1572,9 +1572,9 @@ index b52bf39..833df74 100644
 --- a/src/core/memory_posix.cpp
 +++ b/src/core/memory_posix.cpp
 @@ -19,9 +19,13 @@
- 
+
  #include <fcntl.h>
- 
+
 +#include <rex/platform.h>
 +
  #if REX_PLATFORM_MAC
@@ -1584,23 +1584,23 @@ index b52bf39..833df74 100644
 +#endif
  #include <mach/vm_region.h>
  #endif  // REX_PLATFORM_MAC
- 
+
 @@ -51,10 +55,7 @@
  #include <dlfcn.h>
  #include <sys/ioctl.h>
- 
+
 -#include <linux/ashmem.h>
 -
 -// TODO(tomc): Android or maybe na. idk
 -// #include "xenia/base/main_android.h"
 +#include <sys/mman.h>
  #endif
- 
+
  namespace rex {
 @@ -84,32 +85,6 @@ static std::string MakeShmName(const std::filesystem::path& path) {
    return name;
  }
- 
+
 -#if REX_PLATFORM_ANDROID
 -// May be null if no dynamically loaded functions are required.
 -static void* libandroid_;
@@ -1627,11 +1627,11 @@ index b52bf39..833df74 100644
 -  }
 -}
 -#endif
- 
+
  size_t page_size() {
    return getpagesize();
 @@ -278,9 +253,11 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
- 
+
    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
  #if REX_PLATFORM_MAC
 +#if !REX_PLATFORM_IOS  // iOS refuses MAP_JIT without the JIT entitlement; nothing here executes.
@@ -1645,7 +1645,7 @@ index b52bf39..833df74 100644
 @@ -381,9 +358,20 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
    mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
    mach_port_t object_name;
- 
+
 +#if REX_PLATFORM_IOS
 +  // mach_vm.h is unsupported in the iOS SDK; vm_region_64 is the same call with vm_* types.
 +  vm_address_t vm_address = static_cast<vm_address_t>(address);
@@ -1732,7 +1732,7 @@ index b52bf39..833df74 100644
    return static_cast<FileMappingHandle>(ret);
  #endif
  }
- 
+
  void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path) {
    close(static_cast<int>(handle));
 -#if !REX_PLATFORM_ANDROID
@@ -1745,7 +1745,7 @@ index 5e0a932..cd75b74 100644
 --- a/src/core/seh_posix.cpp
 +++ b/src/core/seh_posix.cpp
 @@ -13,12 +13,71 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
- 
+
  #include <signal.h>
  #include <cstdlib>  // std::abort()
 +#if defined(__ANDROID__)
@@ -1754,11 +1754,11 @@ index 5e0a932..cd75b74 100644
 +#include <unistd.h>
 +#include <cstdio>
 +#endif
- 
+
  #include <rex/platform/exceptions.h>
- 
+
  namespace rex::platform {
- 
+
  static thread_local SehThreadState tls_seh_state;
 +
 +// Handlers installed before seh_initialize (the runtime's guest-memory exception handler, ART's
@@ -1814,11 +1814,11 @@ index 5e0a932..cd75b74 100644
 +  raise(sig);
 +}
  static thread_local bool tls_seh_active = false;
- 
+
  SehThreadState& seh_thread_state() {
 @@ -31,12 +90,13 @@ int seh_filter(uint32_t /*code*/, void* /*ep*/) {
  }
- 
+
  /// Signal handler for SIGSEGV/SIGBUS/SIGFPE/SIGILL
 -static void signal_handler(int sig, siginfo_t* info, void* /*ucontext*/) {
 +static void signal_handler(int sig, siginfo_t* info, void* ucontext) {
@@ -1833,11 +1833,11 @@ index 5e0a932..cd75b74 100644
 +    ChainToPrevious(sig, info, ucontext);
      return;
    }
- 
+
 @@ -110,10 +170,10 @@ void seh_initialize() {
    sigemptyset(&sa.sa_mask);
    sa.sa_flags = SA_SIGINFO | SA_NODEFER;  // SA_NODEFER allows re-entry for nested exceptions
- 
+
 -  sigaction(SIGSEGV, &sa, nullptr);
 -  sigaction(SIGBUS, &sa, nullptr);
 -  sigaction(SIGFPE, &sa, nullptr);
@@ -1847,7 +1847,7 @@ index 5e0a932..cd75b74 100644
 +  sigaction(SIGFPE, &sa, &g_previous[SIGFPE]);
 +  sigaction(SIGILL, &sa, &g_previous[SIGILL]);
  }
- 
+
  bool& seh_active() {
 diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
 index 9ac8d15..4f692bc 100644
@@ -1855,20 +1855,20 @@ index 9ac8d15..4f692bc 100644
 +++ b/src/core/threading_posix.cpp
 @@ -41,15 +41,18 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
  #include <rex/thread/timer_queue.h>
- 
+
  #include <sched.h>
 +#if defined(__APPLE__)
 +#include <pthread/qos.h>
 +#endif
 +#include <string>
- 
+
  #if REX_PLATFORM_ANDROID
 -#include <dlfcn.h>
 -
 -#include <rex/main_android.h>
  #include <rex/string.h>
  #endif
- 
+
  #if REX_PLATFORM_LINUX
 +#include <linux/futex.h>
 +#include <sys/syscall.h>
@@ -1877,7 +1877,7 @@ index 9ac8d15..4f692bc 100644
  #ifdef __GLIBC__
 @@ -65,30 +68,14 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
  namespace rex::thread {
- 
+
  #if REX_PLATFORM_ANDROID
 -// May be null if no dynamically loaded functions are required.
 -static void* android_libc_;
@@ -1887,7 +1887,7 @@ index 9ac8d15..4f692bc 100644
 +// fallback below is never taken.
 +static int (*android_pthread_getname_np_)(pthread_t pthread, char* buf,
 +                                          size_t n) = pthread_getname_np;
- 
+
 -void AndroidInitialize() {
 -  if (rex::GetAndroidApiLevel() >= 26) {
 -    android_libc_ = dlopen("libc.so", RTLD_NOW);
@@ -1900,7 +1900,7 @@ index 9ac8d15..4f692bc 100644
 -  }
 -}
 +void AndroidInitialize() {}
- 
+
 -void AndroidShutdown() {
 -  android_pthread_getname_np_ = nullptr;
 -  if (android_libc_) {
@@ -1910,12 +1910,12 @@ index 9ac8d15..4f692bc 100644
 -}
 +void AndroidShutdown() {}
  #endif
- 
+
  template <typename _Rep, typename _Period>
 @@ -267,10 +254,35 @@ static sem_t* RexCreateAnonymousSemaphore() {
  }
  #endif  // __APPLE__
- 
+
 +// Waits on several handles had no way to sleep until one of them changes, so they polled with
 +// 1 ms sleeps: a guest thread waiting for any of a few events woke up to ~1 ms late, every time
 +// (GTA V's game threads do this every frame). Every signal now bumps this word and wakes the
@@ -1961,7 +1961,7 @@ index 9ac8d15..4f692bc 100644
 @@ -330,12 +342,28 @@ class PosixConditionBase {
        return std::make_pair(result, 0);
      }
- 
+
 +#if REX_PLATFORM_LINUX
 +    // Registered before the handles are checked: a signal from then on bumps the epoch.
 +    struct Registration {
@@ -1978,7 +1978,7 @@ index 9ac8d15..4f692bc 100644
      auto end_time = (timeout == std::chrono::milliseconds::max())
                          ? std::chrono::steady_clock::time_point::max()
                          : start_time + timeout;
- 
+
      while (true) {
 +#if REX_PLATFORM_LINUX
 +      // Read before the handles are checked: a signal after the check changes it.
@@ -1989,7 +1989,7 @@ index 9ac8d15..4f692bc 100644
        bool all_locked = true;
 @@ -344,7 +372,7 @@ class PosixConditionBase {
        locks.reserve(handles.size());
- 
+
        for (size_t i = 0; i < handles.size(); ++i) {
 -#if REX_PLATFORM_LINUX
 +#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID  // Bionic: no robust mutexes
@@ -1999,7 +1999,7 @@ index 9ac8d15..4f692bc 100644
 @@ -411,6 +439,19 @@ class PosixConditionBase {
          return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
        }
- 
+
 +#if REX_PLATFORM_LINUX
 +      {
 +        auto remaining = end_time - now;
@@ -2023,7 +2023,7 @@ index 9ac8d15..4f692bc 100644
 +#endif
      }
    }
- 
+
 @@ -450,6 +492,7 @@ class PosixCondition<Event> : public PosixConditionBase {
      auto lock = std::unique_lock<std::mutex>(mutex_);
      signal_ = true;
@@ -2031,7 +2031,7 @@ index 9ac8d15..4f692bc 100644
 +    NotifyMultiWaiters();
      return true;
    }
- 
+
 @@ -487,6 +530,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
      }
      count_ += release_count;
@@ -2039,7 +2039,7 @@ index 9ac8d15..4f692bc 100644
 +    NotifyMultiWaiters();
      return true;
    }
- 
+
 @@ -519,6 +563,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
        // Free to be acquired by another thread
        if (count_ == 0) {
@@ -2055,7 +2055,7 @@ index 9ac8d15..4f692bc 100644
 +    NotifyMultiWaiters();
      return true;
    }
- 
+
 @@ -979,6 +1025,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
        exit_code_ = exit_code;
        signaled_ = true;
@@ -2092,7 +2092,7 @@ index 9ac8d15..4f692bc 100644
 +    }
 +  }
 +#endif
- 
+
    auto start_data = static_cast<ThreadStartData*>(parameter);
    assert_not_null(start_data);
 @@ -1449,6 +1520,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
@@ -2101,7 +2101,7 @@ index 9ac8d15..4f692bc 100644
      thread->handle_.cond_.notify_all();
 +    thread->handle_.NotifyMultiWaiters();
    }
- 
+
    current_thread_ = nullptr;
 diff --git a/src/core/timer_queue.cpp b/src/core/timer_queue.cpp
 index 5cfea05..6ca9d62 100644
@@ -2113,7 +2113,7 @@ index 5cfea05..6ca9d62 100644
  #include <disruptorplus/sequence_barrier.hpp>
 -#include <disruptorplus/spin_wait_strategy.hpp>
 +#include <disruptorplus/blocking_wait_strategy.hpp>
- 
+
  #include <rex/assert.h>
  #include <rex/thread.h>
 @@ -69,7 +69,8 @@ class TimerQueue {
@@ -2123,7 +2123,7 @@ index 5cfea05..6ca9d62 100644
 -            wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_);
 +            // (not time_point::max(): a condition variable's timed wait can overflow on it)
 +            wait_queue_.empty() ? clock::now() + std::chrono::seconds(1) : wait_queue_.front()->due_);
- 
+
          // Check for timeout
          if (available != next_sequence - 1) {
 @@ -142,9 +143,11 @@ class TimerQueue {
@@ -2138,7 +2138,7 @@ index 5cfea05..6ca9d62 100644
 +  dp::blocking_wait_strategy wait_strategy_;
 +  dp::multi_threaded_claim_strategy<dp::blocking_wait_strategy> claim_strategy_;
 +  dp::sequence_barrier<dp::blocking_wait_strategy> consumed_;
- 
+
    // This is a _sorted_ (ascending due_) list of active timers managed by a
    // dedicated thread
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
@@ -2147,7 +2147,7 @@ index a744375..7b670a6 100644
 +++ b/src/graphics/command_processor.cpp
 @@ -10,11 +10,21 @@
   */
- 
+
  #include <algorithm>
 +#include <chrono>
  #include <cinttypes>
@@ -2157,7 +2157,7 @@ index a744375..7b670a6 100644
  #include <cmath>
  #include <cstring>
  #include <string_view>
- 
+
 +#ifdef _WIN32
 +#include <windows.h>
 +#else
@@ -2165,12 +2165,12 @@ index a744375..7b670a6 100644
 +#endif
 +
  #include <fmt/format.h>
- 
+
  #include <rex/cvar.h>
 @@ -80,6 +90,64 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
                      "pipelines are being prepared.")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
- 
+
 +// gtav native renderer: when the title executable exports rex_skip_rendering_fence, it is called
 +// before every EVENT_WRITE_SHD (the GPU fence writes the game waits on before reusing memory) and
 +// returns the value to write: the title's renderer may hold a fence back (the real GPU runs well
@@ -2230,12 +2230,12 @@ index a744375..7b670a6 100644
 +static std::deque<std::pair<uint32_t, std::chrono::steady_clock::time_point>> g_kicks;
 +
  namespace rex::graphics {
- 
+
  using namespace rex::graphics::xenos;
 @@ -101,6 +169,17 @@ ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {
- 
+
  }  // namespace
- 
+
 +// The running command processor's write-pointer event: rex_skip_rendering_wake (called by a
 +// title-side renderer when a game thread starts waiting on the GPU) cuts its idle sleep short.
 +static std::atomic<rex::thread::Event*> g_wake_event{nullptr};
@@ -2256,19 +2256,19 @@ index a744375..7b670a6 100644
    assert_not_null(write_ptr_index_event_);
 +  g_wake_event.store(write_ptr_index_event_.get(), std::memory_order_release);
  }
- 
+
 -CommandProcessor::~CommandProcessor() = default;
 +CommandProcessor::~CommandProcessor() {
 +  rex::thread::Event* expected = write_ptr_index_event_.get();
 +  g_wake_event.compare_exchange_strong(expected, nullptr);
 +}
- 
+
  bool CommandProcessor::Initialize() {
    // Initialize the gamma ramps to their default (linear) values - taken from
 @@ -210,7 +293,25 @@ void CommandProcessor::WorkerThreadMain() {
        fn();
      }
- 
+
 -    uint32_t write_ptr_index = write_ptr_index_.load();
 +    // --gpu_skip_rendering_lag_ms: the newest write pointer that is old enough.
 +    auto lagged_write_ptr = [this]() -> uint32_t {
@@ -2314,7 +2314,7 @@ index a744375..7b670a6 100644
            rex::thread::Wait(write_ptr_index_event_.get(), true,
                              std::chrono::milliseconds(wait_time_ms));
          }
- 
+
          rex::thread::MaybeYield();
          loop_count++;
 -        write_ptr_index = write_ptr_index_.load();
@@ -2323,7 +2323,7 @@ index a744375..7b670a6 100644
                 (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
        ReturnFromWait();
 @@ -313,6 +423,11 @@ void CommandProcessor::ShutdownContext() {}
- 
+
  void CommandProcessor::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {
    read_ptr_index_ = 0;
 +  lagged_ptr_ = 0;
@@ -2336,7 +2336,7 @@ index a744375..7b670a6 100644
  }
 @@ -328,6 +443,10 @@ void CommandProcessor::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_s
  }
- 
+
  void CommandProcessor::UpdateWritePointer(uint32_t value) {
 +  if (REXCVAR_GET(gpu_skip_rendering_lag_ms) > 0) {
 +    std::lock_guard lock(g_kick_mutex);
@@ -2346,7 +2346,7 @@ index a744375..7b670a6 100644
    write_ptr_index_event_->Set();
  }
 @@ -355,7 +474,15 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
- 
+
    // Volatile for the WAIT_REG_MEM loop.
    const_cast<volatile uint32_t&>(regs.values[index]) = value;
 -  if (!regs.GetRegisterInfo(index)) {
@@ -2361,9 +2361,9 @@ index a744375..7b670a6 100644
 +  if (!known_registers[index]) {
      REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
    }
- 
+
 @@ -702,6 +829,12 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
- 
+
    uint32_t base_index = (packet & 0x7FFF);
    uint32_t write_one_reg = (packet >> 15) & 0x1;
 +  if (!write_one_reg) {
@@ -2387,7 +2387,7 @@ index a744375..7b670a6 100644
 @@ -1524,6 +1659,9 @@ bool CommandProcessor::ExecutePacketType3_IM_LOAD(memory::RingBuffer* reader, ui
    uint32_t size_dwords = start_size & 0xFFFF;  // dwords
    assert_true(start == 0);
- 
+
 +  // --gpu_skip_rendering: nothing draws with the shader (a title-side renderer does), and
 +  // hashing + looking up every loaded shader was ~7% of the command processor.
 +  if (REXCVAR_GET(gpu_skip_rendering)) return true;
@@ -2430,11 +2430,11 @@ index 19874a5..1c2dada 100644
 +#include <filesystem>
  #include <sstream>
  #include <utility>
- 
+
 @@ -32,6 +33,19 @@
  #include <rex/ui/d3d12/d3d12_presenter.h>
  #include <rex/ui/d3d12/d3d12_util.h>
- 
+
 +// A title-side renderer draws the frames: the command processor still executes the PM4 stream
 +// (registers, fences, interrupts, swaps) but issues no host draws, resolves or presents, and
 +// occlusion queries take the base class's fake-sample path. (Same flag as the Vulkan backend;
@@ -2450,11 +2450,11 @@ index 19874a5..1c2dada 100644
 +                    "Execute PM4 without rendering (a title-side renderer draws the frames)");
  REXCVAR_DEFINE_BOOL(d3d12_bindless, true, "GPU/D3D12", "Use bindless resources where available")
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
- 
+
 @@ -47,6 +61,18 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
                      "Submit command list when PM4 primary buffer ends")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
- 
+
 +// gtav native renderer: with gpu_skip_rendering the title's renderer replays frames some time
 +// after this command processor executed them, yet fences written after a swap tell the game the
 +// GPU is done with that frame's memory (it then streams new textures and vertex data into it).
@@ -2468,10 +2468,10 @@ index 19874a5..1c2dada 100644
 +}
 +
  namespace rex::graphics::d3d12 {
- 
+
  // Generated with `xb buildshaders`.
 @@ -152,7 +178,8 @@ void D3D12CommandProcessor::InitializeShaderStorage(const std::filesystem::path&
- 
+
  bool D3D12CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
                                                                 uint32_t packet, uint32_t count) {
 -  if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_) {
@@ -2479,11 +2479,11 @@ index 19874a5..1c2dada 100644
 +      REXCVAR_GET(gpu_skip_rendering)) {
      return CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(reader, packet, count);
    }
- 
+
 @@ -1897,7 +1924,13 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
- 
+
 -  if (!graphics_system_)
 +  if (REXCVAR_GET(gpu_skip_rendering)) {
 +    static uint64_t skip_swaps = 0;
@@ -2498,18 +2498,18 @@ index 19874a5..1c2dada 100644
 @@ -2275,6 +2308,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
- 
+
 +  if (REXCVAR_GET(gpu_skip_rendering)) {
 +    return true;
 +  }
 +  DumpDrawConstantsForComparison(uint32_t(primitive_type), index_count);
    ID3D12Device* device = GetD3D12Provider().GetDevice();
    const RegisterFile& regs = *register_file_;
- 
+
 @@ -2870,10 +2907,72 @@ bool D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_s
    return true;
  }
- 
+
 +bool D3D12CommandProcessor::EmuDumpActive() {
 +  int32_t frame = REXCVAR_GET(emu_resolve_dump_frame);
 +  if (frame < 0) {
@@ -2586,14 +2586,14 @@ index 19874a5..1c2dada 100644
 +      DumpResolveForComparison(written_address, written_length, destination);
      }
    }
- 
+
 diff --git a/src/graphics/pipeline/shader/shader.cpp b/src/graphics/pipeline/shader/shader.cpp
 index a53a222..087fada 100644
 --- a/src/graphics/pipeline/shader/shader.cpp
 +++ b/src/graphics/pipeline/shader/shader.cpp
 @@ -159,3 +159,43 @@ Shader::Translation* Shader::CreateTranslationInstance(uint64_t modification) {
  }
- 
+
  }  // namespace rex::graphics
 +
 +// Title-side renderers (gpu_skip_rendering) upload a shader's float constants themselves: how many
@@ -2641,7 +2641,7 @@ index 001f36b..0a6a909 100644
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -10,6 +10,7 @@
   */
- 
+
  #include <algorithm>
 +#include <filesystem>
  #include <array>
@@ -2650,7 +2650,7 @@ index 001f36b..0a6a909 100644
 @@ -21,6 +22,10 @@
  #include <utility>
  #include <vector>
- 
+
 +#ifndef _WIN32
 +#include <dlfcn.h>
 +#endif
@@ -2660,7 +2660,7 @@ index 001f36b..0a6a909 100644
  #include <rex/assert.h>
 @@ -47,6 +52,30 @@
  #include <rex/ui/vulkan/util.h>
- 
+
  // Legacy backend compatibility aliases for shared readback controls.
 +REXCVAR_DEFINE_INT32(emu_resolve_dump_frame, 0, "GPU/Vulkan",
 +                     "Write every resolve of this frame to logs/emu_dump (needs readback_resolve=full)");
@@ -2703,7 +2703,7 @@ index 001f36b..0a6a909 100644
 @@ -2275,7 +2308,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
- 
+
 -  if (!graphics_system_)
 +  if (REXCVAR_GET(gpu_skip_rendering)) {
 +    static uint64_t skip_swaps = 0;
@@ -2718,7 +2718,7 @@ index 001f36b..0a6a909 100644
 @@ -3594,8 +3633,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
- 
+
 +  if (REXCVAR_GET(gpu_skip_rendering)) {
 +    return true;
 +  }
@@ -2735,13 +2735,13 @@ index 001f36b..0a6a909 100644
 +  if (REXCVAR_GET(gpu_skip_rendering)) {
 +    return true;
 +  }
- 
+
    if (!BeginSubmission(true)) {
      return false;
 @@ -4400,6 +4446,64 @@ bool VulkanCommandProcessor::IssueCopy() {
    return IssueCopy_ReadbackResolvePath();
  }
- 
+
 +// emu_resolve_dump_frame: N = dump frames N..N+window-1; -1 (set by the game on F9) = from the next
 +// frame on (same as the D3D12 backend).
 +bool VulkanCommandProcessor::EmuDumpActive() {
@@ -2810,7 +2810,7 @@ index 001f36b..0a6a909 100644
 +      DumpResolveForComparison(written_address, written_length, destination);
      }
    }
- 
+
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
 index 0298f06..b3355e9 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
@@ -2837,7 +2837,7 @@ index 6788214..dbe172a 100644
 @@ -23,6 +23,9 @@
  #include <rex/math.h>
  #include <rex/ui/vulkan/util.h>
- 
+
 +REXCVAR_DECLARE(bool, gpu_skip_rendering);
 +REXCVAR_DEFINE_BOOL(vulkan_skip_rendering_small_shared_memory, true, "GPU/Vulkan",
 +                    "With gpu_skip_rendering, a 1 MB shared memory buffer instead of 512 MB");
@@ -3492,10 +3492,10 @@ index 3f9422d..d0f5a9a 100644
    if (attached_window_) {
      ReleaseMouseCaptureFromUIThread(attached_window_);
 diff --git a/src/input/sdl/sdl_input_driver.cpp b/src/input/sdl/sdl_input_driver.cpp
-index c7c440d..a218297 100644
+index c7c440d..6513616 100644
 --- a/src/input/sdl/sdl_input_driver.cpp
 +++ b/src/input/sdl/sdl_input_driver.cpp
-@@ -12,6 +12,8 @@
+@@ -12,14 +12,19 @@
  #include <array>
  #include <filesystem>
 
@@ -3504,7 +3504,9 @@ index c7c440d..a218297 100644
  #include <rex/assert.h>
  #include <rex/chrono/clock.h>
  #include <rex/cvar.h>
-@@ -20,6 +22,8 @@
++#include <rex/filesystem.h>
+ #include <rex/input/flags.h>
+ #include <rex/input/sdl/sdl_input_driver.h>
  #include <rex/logging.h>
  #include <rex/ui/virtual_key.h>
 
@@ -3513,7 +3515,7 @@ index c7c440d..a218297 100644
  REXCVAR_DEFINE_STRING(hid_mappings_file, "gamecontrollerdb.txt", "Input",
                        "Path to SDL gamecontroller mappings file");
 
-@@ -30,8 +34,14 @@ namespace {
+@@ -30,8 +35,14 @@ namespace {
  // SDL clamps to SDL_MAX_RUMBLE_DURATION_MS, which is not a public constant.
  constexpr uint32_t kRumbleDurationMs = 0xFFFF;
 
@@ -3528,7 +3530,7 @@ index c7c440d..a218297 100644
  SDLInputDriver::SDLInputDriver(rex::ui::Window* window, size_t window_z_order)
      : InputDriver(window, window_z_order),
        sdl_events_initialized_(false),
-@@ -41,7 +51,9 @@ SDLInputDriver::SDLInputDriver(rex::ui::Window* window, size_t window_z_order)
+@@ -41,7 +52,9 @@ SDLInputDriver::SDLInputDriver(rex::ui::Window* window, size_t window_z_order)
        controllers_(),
        controllers_mutex_() {}
 
@@ -3539,7 +3541,7 @@ index c7c440d..a218297 100644
 
  X_STATUS SDLInputDriver::Setup() {
    if (!TestSDLVersion()) {
-@@ -52,7 +64,9 @@ X_STATUS SDLInputDriver::Setup() {
+@@ -52,7 +65,9 @@ X_STATUS SDLInputDriver::Setup() {
  }
 
  void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
@@ -3550,7 +3552,7 @@ index c7c440d..a218297 100644
      attached_window_ = window;
      window->AddListener(this);
      window->app_context().CallInUIThreadSynchronous([this]() {
-@@ -66,27 +80,13 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
+@@ -66,27 +81,13 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
 
        // With an event watch we will always get notified, even if the event queue
        // is full, which can happen if another subsystem does not clear its events.
@@ -3585,7 +3587,7 @@ index c7c440d..a218297 100644
 
        // Initialize game controller subsystem
        if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
-@@ -96,17 +96,18 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
+@@ -96,17 +97,18 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
        SDL_Gamepad_initialized_ = true;
 
        // Load custom controller mappings if available
@@ -3594,7 +3596,7 @@ index c7c440d..a218297 100644
 -        if (!std::filesystem::exists(mappings_path)) {
 +      const auto& mappings_file = REXCVAR_GET(hid_mappings_file);
 +      if (!mappings_file.empty()) {
-+        const std::filesystem::path mappings_path(std::u8string(mappings_file.begin(), mappings_file.end()));
++        const auto mappings_path = rex::to_path(mappings_file);
 +        std::error_code ec;
 +        if (!std::filesystem::is_regular_file(mappings_path, ec)) {
            REXLOG_WARN("SDL GameControllerDB: file '{}' does not exist.",
@@ -3611,7 +3613,7 @@ index c7c440d..a218297 100644
            } else {
              REXLOG_INFO("SDL GameControllerDB: loaded {} mappings.", mappings_result);
            }
-@@ -118,12 +119,20 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
+@@ -118,12 +120,20 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
  }
 
  void SDLInputDriver::OnClosing(rex::ui::UIEvent&) {
@@ -3636,7 +3638,7 @@ index c7c440d..a218297 100644
      for (auto& controller : controllers_) {
        SDL_CloseGamepad(controller.sdl);
      }
-@@ -136,8 +145,7 @@ void SDLInputDriver::OnClosing(rex::ui::UIEvent&) {
+@@ -136,8 +146,7 @@ void SDLInputDriver::OnClosing(rex::ui::UIEvent&) {
        SDL_QuitSubSystem(SDL_INIT_EVENTS);
        sdl_events_initialized_ = false;
      }
@@ -3646,7 +3648,7 @@ index c7c440d..a218297 100644
  }
 
  void SDLInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {}
-@@ -150,6 +158,10 @@ void SDLInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
+@@ -150,6 +159,10 @@ void SDLInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
      return;
    }
 
@@ -3657,7 +3659,7 @@ index c7c440d..a218297 100644
    auto guard = DrainAndLock();
 
    for (const auto& controller : controllers_) {
-@@ -323,6 +335,9 @@ X_RESULT SDLInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+@@ -323,6 +336,9 @@ X_RESULT SDLInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
    // Handle repeating
    auto guest_now = rex::chrono::Clock::QueryGuestUptimeMillis();
    static_assert(HID_SDL_REPEAT_DELAY >= HID_SDL_REPEAT_RATE);
@@ -3667,7 +3669,7 @@ index c7c440d..a218297 100644
    if (last.repeat_state == RepeatState::Waiting &&
        (last.repeat_time + HID_SDL_REPEAT_DELAY < guest_now)) {
      last.repeat_state = RepeatState::Repeating;
-@@ -387,6 +402,27 @@ X_RESULT SDLInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+@@ -387,6 +403,27 @@ X_RESULT SDLInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
    return X_ERROR_EMPTY;
  }
 
@@ -3695,7 +3697,7 @@ index c7c440d..a218297 100644
  void SDLInputDriver::HandleEvent(const SDL_Event& event) {
    // This callback will likely run on the thread that posts the event, which
    // may be a dedicated thread SDL has created for the joystick subsystem.
-@@ -441,9 +477,13 @@ void SDLInputDriver::ProcessEventLocked(const SDL_Event& event) {
+@@ -441,9 +478,13 @@ void SDLInputDriver::ProcessEventLocked(const SDL_Event& event) {
  }
 
  void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
@@ -3710,7 +3712,7 @@ index c7c440d..a218297 100644
      return;
    }
    REXLOG_INFO(
-@@ -560,7 +600,7 @@ void SDLInputDriver::OnControllerDeviceButtonChangedLocked(const SDL_Event& even
+@@ -560,7 +601,7 @@ void SDLInputDriver::OnControllerDeviceButtonChangedLocked(const SDL_Event& even
    static_assert(SDL_GAMEPAD_BUTTON_SOUTH == 0);
    static_assert(SDL_GAMEPAD_BUTTON_DPAD_RIGHT == 14);
 
@@ -3719,7 +3721,7 @@ index c7c440d..a218297 100644
    if (!idx) {
      // The pad can be removed between the event being posted and drained.
      return;
-@@ -669,14 +709,26 @@ void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
+@@ -669,14 +710,26 @@ void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
  }
 
  void SDLInputDriver::QueueControllerUpdate() {
@@ -3811,13 +3813,13 @@ index 1fda053..fe2e5e3 100644
  #include <rex/system/xthread.h>
  #include <rex/system/xtypes.h>
 +#include <rex/kernel/xboxkrnl/threading.h>
- 
+
  #if REX_PLATFORM_WIN32
  #include <windows.h>
 @@ -322,10 +323,15 @@ u32 XamLoaderGetDvdTrayState_entry(mapped_u32 out_state) {
    return X_STATUS_SUCCESS;
  }
- 
+
 -u32 XamSwapDisc_entry(u32 disc_number) {
 -  // Stub for multi-disc games. Single-disc games (like Blue Dragon's reblue test)
 -  // don't need this, but the game may look it up dynamically via XexGetProcedureAddress.
@@ -3833,7 +3835,7 @@ index 1fda053..fe2e5e3 100644
 +  }
    return X_STATUS_SUCCESS;
  }
- 
+
 diff --git a/src/system/gpu_plugin_loader.cpp b/src/system/gpu_plugin_loader.cpp
 index 754fa13..b1006d6 100644
 --- a/src/system/gpu_plugin_loader.cpp
@@ -3841,16 +3843,16 @@ index 754fa13..b1006d6 100644
 @@ -22,6 +22,10 @@
  #include <rex/platform.h>
  #include <rex/platform/dynlib.h>
- 
+
 +#if REX_PLATFORM_ANDROID
 +#include <dlfcn.h>
 +#endif
 +
  namespace rex::system {
- 
+
  namespace {
 @@ -56,6 +60,15 @@ std::vector<platform::DynamicLibrary>& LoadedPlugins() {
- 
+
  std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::string_view backend) {
    auto path = rex::filesystem::GetExecutableFolder() / PluginFileName(name);
 +#if REX_PLATFORM_ANDROID
@@ -3871,7 +3873,7 @@ index bd6c797..57d3f44 100644
 +++ b/src/system/xam/content_manager.cpp
 @@ -156,8 +156,10 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device
      }
- 
+
      XCONTENT_AGGREGATE_DATA content_data;
 -    if (XSUCCEEDED(ReadContentHeaderFile(rex::path_to_utf8(file_info.name), xuid, title_id,
 -                                         content_type, content_data))) {
@@ -3888,13 +3890,13 @@ index c24fbd1..0663781 100644
 +++ b/src/system/xevent.cpp
 @@ -74,11 +74,13 @@ void XEvent::Query(uint32_t* out_type, uint32_t* out_state) {
  }
- 
+
  int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
 +  TraceHandleOp("set");
    event_->Set();
    return 1;
  }
- 
+
  int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
 +  TraceHandleOp("pulse");
    event_->Pulse();
@@ -3907,12 +3909,12 @@ index 76cc877..ff4ba63 100644
 @@ -13,7 +13,7 @@
  #include <cstring>
  #include <utility>
- 
+
 -#if REX_PLATFORM_MAC
 +#if REX_PLATFORM_MAC || REX_PLATFORM_ANDROID
  #include <sys/mman.h>
  #endif
- 
+
 @@ -363,6 +363,27 @@ int Memory::MapViews(uint8_t* mapping_base) {
    // 0xE0000000 4 KB offset is emulated via host_address_offset and on the CPU
    // side if system allocation granularity is bigger than 4 KB.
@@ -3947,7 +3949,7 @@ index d358f39..145de50 100644
 +++ b/src/system/xobject.cpp
 @@ -10,8 +10,15 @@
   */
- 
+
  #include <vector>
 +#include <rex/cvar.h>
 +#include <atomic>
@@ -3955,7 +3957,7 @@ index d358f39..145de50 100644
 +#ifdef _WIN32
 +#include <windows.h>
 +#endif
- 
+
  #include <rex/chrono/clock.h>
 +#include <rex/memory/utils.h>
  #include <rex/stream.h>
@@ -3964,7 +3966,7 @@ index d358f39..145de50 100644
 @@ -200,6 +207,61 @@ uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
    }
  }
- 
+
 +REXCVAR_DEFINE_STRING(trace_handles, "", "Kernel",
 +                      "Log waits/signals on a guest handle range, e.g. F8000910-F8000924 (debugging)");
 +
@@ -4026,7 +4028,7 @@ index d358f39..145de50 100644
 @@ -212,8 +274,19 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
                                        TimeoutTicksToMs(*opt_timeout)))
                                  : std::chrono::milliseconds::max();
- 
+
 +  TraceHandleOp(opt_timeout ? "wait(timed)" : "wait");
    XThread::CheckTitleTermination();
 -  auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
@@ -4058,7 +4060,7 @@ index db830e4..f053f2a 100644
 +++ b/src/system/xsemaphore.cpp
 @@ -39,6 +39,7 @@ bool XSemaphore::InitializeNative(void* native_ptr, X_DISPATCH_HEADER* header) {
  }
- 
+
  bool XSemaphore::ReleaseSemaphore(int32_t release_count, int32_t* out_previous_count) {
 +  TraceHandleOp("release");
    int32_t previous_count = 0;
@@ -4081,7 +4083,7 @@ index 5bd3dc5..adff0de 100644
          surface_mac.cpp
 @@ -146,7 +150,9 @@ if(REXGLUE_USE_VULKAN)
  endif()
- 
+
  # Platform-specific dependencies
 -if(UNIX AND NOT APPLE)
 +if(ANDROID)
@@ -4180,7 +4182,7 @@ index 914b311..0c76c51 100644
 +++ b/src/ui/vulkan/vulkan_instance.cpp
 @@ -16,6 +16,7 @@
  #include <vector>
- 
+
  #include <rex/cvar.h>
 +#include <rex/filesystem.h>
  #include <rex/logging.h>
@@ -4188,7 +4190,7 @@ index 914b311..0c76c51 100644
  #include <rex/ui/vulkan/instance.h>
 @@ -50,6 +51,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
    ConfigureMacOSVulkanEnvironment(macos_runtime_paths);
- 
+
    std::vector<std::filesystem::path> loader_candidates = macos_runtime_paths.loader_candidates;
 +#if REX_PLATFORM_IOS
 +  // No loader on iOS: the app bundle carries MoltenVK itself (signed with the app).
@@ -4251,12 +4253,12 @@ index dc0b4c2..0742758 100644
 @@ -9,6 +9,9 @@
   *              See LICENSE file in the project root for full license text.
   */
- 
+
 +#include <map>
 +#include <string>
 +#include <fmt/format.h>
  #include <rex/ui/windowed_app_context_sdl.h>
- 
+
  #include <cstdlib>
 @@ -41,7 +44,11 @@ bool SDLWindowedAppContext::Initialize() {
    // Picked before SDL_InitSubSystem, long before a graphics instance can say
@@ -4300,7 +4302,7 @@ index 77bb1dc..4b57917 100644
 @@ -22,6 +22,11 @@
  #include <rex/ui/windowed_app.h>
  #include <rex/ui/windowed_app_context_sdl.h>
- 
+
 +#if REX_PLATFORM_ANDROID
 +// Renames main to SDL_main, which SDLActivity looks up in libmain.so and calls on its thread.
 +#include <SDL3/SDL_main.h>
@@ -4312,7 +4314,7 @@ index 77bb1dc..4b57917 100644
 @@ -124,6 +129,80 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hinstance_prev, LPWSTR comman
    return RunWindowedApp(static_cast<int>(argv_ptrs.size()), argv_ptrs.data());
  }
- 
+
 +#elif REX_PLATFORM_IOS
 +
 +// iOS: UIKit must own the main thread, so main() hands over to SDL_RunApp (UIApplicationMain),
@@ -4388,7 +4390,7 @@ index 77bb1dc..4b57917 100644
 +}
 +
  #else
- 
+
  int main(int argc, char* argv[]) {
 diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
 index f102b56..757811a 100644

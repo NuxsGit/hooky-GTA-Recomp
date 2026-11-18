@@ -11,7 +11,10 @@ on:
     branches: ['arena/**']
     paths:
       - '.github/workflows/windows-candidate.yml'
-      - 'tools/release/build_windows_candidate.py'
+      - 'tools/release/**'
+      - 'rexglue-sdk-gtav-linux.patch'
+      - 'xenosrecomp-gtav.patch'
+      - 'plume-gtav.patch'
 
 permissions:
   contents: read
@@ -38,7 +41,8 @@ jobs:
           if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $hash) { throw 'LLVM installer hash mismatch' }
           & 'C:\Program Files\7-Zip\7z.exe' x '-y' "-o$base\llvm" $installer
           if ($LASTEXITCODE -ne 0) { throw 'LLVM extraction failed' }
-          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/microsoft/DirectXShaderCompiler/b106a961d09221b3c5bdb37be45b679257da08b8/LICENSE.TXT' -OutFile "$base\dxc-LICENSE.TXT"
+          # The dxc-bin x64 PE version resource is 1.8.2407.7 (416fab6b5).
+          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/microsoft/DirectXShaderCompiler/416fab6b5c4ba956a320d9131102304da995edfc/LICENSE.TXT' -OutFile "$base\dxc-LICENSE.TXT"
           python -m pip install 'cmake==3.31.10'
           if ($LASTEXITCODE -ne 0) { throw 'CMake installation failed' }
           (python -c 'import sysconfig; print(sysconfig.get_path("scripts"))') >> $env:GITHUB_PATH
@@ -56,7 +60,7 @@ jobs:
           tag="v$version"
           # Local to the runner only: no tag or release gets published.
           git tag "$tag" "$GITHUB_SHA"
-          tools/release/make_source_archive.sh "dist/gtav-recomp-src-$tag.tar.xz" "$tag" \
+          sh tools/release/make_source_archive.sh "dist/gtav-recomp-src-$tag.tar.xz" "$tag" \
             rexglue-sdk thirdparty/XenosRecomp thirdparty/plume
           tar -tf "dist/gtav-recomp-src-$tag.tar.xz" > "$RUNNER_TEMP/packed-source.txt"
           grep -Fx 'gtav-recomp-src/SOURCE.txt' "$RUNNER_TEMP/packed-source.txt"

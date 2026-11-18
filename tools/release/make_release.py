@@ -25,6 +25,7 @@ from release_metadata import launcher_version, prepare_output, write_metadata
 REPO = Path(__file__).resolve().parents[2]
 BUILD = REPO / "build-dll"
 XR = REPO / "thirdparty" / "XenosRecomp"
+PLUME = REPO / "thirdparty" / "plume"
 SDL_DLL = "SDL3rd.dll"
 
 # (source, destination below OUT_DIR)
@@ -52,6 +53,11 @@ FILES = [
 LICENSES = [
     (REPO / "LICENSE", "gtav-recomp-GPL-3.0.txt"),
     (XR / "LICENSE.md", "XenosRecomp.txt"),
+    (PLUME / "LICENSE", "Plume.txt"),
+    (PLUME / "contrib/Vulkan-Headers/LICENSE.md", "third_party/plume-Vulkan-Headers.txt"),
+    (PLUME / "contrib/VulkanMemoryAllocator/LICENSE.txt", "third_party/plume-VulkanMemoryAllocator.txt"),
+    (PLUME / "contrib/volk/LICENSE.md", "third_party/plume-volk.txt"),
+    (PLUME / "contrib/D3D12MemoryAllocator/LICENSE.txt", "third_party/plume-D3D12MemoryAllocator.txt"),
 ]
 # Third-party code linked into the SDK runtime / codegen and XenosRecomp.
 SDK_THIRDPARTY = ["FFmpeg", "aes_128", "cli11", "crypto/des", "disasm", "disruptorplus", "dxbc", "fmt",
