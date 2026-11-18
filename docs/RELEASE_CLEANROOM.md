@@ -116,7 +116,9 @@ Developer side (Windows x64):
   `SDL3rd.dll` used by both `gtav_fast.exe` and `rexruntimerd.dll`:
 
   ```bat
-  cmake -S rexglue-sdk --preset win-amd64
+  cd rexglue-sdk
+  cmake --preset win-amd64 -DREXGLUE_USE_VULKAN=ON
+  cd ..
   cmake --build rexglue-sdk/out/build/win-amd64 --config RelWithDebInfo
   cmake --install rexglue-sdk/out/build/win-amd64 --config RelWithDebInfo
   cmake -S thirdparty/XenosRecomp -B build-xr -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DXENOS_RECOMP_DXIL=OFF

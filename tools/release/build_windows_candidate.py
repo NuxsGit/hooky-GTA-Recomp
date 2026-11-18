@@ -8,6 +8,7 @@ an unpacked candidate passes the local game and physical pad tests.
 import argparse
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -26,9 +27,34 @@ DEPS = (
 )
 
 
+def annotate(message):
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        message = str(message).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::error title=Windows release build::{message}", flush=True)
+
+
 def run(*args, capture=False, cwd=REPO, timeout=None):
-    return subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=capture,
-                          timeout=timeout).stdout
+    args = tuple(map(str, args))
+    show_failure = os.environ.get("GITHUB_ACTIONS") == "true"
+    print(f"[{cwd}] {subprocess.list2cmdline(args)}", flush=True)
+    result = subprocess.run(args, cwd=cwd, text=True, errors="replace", timeout=timeout,
+                            stdout=subprocess.PIPE if capture or show_failure else None,
+                            stderr=subprocess.STDOUT if capture or show_failure else None)
+    if not capture and result.stdout:
+        print(result.stdout, end="", flush=True)
+    if result.returncode:
+        lines = (result.stdout or "").splitlines()
+        if capture:
+            print(result.stdout or "", end="", flush=True)
+        annotate(f"Exit {result.returncode}: {subprocess.list2cmdline(args)}")
+        pattern = re.compile(r"\b(error(:| [CLD]\d+)|CMake Error|FAILED:|not found|missing:|Traceback)", re.I)
+        first = [i for i, line in enumerate(lines) if pattern.search(line)]
+        details = {j for i in first[:6] for j in range(i, min(i + 3, len(lines)))}
+        tail = set(range(max(0, len(lines) - 8), len(lines)))
+        if details or tail:
+            annotate("\n".join(lines[i][:300] for i in sorted(details | tail))[:6500])
+        result.check_returncode()
+    return result.stdout
 
 
 def checkout_dependencies(root):
@@ -139,4 +165,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        annotate(exc)
+        raise
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            annotate(exc.code)
+        raise
