@@ -19,15 +19,20 @@ mkdir -p "$work/$top"
 # Each part is unpacked into one staging tree and packed once at the end (GNU tar and macOS's
 # bsdtar both work; no GNU-only options).
 add() {  # add <git dir> <commit> <prefix>
-  git -C "$1" archive --format=tar --prefix="$top/$3/" "$2" | tar -C "$work" -xf -
+  # Use a temporary tar so a failed git archive can't be masked by the extractor.
+  git -C "$1" archive --format=tar --prefix="$top/$3/" -o "$work/part.tar" "$2"
+  tar -C "$work" -xf "$work/part.tar"
   echo "  $3 @ $(git -C "$1" rev-parse --short "$2^{commit}")"
 }
 add_tree() {  # add a repo and, recursively, its submodules at their checked-out commits
   add "$1" HEAD "$2"
-  git -C "$1" submodule status --recursive | while read -r sha path rest; do
-    sha=${sha#[-+ U]}
+  git -C "$1" submodule status --recursive > "$work/submodules.txt"
+  while read -r sha path rest; do
+    case "$sha" in
+      [-+U]*) echo "Submodule not at its pinned commit: $1/$path" >&2; return 1 ;;
+    esac
     add "$1/$path" "$sha" "$2/$path"
-  done
+  done < "$work/submodules.txt"
 }
 
 echo "packing:"
@@ -67,5 +72,6 @@ XenosRecomp/thirdparty/dxc-bin).
 
 No game data is in this archive or in the release.
 EOF
-tar -C "$work" -cf - "$top" | xz -T0 -6 -c > "$out"
+tar -C "$work" -cf "$work/source.tar" "$top"
+xz -T0 -6 -c "$work/source.tar" > "$out"
 echo "$(du -h "$out" | cut -f1) -> $out"

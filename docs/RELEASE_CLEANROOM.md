@@ -98,7 +98,17 @@ the PPCContext / PPCImageInfo layout on both sides with static_asserts.
 
 Developer side (Windows x64):
 
-- From a VS x64 developer prompt with LLVM, CMake, Ninja and Python on PATH, get the
+- The **Windows x64 release candidate** workflow builds the desktop ZIP, matching source
+  archive and SHA-256 manifest. Its optional `stage_draft` input can attach those files to
+  the existing empty draft on this fork, but cannot publish it. The workflow runs tests
+  without game files; real install, gameplay, controller tests and the taint scan are still
+  required before any public release. No mobile shells are built by this job.
+- To build the same desktop ZIP locally, use a fresh checkout and run
+  `python tools/release/build_windows_candidate.py --llvm DIR --dxc-license FILE` in a VS x64
+  developer prompt with CMake 3.25–3.x, Ninja, Git, Python, the official LLVM 19.1.5 win64
+  bundle and Microsoft's DirectXShaderCompiler license. It fetches the pinned dependencies,
+  builds the host, runs the asset-free tests and smoke-tests the extracted ZIP.
+- For the individual steps, get the
   [pinned upstream sources and submodules](MAC_THEN_ANDROID_PLAN.md#1-set-up-the-tree)
   under `rexglue-sdk/` and `thirdparty/`. Apply the canonical patches to fresh trees. No game
   files or codegen output are needed to build or package the host.

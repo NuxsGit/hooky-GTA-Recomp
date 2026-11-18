@@ -1,0 +1,142 @@
+"""Build and smoke-test the Windows x64 player ZIP on a clean Windows checkout.
+
+Run in a Visual Studio x64 Developer Command Prompt with CMake 3.25–3.x,
+Ninja, Git and Python. This never reads discs, generates retail game code,
+adds a mobile shell, or publishes a release. Keep the release in draft until
+an unpacked candidate passes the local game and physical pad tests.
+"""
+import argparse
+import os
+import platform
+import shutil
+import subprocess
+import tempfile
+import zipfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+PACKAGE = "gtav-recomp-windows-x64"
+DEPS = (
+    ("rexglue-sdk", "rexglue/rexglue-sdk", "f5337cdc947ff6d4c4196737e2c807a48f2a1fc2",
+     "rexglue-sdk-gtav-linux.patch", "v0.10.0"),
+    ("thirdparty/XenosRecomp", "hedge-dev/XenosRecomp", "990d03b28a27b50277ee5d8d942e1c5f873869d1",
+     "xenosrecomp-gtav.patch", None),
+    ("thirdparty/plume", "renderbag/plume", "0ce184b19270e49236afbb74052a6b267494b86b",
+     "plume-gtav.patch", None),
+)
+
+
+def run(*args, capture=False, cwd=REPO, timeout=None):
+    return subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=capture,
+                          timeout=timeout).stdout
+
+
+def checkout_dependencies(root):
+    for subdir, repo, sha, patch, tag in DEPS:
+        tree = root / subdir
+        print(f"Fetching {repo} at {sha}", flush=True)
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        run("git", "init", "-q", tree, cwd=root)
+        git = ("git", "-C", tree, "-c", "core.autocrlf=false", "-c", "core.longpaths=true")
+        run(*git, "remote", "add", "origin", f"https://github.com/{repo}.git", cwd=root)
+        ref = f"refs/tags/{tag}:refs/tags/{tag}" if tag else sha
+        run(*git, "fetch", "--depth=1", "origin", ref, cwd=root)
+        fetched = run(*git, "rev-parse", "FETCH_HEAD^{commit}", capture=True, cwd=root).strip()
+        if fetched != sha:
+            raise SystemExit(f"{repo}: expected {sha}, got {fetched}")
+        run(*git, "checkout", "--detach", sha, cwd=root)
+        run(*git, "submodule", "update", "--init", "--recursive", "--depth=1", "--jobs=4", cwd=root)
+        run(*git, "apply", root / patch, cwd=root)
+
+
+def smoke_package(archive):
+    # Test the extracted download, not the build directory (which could hide missing DLLs).
+    with tempfile.TemporaryDirectory(prefix="gtav-win-smoke-") as tmp:
+        with zipfile.ZipFile(archive) as zf:
+            forbidden = {"gtav_game.dll", "default.xex", "default.xexp", "data", "shader_cache"}
+            for name in zf.namelist():
+                parts = name.casefold().split("/")
+                if parts[0] != PACKAGE or forbidden.intersection(parts) or ".." in parts:
+                    raise SystemExit(f"Unexpected file in Windows package: {name}")
+            zf.extractall(tmp)
+        host = Path(tmp) / PACKAGE
+        for exe, args in (
+            ("rexgluerd.exe", ("--version",)),
+            ("tools/XenosRecomp.exe", ()),
+            ("tools/dxc.exe", ("-help",)),
+            ("tools/llvm/bin/clang++.exe", ("--version",)),
+            ("tools/llvm/bin/lld-link.exe", ("/?",)),
+        ):
+            run(host / exe, *args, capture=True, cwd=host, timeout=30)
+        # The unpacked launcher should reach setup and reject the missing config headlessly.
+        result = subprocess.run([host / "gtav_launcher.exe", "--unattended"], cwd=host, timeout=30)
+        log = host / "data/logs/unattended.txt"
+        if result.returncode != 1 or not log.is_file() or "launcher.ini needs three lines" not in log.read_text():
+            raise SystemExit(f"Unpacked launcher did not report missing launcher.ini (exit {result.returncode})")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--llvm", type=Path, required=True, help="official unpacked LLVM 19.1.5 win64")
+    ap.add_argument("--dxc-license", type=Path, required=True, help="DirectXShaderCompiler LICENSE.TXT")
+    args = ap.parse_args()
+    if os.name != "nt" or platform.machine().lower() not in ("amd64", "x86_64"):
+        raise SystemExit("This builder needs native Windows x64")
+    if not os.environ.get("VCToolsRedistDir") or not shutil.which("cl.exe"):
+        raise SystemExit("Start a Visual Studio x64 Developer Command Prompt first")
+    if run("git", "status", "--porcelain", capture=True).strip():
+        raise SystemExit("Build from a clean checkout at the intended release commit")
+    for rel in [*(dep[0] for dep in DEPS), "gtav/generated", "gtav/assets", "build-dll", "build-xr",
+                "build-launcher", "build/controller-check", f"dist/{PACKAGE}", f"dist/{PACKAGE}.zip"]:
+        if (REPO / rel).exists():
+            raise SystemExit(f"Use a fresh checkout: refusing to reuse {rel}")
+    llvm = args.llvm.resolve(strict=True)
+    dxc_license = args.dxc_license.resolve(strict=True)
+    llvm_bin = llvm / "bin"
+    os.environ["PATH"] = str(llvm_bin) + os.pathsep + os.environ["PATH"]
+    if "clang version 19.1.5" not in run(llvm_bin / "clang.exe", "--version", capture=True):
+        raise SystemExit("Expected the official LLVM 19.1.5 release bundle")
+    checkout_dependencies(REPO)
+
+    sdk = REPO / "rexglue-sdk"
+    install = sdk / "out/install/win-amd64"
+    rel = "RelWithDebInfo"
+    clang = (f"-DCMAKE_C_COMPILER={llvm_bin / 'clang.exe'}",
+             f"-DCMAKE_CXX_COMPILER={llvm_bin / 'clang++.exe'}",
+             f"-DCMAKE_LINKER={llvm_bin / 'lld-link.exe'}")
+    # The fork's renderer calls Vulkan-only functions exported by rexgpu-xenosrd.dll.
+    run("cmake", "--preset", "win-amd64", "-DREXGLUE_USE_VULKAN=ON", *clang, cwd=sdk)
+    sdk_build = sdk / "out/build/win-amd64"
+    run("cmake", "--build", sdk_build, "--config", rel, "--parallel")
+    run("cmake", "--install", sdk_build, "--config", rel)
+
+    run("cmake", "-S", "thirdparty/XenosRecomp", "-B", "build-xr", "-G", "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl",
+        "-DBUILD_SHARED_LIBS=OFF", "-DXENOS_RECOMP_DXIL=OFF")
+    run("cmake", "--build", "build-xr", "--target", "XenosRecomp", "--parallel")
+    run("cmake", "-S", "gtav", "--preset", "win-amd64-relwithdebinfo", "-B", "build-dll",
+        "-DGTAV_GAME_DLL=ON", f"-Drexglue_DIR={install / 'lib/cmake/rexglue'}",
+        f"-DREX_SDK_SRC={sdk / 'src'}", *clang)
+    run("cmake", "--build", "build-dll", "--parallel")
+    run("cmake", "-S", "loader", "-B", "build-launcher", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_CXX_COMPILER=cl", "-DGTAV_LAUNCHER_TESTS=ON", f"-DGTAV_SDK_THIRDPARTY={sdk / 'thirdparty'}")
+    run("cmake", "--build", "build-launcher", "--parallel")
+    run("ctest", "--test-dir", "build-launcher", "--output-on-failure")
+    run("cmake", "-S", "tools/input_tests/sdl_probe", "-B", "build/controller-check", "-G", "Ninja",
+        f"-DCMAKE_BUILD_TYPE={rel}", "-DCMAKE_C_COMPILER=cl", f"-DCMAKE_PREFIX_PATH={install}")
+    run("cmake", "--build", "build/controller-check", "--parallel")
+    run("ctest", "--test-dir", "build/controller-check", "--output-on-failure")
+    run("python", "tools/release/test_windows_release.py")
+
+    licenses = REPO / "build/windows-licenses"
+    licenses.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(dxc_license, licenses / "dxc-LICENSE.TXT")
+    shutil.copyfile(REPO / "LICENSE", licenses / "GPL-3.0.txt")
+    run("python", "tools/release/make_release.py", f"dist/{PACKAGE}", "--llvm", llvm,
+        "--expected", "tools/release/expected.txt", "--licenses", licenses, "--zip")
+    smoke_package(REPO / "dist" / f"{PACKAGE}.zip")
+    print(f"Windows candidate: dist/{PACKAGE}.zip (in-game validation still required)", flush=True)
+
+
+if __name__ == "__main__":
+    main()

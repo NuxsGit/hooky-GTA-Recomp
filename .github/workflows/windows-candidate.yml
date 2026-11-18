@@ -1,0 +1,112 @@
+name: Windows x64 release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage_draft:
+        description: Attach to the empty matching draft (never publish it)
+        type: boolean
+        default: false
+  push:
+    branches: ['arena/**']
+    paths:
+      - '.github/workflows/windows-candidate.yml'
+      - 'tools/release/build_windows_candidate.py'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 80
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Get official LLVM and shader-tool license
+        shell: pwsh
+        run: |
+          $base = "$env:RUNNER_TEMP\gtav-build-deps"
+          New-Item -ItemType Directory $base | Out-Null
+          $installer = "$base\LLVM-19.1.5-win64.exe"
+          Invoke-WebRequest -Uri 'https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.5/LLVM-19.1.5-win64.exe' -OutFile $installer
+          # Hash from microsoft/winget-pkgs, LLVM.LLVM 19.1.5 x64 installer manifest.
+          $hash = '9B29856202D82047B504A9E501D66080BED0EAFF3F1127191F4F361E0E00C770'
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $hash) { throw 'LLVM installer hash mismatch' }
+          & 'C:\Program Files\7-Zip\7z.exe' x '-y' "-o$base\llvm" $installer
+          if ($LASTEXITCODE -ne 0) { throw 'LLVM extraction failed' }
+          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/microsoft/DirectXShaderCompiler/b106a961d09221b3c5bdb37be45b679257da08b8/LICENSE.TXT' -OutFile "$base\dxc-LICENSE.TXT"
+          python -m pip install 'cmake==3.31.10'
+          if ($LASTEXITCODE -ne 0) { throw 'CMake installation failed' }
+          (python -c 'import sysconfig; print(sysconfig.get_path("scripts"))') >> $env:GITHUB_PATH
+      - name: Compile and test extracted package
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 || exit /b 1
+          python tools\release\build_windows_candidate.py --llvm "%RUNNER_TEMP%\gtav-build-deps\llvm" --dxc-license "%RUNNER_TEMP%\gtav-build-deps\dxc-LICENSE.TXT"
+      - name: Archive matching source and checksums
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(tr -d '\r\n' < loader/VERSION)
+          tag="v$version"
+          # Local to the runner only: no tag or release gets published.
+          git tag "$tag" "$GITHUB_SHA"
+          tools/release/make_source_archive.sh "dist/gtav-recomp-src-$tag.tar.xz" "$tag" \
+            rexglue-sdk thirdparty/XenosRecomp thirdparty/plume
+          tar -tf "dist/gtav-recomp-src-$tag.tar.xz" > "$RUNNER_TEMP/packed-source.txt"
+          grep -Fx 'gtav-recomp-src/SOURCE.txt' "$RUNNER_TEMP/packed-source.txt"
+          (cd dist && sha256sum gtav-recomp-windows-x64.zip "gtav-recomp-src-$tag.tar.xz" > SHA256SUMS)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x64-release-candidate
+          path: |
+            dist/gtav-recomp-windows-x64.zip
+            dist/gtav-recomp-src-*.tar.xz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+
+  stage-draft:
+    needs: build
+    # This is opt-in: builds alone cannot change a release.
+    if: >-
+      github.repository == 'NuxsGit/hooky-GTA-Recomp' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.stage_draft) ||
+       (github.event_name == 'push' && contains(github.event.head_commit.message, '[stage-windows-draft]')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: windows-release-draft
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-x64-release-candidate
+      - name: Attach candidate only if the draft still has no assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          sha256sum --check SHA256SUMS
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets,body > release.json
+          jq -e '.isDraft and (.assets | length == 0)' release.json > /dev/null
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA"
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
+            gtav-recomp-windows-x64.zip "gtav-recomp-src-$TAG.tar.xz" SHA256SUMS
+          {
+            echo '> **Brouillon — paquet Windows x64 à valider en jeu.**'
+            printf '\nBuild `%s` : paquet du fork et sources correspondantes. Aucun fichier du jeu ni build mobile joint.\n\n' "$GITHUB_SHA"
+            echo 'Les tests sans jeu ont passé. Avant publication : installation et lancement avec vos disques et TU27, DualSense USB et Bluetooth en jeu, puis contrôle de contamination du paquet.'
+            printf '\n'
+            jq -r .body release.json | sed '/^> \*\*Brouillon /d'
+          } > notes.md
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft --notes-file notes.md
