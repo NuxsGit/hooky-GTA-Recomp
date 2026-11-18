@@ -26,9 +26,16 @@ jobs:
     outputs:
       tag: ${{ steps.source.outputs.tag }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      - name: Restore the matching SDK install
+        id: sdk-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/windows-sdk-cache
+          key: win-x64-rex-f5337cd-d3d12-rd-llvm19.1.5-${{ hashFiles('rexglue-sdk-gtav-linux.patch') }}
       - name: Get official LLVM and shader-tool license
         shell: pwsh
         run: |
@@ -41,6 +48,14 @@ jobs:
           if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $hash) { throw 'LLVM installer hash mismatch' }
           & 'C:\Program Files\7-Zip\7z.exe' x '-y' "-o$base\llvm" $installer
           if ($LASTEXITCODE -ne 0) { throw 'LLVM extraction failed' }
+          # NSIS can include the license in its UI without installing a plain text copy.
+          $license = "$base\llvm\LICENSE.TXT"
+          if (-not (Test-Path $license)) {
+            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-19.1.5/llvm/LICENSE.TXT' -OutFile $license
+            if ((Get-FileHash $license -Algorithm SHA256).Hash -ne '8D85C1057D742E597985C7D4E6320B015A9139385CFF4CBAE06FFC0EBE89AFEE') {
+              throw 'LLVM license hash mismatch'
+            }
+          }
           # The dxc-bin x64 PE version resource is 1.8.2407.7 (416fab6b5).
           Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/microsoft/DirectXShaderCompiler/416fab6b5c4ba956a320d9131102304da995edfc/LICENSE.TXT' -OutFile "$base\dxc-LICENSE.TXT"
           python -m pip install 'cmake==3.31.10'
@@ -50,7 +65,14 @@ jobs:
         shell: cmd
         run: |
           call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 || exit /b 1
-          python -u tools\release\build_windows_candidate.py --llvm "%RUNNER_TEMP%\gtav-build-deps\llvm" --dxc-license "%RUNNER_TEMP%\gtav-build-deps\dxc-LICENSE.TXT"
+          python -u tools\release\build_windows_candidate.py --llvm "%RUNNER_TEMP%\gtav-build-deps\llvm" --dxc-license "%RUNNER_TEMP%\gtav-build-deps\dxc-LICENSE.TXT" --sdk-cache build\windows-sdk-cache
+      - name: Record the successful SDK install even if a later build step failed
+        if: ${{ !cancelled() && steps.sdk-cache.outputs.cache-hit != 'true' && hashFiles('build/windows-sdk-cache/*/.complete') != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/windows-sdk-cache
+          key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
       - name: Archive matching source and checksums
         id: source
         shell: bash
@@ -66,7 +88,7 @@ jobs:
           grep -Fx 'gtav-recomp-src/SOURCE.txt' "$RUNNER_TEMP/packed-source.txt"
           (cd dist && sha256sum gtav-recomp-windows-x64.zip "gtav-recomp-src-$tag.tar.xz" > SHA256SUMS)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: windows-x64-release-candidate
           path: |
@@ -89,7 +111,7 @@ jobs:
     concurrency:
       group: windows-release-draft
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: windows-x64-release-candidate
       - name: Attach candidate only if the draft still has no assets
@@ -111,6 +133,6 @@ jobs:
             printf '\nBuild `%s` : paquet du fork et sources correspondantes. Aucun fichier du jeu ni build mobile joint.\n\n' "$GITHUB_SHA"
             echo 'Les tests sans jeu ont passé. Avant publication : installation et lancement avec vos disques et TU27, DualSense USB et Bluetooth en jeu, puis contrôle de contamination du paquet.'
             printf '\n'
-            jq -r .body release.json | sed '/^> \*\*Brouillon /d'
+            jq -r .body release.json | sed '/^> \*\*Brouillon /d; /^Les tests du launcher Linux /d'
           } > notes.md
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft --notes-file notes.md

@@ -117,7 +117,7 @@ Developer side (Windows x64):
 
   ```bat
   cd rexglue-sdk
-  cmake --preset win-amd64 -DREXGLUE_USE_VULKAN=ON
+  cmake --preset win-amd64 -DREXGLUE_USE_D3D12=ON -DREXGLUE_USE_VULKAN=OFF
   cd ..
   cmake --build rexglue-sdk/out/build/win-amd64 --config RelWithDebInfo
   cmake --install rexglue-sdk/out/build/win-amd64 --config RelWithDebInfo

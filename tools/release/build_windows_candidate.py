@@ -6,6 +6,7 @@ adds a mobile shell, or publishes a release. Keep the release in draft until
 an unpacked candidate passes the local game and physical pad tests.
 """
 import argparse
+import hashlib
 import os
 import platform
 import re
@@ -75,6 +76,30 @@ def checkout_dependencies(root):
         run(*git, "apply", root / patch, cwd=root)
 
 
+def build_sdk(sdk, install, clang, cache_root):
+    # The SDK's Windows D3D12 backend runs the guest command processor. The native
+    # renderer uses Vulkan via Plume, independently of that SDK backend.
+    backend = ("-DREXGLUE_USE_D3D12=ON", "-DREXGLUE_USE_VULKAN=OFF")
+    identity = "\n".join((DEPS[0][2], "RelWithDebInfo", "LLVM 19.1.5", *backend,
+                           *(os.environ.get(k, "") for k in ("ImageVersion", "VCToolsVersion", "WindowsSDKVersion"))))
+    patch = (REPO / DEPS[0][3]).read_bytes()
+    key = hashlib.sha256(identity.encode("utf-8") + b"\0" + patch).hexdigest()
+    cache = cache_root.resolve() / key if cache_root else None
+    stamp = cache / ".complete" if cache else None
+    if stamp and stamp.is_file() and stamp.read_text(encoding="ascii") == key:
+        print(f"Reusing installed SDK {key}", flush=True)
+        shutil.copytree(cache / "install", install)
+        return
+    run("cmake", "--preset", "win-amd64", *backend, *clang, cwd=sdk)
+    sdk_build = sdk / "out/build/win-amd64"
+    # Keep Ninja compiling independent targets after a failure to surface all diagnostics at once.
+    run("cmake", "--build", sdk_build, "--config", "RelWithDebInfo", "--parallel", "--", "-k", "0")
+    run("cmake", "--install", sdk_build, "--config", "RelWithDebInfo")
+    if cache:
+        shutil.copytree(install, cache / "install", dirs_exist_ok=True)
+        (cache / ".complete").write_text(key, encoding="ascii")
+
+
 def smoke_package(archive):
     # Test the extracted download, not the build directory (which could hide missing DLLs).
     with tempfile.TemporaryDirectory(prefix="gtav-win-smoke-") as tmp:
@@ -105,6 +130,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--llvm", type=Path, required=True, help="official unpacked LLVM 19.1.5 win64")
     ap.add_argument("--dxc-license", type=Path, required=True, help="DirectXShaderCompiler LICENSE.TXT")
+    ap.add_argument("--sdk-cache", type=Path, help="optional runner cache of a matching, complete SDK install")
     args = ap.parse_args()
     if os.name != "nt" or platform.machine().lower() not in ("amd64", "x86_64"):
         raise SystemExit("This builder needs native Windows x64")
@@ -130,12 +156,7 @@ def main():
     clang = (f"-DCMAKE_C_COMPILER={llvm_bin / 'clang.exe'}",
              f"-DCMAKE_CXX_COMPILER={llvm_bin / 'clang++.exe'}",
              f"-DCMAKE_LINKER={llvm_bin / 'lld-link.exe'}")
-    # The fork's renderer calls Vulkan-only functions exported by rexgpu-xenosrd.dll.
-    run("cmake", "--preset", "win-amd64", "-DREXGLUE_USE_VULKAN=ON", *clang, cwd=sdk)
-    sdk_build = sdk / "out/build/win-amd64"
-    # Keep Ninja compiling independent targets after a failure to surface all diagnostics at once.
-    run("cmake", "--build", sdk_build, "--config", rel, "--parallel", "--", "-k", "0")
-    run("cmake", "--install", sdk_build, "--config", rel)
+    build_sdk(sdk, install, clang, args.sdk_cache)
 
     run("cmake", "-S", "thirdparty/XenosRecomp", "-B", "build-xr", "-G", "Ninja",
         "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl",
