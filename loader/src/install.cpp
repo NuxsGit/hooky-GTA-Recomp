@@ -26,8 +26,8 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/file.h>
 #include <sys/resource.h>
-#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -100,6 +100,11 @@ constexpr char kInstallPackageDir[] = "content/0000000000000000/545408A7/0000000
 //-----------------------------------------------------------------------------
 // Small helpers
 //-----------------------------------------------------------------------------
+
+std::string NarrowGeneric(const fs::path& p) {
+  auto utf8 = p.generic_u8string();
+  return std::string(utf8.begin(), utf8.end());
+}
 
 std::string Lower(std::string s) {
   for (char& c : s) c = char(tolower(static_cast<unsigned char>(c)));
@@ -228,14 +233,15 @@ class Sha256 {
 };
 #endif
 
-bool HashFile(const fs::path& p, std::string* hex, uint64_t* size) {
+bool HashFile(const fs::path& p, std::string* hex, uint64_t* size, InstallUi* ui = nullptr) {
   std::wstring err;
-  auto blob = OpenFileBlob(p.wstring(), &err);
+  auto blob = OpenFileBlob(PathWide(p), &err);
   if (!blob) return false;
   Sha256 h;
   std::vector<uint8_t> buf(4u << 20);
   uint64_t off = 0, total = blob->size();
   while (off < total) {
+    if (ui && ui->Cancelled()) return false;
     size_t n = size_t(std::min<uint64_t>(buf.size(), total - off));
     if (!blob->ReadAt(off, buf.data(), n)) return false;
     h.Update(buf.data(), n);
@@ -259,7 +265,7 @@ class OutFile {
     h_ = CreateFileW(part_.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (h_ == INVALID_HANDLE_VALUE) {
-      *error = L"Could not create " + part_.wstring();
+      *error = L"Could not create " + PathWide(part_);
       return false;
     }
     return true;
@@ -276,7 +282,9 @@ class OutFile {
   bool Commit() {
     CloseHandle(h_);
     h_ = INVALID_HANDLE_VALUE;
-    return MoveFileExW(part_.c_str(), final_.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    if (MoveFileExW(part_.c_str(), final_.c_str(), MOVEFILE_REPLACE_EXISTING)) return true;
+    DeleteFileW(part_.c_str());
+    return false;
   }
   ~OutFile() {
     if (h_ != INVALID_HANDLE_VALUE) {
@@ -300,7 +308,7 @@ class OutFile {
     fs::create_directories(p.parent_path(), ec);
     fd_ = open(part_.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd_ < 0) {
-      *error = L"Could not create " + part_.wstring() + L": " + Widen(strerror(errno));
+      *error = L"Could not create " + PathWide(part_) + L": " + Widen(strerror(errno));
       return false;
     }
     return true;
@@ -318,7 +326,9 @@ class OutFile {
   bool Commit() {
     bool ok = close(fd_) == 0;
     fd_ = -1;
-    return ok && rename(part_.c_str(), final_.c_str()) == 0;
+    if (ok && rename(part_.c_str(), final_.c_str()) == 0) return true;
+    unlink(part_.c_str());
+    return false;
   }
   ~OutFile() {
     if (fd_ >= 0) {
@@ -350,7 +360,7 @@ struct ExpectedSet {
   bool Load(const fs::path& p, std::wstring* error) {
     std::ifstream f(p);
     if (!f) {
-      *error = L"Missing " + p.wstring() + L" (the launcher folder is incomplete).";
+      *error = L"Missing " + PathWide(p) + L" (the launcher folder is incomplete).";
       return false;
     }
     std::string line;
@@ -367,7 +377,7 @@ struct ExpectedSet {
       (*m)[path] = Expected{size, sha};
     }
     if (disc2.empty() || part.empty() || tu.empty() || gen.empty()) {
-      *error = p.wstring() + L" is damaged.";
+      *error = PathWide(p) + L" is damaged.";
       return false;
     }
     return true;
@@ -378,6 +388,75 @@ struct ExpectedSet {
       for (auto& [k, v] : *m) t += v.size;
     return t;
   }
+};
+
+fs::path PartitionPath(const fs::path& data) {
+  return data / "user" / "0000000000000000" / kTitleId / "00000002";
+}
+
+template <typename Visit>
+bool VisitLocalFiles(const ExpectedSet& expected, const fs::path& data, Visit visit) {
+  for (const auto& [path, exp] : expected.disc2)
+    if (!visit(data / "game" / PathFromUtf8(path), exp)) return false;
+  for (const auto& [path, exp] : expected.part)
+    if (!visit(PartitionPath(data) / PathFromUtf8(path), exp)) return false;
+  for (const auto& [path, exp] : expected.tu)
+    if (!visit(data / (path == "default.xexp" ? "game" : "update") / PathFromUtf8(path), exp)) return false;
+  return true;
+}
+
+constexpr char kDevBuildId[] = "unversioned";
+
+bool ReadPackageBuildId(const fs::path& root, std::string* id) {
+  const auto path = root / "tools/game_dll/build-id.txt";
+  std::error_code ec;
+  if (!fs::exists(path, ec) && !ec) {
+    *id = kDevBuildId;  // local, unpackaged development tree
+    return true;
+  }
+  std::ifstream f(path);
+  std::string line;
+  if (!std::getline(f, line) || line.size() != 64 ||
+      line.find_first_not_of("0123456789abcdef") != line.npos) return false;
+  *id = std::move(line);
+  return true;
+}
+
+std::string InstalledBuildId(const fs::path& home) {
+  std::ifstream f(home / kInstalledMarker);
+  std::string version, id;
+  // A legacy one-line marker has no proven ABI; it can still reuse its game data.
+  if (!std::getline(f, version) || version != kInstallVersion || !std::getline(f, id)) return {};
+  return id;
+}
+
+// One desktop job at a time per game folder (two launcher instances share scratch and logs).
+// The OS releases the lock even on crash; leave the empty file in place to keep its identity.
+class BuildLock {
+ public:
+  bool Acquire(const fs::path& file) {
+#ifdef _WIN32
+    handle_ = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    return handle_ != INVALID_HANDLE_VALUE;
+#else
+    fd_ = open(file.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+    return fd_ != -1 && flock(fd_, LOCK_EX | LOCK_NB) == 0;
+#endif
+  }
+  ~BuildLock() {
+#ifdef _WIN32
+    if (handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
+#else
+    if (fd_ != -1) close(fd_);
+#endif
+  }
+
+ private:
+#ifdef _WIN32
+  HANDLE handle_ = INVALID_HANDLE_VALUE;
+#else
+  int fd_ = -1;
+#endif
 };
 
 //-----------------------------------------------------------------------------
@@ -437,14 +516,21 @@ struct Child {
   }
   // -1 while running.
   int Poll(DWORD wait_ms = 0) {
-    if (WaitForSingleObject(pi.hProcess, wait_ms) != WAIT_OBJECT_0) return -1;
+    const DWORD wait = WaitForSingleObject(pi.hProcess, wait_ms);
+    if (wait == WAIT_TIMEOUT) return -1;
     DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    return int(code);
+    if (wait != WAIT_OBJECT_0 || !GetExitCodeProcess(pi.hProcess, &code)) return 1;
+    // Some NT exit codes have the sign bit set; never mistake a crashed tool for a live one.
+    return code <= 0x7FFFFFFF ? static_cast<int>(code) : 1;
   }
-  void Kill() { TerminateProcess(pi.hProcess, 1); }
+  void Kill() {
+    if (pi.hProcess && TerminateProcess(pi.hProcess, 1)) WaitForSingleObject(pi.hProcess, INFINITE);
+  }
   ~Child() {
-    if (pi.hProcess) CloseHandle(pi.hProcess);
+    if (pi.hProcess) {
+      if (WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT) Kill();
+      CloseHandle(pi.hProcess);
+    }
     if (pi.hThread) CloseHandle(pi.hThread);
   }
 };
@@ -644,30 +730,26 @@ class Installer {
       : root_(std::move(root)), home_(std::move(home)), in_(in), ui_(ui), data_(home_ / L"data") {}
 
   bool Run(std::wstring* error) {
-    error_ = error;
-    std::error_code ec;
-    fs::create_directories(data_ / L"logs", ec);
-    log_.open(data_ / L"logs" / L"install.log", std::ios::app);
-    Log(L"---- install started");
-
-    if (!Preflight(root_, error)) return false;
-    if (!expected_.Load(root_ / L"tools" / L"game_dll" / L"expected.txt", error)) return false;
-    if (!OpenInputs()) return false;
-    if (!CheckSpace()) return false;
+    if (!BeginDesktop(error, L"install")) return Fail();
+    if (!OpenInputs() || !CheckSourceExecutable() || !CheckSpace()) return Fail();
     LoadDone();
 
     copy_total_ = expected_.TotalBytes();
-    if (!CopyDisc2() || !CopyTitleUpdate() || !CopyInstallPartitions()) return Fail();
-    if (!ReviewMismatches()) return false;
-    if (!Codegen() || !CheckGenerated() || !Compile() || !Link()) return Fail();
+    if (!CopyDisc2() || !CopyTitleUpdate() || !CopyInstallPartitions() || !VerifyCodeOnDisk() ||
+        !ReviewMismatches()) return Fail();
+    // Once the copy has been checked, the compile only needs the local files.
+    parts_.clear();
+    tu_files_.clear();
+    disc1_.reset();
+    disc2_.reset();
+    tu_.reset();
+    return BuildDesktop();
+  }
 
-    std::ofstream(home_ / kInstalledMarker) << kInstallVersion << "\n";
-    fs::remove_all(data_ / L"build", ec);
-    fs::remove(data_ / L"install_state.txt", ec);
-    ui_.Progress(1.0);
-    ui_.Stage(L"Done. Press Play.");
-    Log(L"---- install finished");
-    return true;
+  bool Rebuild(std::wstring* error) {
+    if (!BeginDesktop(error, L"recompile")) return Fail();
+    if (!CheckSpace(false) || !VerifyLocalFiles()) return Fail();
+    return BuildDesktop();
   }
 
   // Game data only (the iPhone app's setup screen: its game code and shaders were built on the
@@ -680,12 +762,11 @@ class Installer {
     log_.open(data_ / L"logs" / L"install.log", std::ios::app);
     Log(L"---- game data install started");
     if (!expected_.Load(expected, error)) return false;
-    if (!OpenInputs()) return false;
-    if (!CheckSpace()) return false;
+    if (!OpenInputs() || !CheckSourceExecutable() || !CheckSpace()) return Fail();
     LoadDone();
     copy_total_ = expected_.TotalBytes();
     if (!CopyDisc2() || !CopyTitleUpdate() || !CopyInstallPartitions()) return Fail();
-    if (!ReviewMismatches()) return false;
+    if (!VerifyCodeOnDisk() || !ReviewMismatches()) return Fail();
     std::ofstream(data_ / L"data_installed.txt") << kDataVersion << "\n";
     fs::remove(data_ / L"install_state.txt", ec);
     ui_.Progress(1.0);
@@ -718,10 +799,68 @@ class Installer {
     return false;
   }
 
+  bool CheckBundledBuildInputs() {
+    const auto tools = root_ / "tools/game_dll";
+    for (const char* name : {"codegen.partition.json", "fs/layout_check.h", "fs/game_dll.cpp",
+                            "interface/gtav_hooks.h",
+#if defined(_WIN32)
+                            "interface/gtav_fast.def", "interface/rexruntime.def", "interface/ucrtbase.def",
+#elif defined(__APPLE__)
+                            "interface/gtav_game.exports",
+#endif
+#ifndef __APPLE__
+                            "fs/fs_crt.cpp",
+#endif
+                           }) {
+      std::error_code ec;
+      if (!fs::is_regular_file(tools / name, ec))
+        return SetError(L"The release is incomplete: tools/game_dll/" + Widen(name) +
+                        L" is missing. Extract a fresh copy of the release.");
+    }
+    return true;
+  }
+
+  bool BeginDesktop(std::wstring* error, const std::wstring& action) {
+    error_ = error;
+    ui_.Progress(0);
+    ui_.Stage(L"Checking the release and game folder...");
+    if (ui_.Cancelled() || !Preflight(root_, error) || !CheckBundledBuildInputs()) return false;
+#ifdef __APPLE__
+    if (!CheckGameFolder(home_, error)) return false;
+#endif
+    if (!ReadPackageBuildId(root_, &build_id_))
+      return SetError(L"The release's game build ID is invalid. Extract a fresh copy of the release.");
+    if (!LockBuild()) return false;
+    log_.open(data_ / "logs/install.log", std::ios::app);
+    if (!log_) return SetError(L"Could not open data/logs/install.log for writing.");
+    Log(L"---- " + action + L" started");
+    return expected_.Load(root_ / "tools/game_dll/expected.txt", error);
+  }
+
+  bool LockBuild() {
+    std::error_code ec;
+    fs::create_directories(data_ / "logs", ec);
+    if (ec) return SetError(L"Could not create the log folder: " + Widen(ec.message()));
+    if (!lock_.Acquire(data_ / "setup.lock"))
+      return SetError(L"Could not lock the game folder. Close any other setup and check write permissions.");
+    return true;
+  }
+
+  bool BuildDesktop() {
+    if (!Codegen() || !CheckGenerated() || !Compile() || !Link()) return Fail();
+    std::error_code ec;
+    fs::remove_all(data_ / "build", ec);
+    fs::remove(data_ / "install_state.txt", ec);
+    ui_.Progress(1.0);
+    ui_.Stage(L"Game build ready. Press Play.");
+    Log(L"---- desktop game build finished");
+    return true;
+  }
+
   //--- inputs ----------------------------------------------------------------
 
   bool OpenInputs() {
-    ui_.Stage(L"Reading your discs and title update...");
+    ui_.Stage(L"Checking Disc 1, Disc 2 and Title Update 27...");
     std::wstring err;
     disc2_ = OpenDisc(in_.disc2, &err);
     if (!disc2_) return SetError(L"Disc 2: " + err);
@@ -741,7 +880,7 @@ class Installer {
 
     // Title update: an STFS package file, or a folder with default.xexp + update.rpf.
     std::error_code ec;
-    if (fs::is_directory(in_.tu, ec)) {
+    if (fs::is_directory(PathFromWide(in_.tu), ec)) {
       tu_ = OpenDisc(in_.tu, &err);
       if (!tu_) return SetError(L"Title update: " + err);
     } else {
@@ -764,38 +903,65 @@ class Installer {
       if (!tu_files_[name])
         return SetError(L"The title update has no " + Widen(name) + L". Pick Title Update 27.");
     }
+    // Reject incomplete source layouts before spending time copying large files.
+    for (const auto& [path, expected] : expected_.disc2)
+      if (!disc2_->Find(path)) return SetError(L"Disc 2 is missing " + Widen(path) + L".");
+    for (char n = '0'; n <= '3'; ++n) {
+      if (ui_.Cancelled()) return false;
+      std::string pkg = std::string(kTitleId) + "0000000" + n;
+      const Entry* e = disc1_->Find(kInstallPackageDir + pkg);
+      if (!e) return SetError(L"Disc 1 is missing install package " + Widen(pkg) + L".");
+      auto blob = disc1_->OpenEntry(*e, &err);
+      if (!blob) return SetError(L"Disc 1: " + err);
+      auto stfs = OpenStfs(std::move(blob), &err);
+      if (!stfs) return SetError(L"Disc 1 package " + Widen(pkg) + L": " + err);
+      const auto prefix = pkg + "/";
+      for (const auto& [path, exp] : expected_.part) {
+        if (path.starts_with(prefix) && !stfs->Find(path.substr(prefix.size())))
+          return SetError(L"Disc 1 package is missing " + Widen(path) + L".");
+      }
+      parts_.emplace_back(std::move(pkg), std::move(stfs));
+    }
     Log(L"Disc 1: " + disc1_->Describe());
     Log(L"Disc 2: " + disc2_->Describe());
     Log(L"Title update: " + in_.tu);
     return true;
   }
 
-  bool CheckSpace() {
-#ifdef _WIN32
-    ULARGE_INTEGER free_bytes;
-    if (!GetDiskFreeSpaceExW(root_.c_str(), &free_bytes, nullptr, nullptr)) return true;
-#else
-    struct statvfs sv;
-    if (statvfs(data_.c_str(), &sv) != 0) return true;
-    struct {
-      uint64_t QuadPart;
-    } free_bytes = {uint64_t(sv.f_bavail) * sv.f_frsize};
-#endif
-    uint64_t need = expected_.TotalBytes() + (data_only_ ? (512ull << 20) : (3ull << 30));  // + codegen and objects
-    // Files already in place (an interrupted earlier run) count as done.
-    auto have = [&](const fs::path& p, uint64_t size) {
-      std::error_code ec;
-      if (fs::file_size(p, ec) == size && !ec) need -= size;
+  bool CheckSourceExecutable() {
+    ui_.Stage(L"Verifying the Disc 2 executable and TU27 patch...");
+    auto check = [&](Source& src, const Entry& file, const Expected* exp, const wchar_t* hint) {
+      if (!exp || file.size != exp->size) return SetError(hint);
+      Sha256 sha;
+      std::wstring err;
+      if (!src.Read(file, [&](const uint8_t* bytes, size_t size) {
+            if (ui_.Cancelled()) return false;
+            sha.Update(bytes, size);
+            return true;
+          }, &err)) return ui_.Cancelled() ? false : SetError(err);
+      return sha.Hex() == exp->sha256 || SetError(hint);
     };
-    for (auto& [path, exp] : expected_.disc2) have(data_ / L"game" / Widen(path), exp.size);
-    for (auto& [path, exp] : expected_.part)
-      have(data_ / L"user" / L"0000000000000000" / Widen(kTitleId) / L"00000002" / Widen(path),
-           exp.size);
-    if (auto* e = Find(expected_.tu, "default.xexp")) have(data_ / L"game" / L"default.xexp", e->size);
-    if (auto* e = Find(expected_.tu, "update.rpf")) have(data_ / L"update" / L"update.rpf", e->size);
-    if (free_bytes.QuadPart < need)
-      return SetError(L"Not enough free space for the game: " + Gb(need) + L" needed, " +
-                      Gb(free_bytes.QuadPart) + L" free.");
+    return check(*disc2_, *disc2_->Find("default.xex"), Find(expected_.disc2, "default.xex"),
+                 L"Disc 2's default.xex is not the supported executable. Check your Disc 2 dump.") &&
+           check(*tu_, *tu_files_.at("default.xexp"), Find(expected_.tu, "default.xexp"),
+                 L"This title update is not the supported TU27. Select Title Update 27 for GTA V.");
+  }
+
+  bool CheckSpace(bool copying = true) {
+    std::error_code ec;
+    const uint64_t available = fs::space(data_, ec).available;
+    if (ec) return true;
+    uint64_t need = data_only_ ? (512ull << 20) : (3ull << 30);  // temporary work files
+    if (copying) {
+      // Files already in place (an interrupted earlier run) can be reused.
+      VisitLocalFiles(expected_, data_, [&](const fs::path& p, const Expected& exp) {
+        if (fs::file_size(p, ec) != exp.size || ec) need += exp.size;
+        return true;
+      });
+    }
+    Log(L"Disk space: ~" + Gb(need) + L" needed, " + Gb(available) + L" available.");
+    if (available < need)
+      return SetError(L"Not enough free space: " + Gb(need) + L" needed, " + Gb(available) + L" free.");
     return true;
   }
 
@@ -811,8 +977,8 @@ class Installer {
 
   void MarkDone(const fs::path& dest, uint64_t size, const std::string& sha) {
     std::ofstream(data_ / L"install_state.txt", std::ios::app)
-        << sha << " " << size << " " << Narrow(dest.wstring()) << "\n";
-    done_[Narrow(dest.wstring())] = {size, sha};
+        << sha << " " << size << " " << Narrow(PathWide(dest)) << "\n";
+    done_[Narrow(PathWide(dest))] = {size, sha};
   }
 
   // Copies one entry to dest, hashing on the way. Records a mismatch against `exp`.
@@ -820,11 +986,14 @@ class Installer {
                  const std::wstring& what) {
     if (ui_.Cancelled()) return false;
     std::error_code ec;
-    auto it = done_.find(Narrow(dest.wstring()));
-    if (it != done_.end() && fs::file_size(dest, ec) == e.size && !ec) {
+    auto it = done_.find(Narrow(PathWide(dest)));
+    // Re-copy the small code inputs, so a previously damaged local executable/patch can be
+    // repaired even if the journal records a successful copy of the same size.
+    if (dest.filename() != "default.xex" && dest.filename() != "default.xexp" &&
+        it != done_.end() && it->second.size == e.size && (!exp || it->second.sha256 == exp->sha256) &&
+        fs::file_size(dest, ec) == e.size && !ec) {
       copied_ += e.size;
       Report();
-      if (exp && it->second.sha256 != exp->sha256) mismatches_.push_back(what);
       return true;
     }
     ui_.Stage(L"Copying " + what + L" (" + Gb(e.size) + L")");
@@ -836,7 +1005,7 @@ class Installer {
       if (ui_.Cancelled()) return false;
       h.Update(d, n);
       if (!out.Write(d, n)) {
-        err = L"Write error on " + dest.wstring() + L" (disk full?)";
+        err = L"Write error on " + PathWide(dest) + L" (disk full?)";
         return false;
       }
       copied_ += n;
@@ -847,7 +1016,7 @@ class Installer {
       if (!ui_.Cancelled()) SetError(err);
       return false;
     }
-    if (!out.Commit()) return SetError(L"Could not write " + dest.wstring());
+    if (!out.Commit()) return SetError(L"Could not write " + PathWide(dest));
     std::string sha = h.Hex();
     MarkDone(dest, e.size, sha);
     if (exp && (sha != exp->sha256 || e.size != exp->size)) {
@@ -867,7 +1036,7 @@ class Installer {
     for (auto& [path, exp] : expected_.disc2) {
       const Entry* e = disc2_->Find(path);
       if (!e) return SetError(L"Disc 2 is missing " + Widen(path) + L". The image is incomplete.");
-      if (!CopyEntry(*disc2_, *e, data_ / L"game" / Widen(path), &exp, L"Disc 2: " + Widen(path)))
+      if (!CopyEntry(*disc2_, *e, data_ / L"game" / PathFromUtf8(path), &exp, L"Disc 2: " + Widen(path)))
         return false;
     }
     return true;
@@ -892,19 +1061,10 @@ class Installer {
 
   bool CopyInstallPartitions() {
     Log(L"Unpacking the Disc 1 install partitions");
-    for (int n = 0; n < 4; ++n) {
-      std::string pkg = std::string(kTitleId) + "0000000" + char('0' + n);
-      const Entry* e = disc1_->Find(kInstallPackageDir + pkg);
-      if (!e) return SetError(L"Disc 1 is missing install package " + Widen(pkg));
-      std::wstring err;
-      auto blob = disc1_->OpenEntry(*e, &err);
-      if (!blob) return SetError(L"Disc 1: " + err);
-      auto stfs = OpenStfs(std::move(blob), &err);
-      if (!stfs) return SetError(L"Disc 1 package " + Widen(pkg) + L": " + err);
+    for (const auto& [pkg, stfs] : parts_) {
       for (const Entry& f : stfs->entries()) {
         std::string rel = pkg + "/" + f.path;
-        fs::path dest = data_ / L"user" / L"0000000000000000" / Widen(kTitleId) / L"00000002" /
-                        Widen(pkg) / Widen(f.path);
+        fs::path dest = PartitionPath(data_) / PathFromUtf8(rel);
         if (!CopyEntry(*stfs, f, dest, Find(expected_.part, rel), L"Disc 1: " + Widen(rel)))
           return false;
       }
@@ -912,20 +1072,44 @@ class Installer {
     return true;
   }
 
+  bool VerifyCodeOnDisk() {
+    auto check = [&](const char* file, const Expected* exp) {
+      std::string sha;
+      uint64_t size = 0;
+      if (exp && HashFile(data_ / "game" / file, &sha, &size, &ui_) &&
+          sha == exp->sha256 && size == exp->size) return true;
+      return ui_.Cancelled() ? false : SetError(L"The local " + Widen(file) +
+          L" is missing or does not match. Run Install & build with your original Disc 2 and TU27.");
+    };
+    return check("default.xex", Find(expected_.disc2, "default.xex")) &&
+           check("default.xexp", Find(expected_.tu, "default.xexp"));
+  }
+
+  bool VerifyLocalFiles() {
+    ui_.Stage(L"Checking existing game files (no discs needed)...");
+    if (!VerifyCodeOnDisk()) return false;
+    copy_total_ = expected_.TotalBytes();
+    if (!VisitLocalFiles(expected_, data_, [&](const fs::path& path, const Expected& exp) {
+          if (ui_.Cancelled()) return false;
+          std::error_code ec;
+          if (!fs::is_regular_file(path, ec))
+            return SetError(L"Missing game file: " + PathWide(path) + L". Run Install & build with your originals.");
+          if (path.filename() != "default.xex" && path.filename() != "default.xexp") {
+            std::string sha;
+            uint64_t size;
+            ui_.Stage(L"Checking " + PathWide(path.filename()) + L" (" + Gb(exp.size) + L")...");
+            if (!HashFile(path, &sha, &size, &ui_))
+              return ui_.Cancelled() ? false : SetError(L"Could not read the local file " + PathWide(path));
+            if (size != exp.size || sha != exp.sha256) mismatches_.push_back(PathWide(path.filename()));
+          }
+          copied_ += exp.size;
+          Report();
+          return true;
+        })) return false;
+    return ReviewMismatches();
+  }
+
   bool ReviewMismatches() {
-    // The recompiled code is generated from exactly one executable and patch.
-    for (const std::wstring& m : mismatches_) {
-      if (m.find(L"default.xexp") != std::wstring::npos)
-        return SetError(L"Your title update is not Title Update 27 for this game (its default.xexp "
-                        L"differs). The recompilation is made for TU27 only.");
-    }
-    std::string sha;
-    uint64_t size = 0;
-    auto exp_xex = Find(expected_.disc2, "default.xex");
-    if (!HashFile(data_ / L"game" / L"default.xex", &sha, &size) || !exp_xex ||
-        sha != exp_xex->sha256)
-      return SetError(L"Your Disc 2 executable (default.xex) differs from the one this "
-                      L"recompilation was made for, so it cannot be used.");
     if (mismatches_.empty()) {
       Log(L"All files match the known good dump.");
       return true;
@@ -941,6 +1125,7 @@ class Installer {
   //--- codegen ---------------------------------------------------------------
 
   bool Codegen() {
+    if (ui_.Cancelled()) return false;
     fs::path build = data_ / L"build";
     fs::path gen = build / L"generated" / L"default";
     fs::path tools = root_ / L"tools" / L"game_dll";
@@ -954,6 +1139,7 @@ class Installer {
     // Seeds codegen's file partitioning, so every player gets the same source files.
     fs::copy_file(tools / L"codegen.partition.json", gen / L"codegen.partition.json",
                   fs::copy_options::overwrite_existing, ec);
+    if (ec) return SetError(L"Could not stage the codegen partition seed: " + Widen(ec.message()));
     for (const wchar_t* f : {L"default.xex", L"default.xexp"}) {
       fs::copy_file(data_ / L"game" / f, build / L"assets" / f, fs::copy_options::overwrite_existing,
                     ec);
@@ -964,7 +1150,7 @@ class Installer {
     Log(L"Running codegen");
     fs::path log = data_ / L"logs" / L"codegen.log";
     Child c;
-    Args cmd = {(root_ / kCodegenExe).wstring(), L"--log-level", L"info", L"codegen",
+    Args cmd = {PathWide(root_ / kCodegenExe), L"--log-level", L"info", L"codegen",
                 L"gtav_manifest.toml"};
     if (!c.Start(cmd, build, log)) return SetError(L"Could not start " + std::wstring(kCodegenExe));
     size_t want = expected_.gen.size();
@@ -972,7 +1158,7 @@ class Installer {
       int code = c.Poll(1000);
       if (code >= 0) {
         if (code != 0)
-          return SetError(L"Codegen failed (exit " + Num(code) + L"). See " + log.wstring() +
+          return SetError(L"Codegen failed (exit " + Num(code) + L"). See " + PathWide(log) +
                           L":\n" + Widen(Tail(log, 600)));
         break;
       }
@@ -997,9 +1183,11 @@ class Installer {
     size_t n = 0, bad = 0;
     std::wstring first_bad;
     for (auto& [name, exp] : expected_.gen) {
+      if (ui_.Cancelled()) return false;
       std::string sha;
       uint64_t size = 0;
-      if (!HashFile(gen / Widen(name), &sha, &size) || sha != exp.sha256) {
+      if (!HashFile(gen / PathFromUtf8(name), &sha, &size, &ui_) || size != exp.size || sha != exp.sha256) {
+        if (ui_.Cancelled()) return false;
         if (!bad++) first_bad = Widen(name);
       }
       if (++n % 50 == 0)
@@ -1071,7 +1259,9 @@ class Installer {
                      : android_ ? root_ / L"android" / L"interface"
                                 : root_ / L"tools" / L"game_dll" / L"interface";
     std::error_code ec;
-    fs::create_directories(obj, ec);
+    fs::remove_all(obj, ec);
+    if (!ec) fs::create_directories(obj, ec);
+    if (ec) return SetError(L"Could not prepare the compiler work folder: " + Widen(ec.message()));
     for (auto [src, name] : {std::pair{fsdir, L"gtav_pch.h"}, {fsdir, L"layout_check.h"},
                              {iface, L"gtav_hooks.h"}}) {
       fs::copy_file(src / name, gen / name, fs::copy_options::overwrite_existing, ec);
@@ -1081,7 +1271,7 @@ class Installer {
     for (auto& [name, exp] : expected_.gen) {
       if ((name.rfind("gtav_recomp.", 0) == 0 && name.size() > 4 &&
            name.substr(name.size() - 4) == ".cpp") || name == "gtav_init.cpp")
-        sources.push_back(gen / Widen(name));
+        sources.push_back(gen / PathFromUtf8(name));
     }
     sources.push_back(fsdir / L"game_dll.cpp");
 #ifndef __APPLE__
@@ -1097,7 +1287,7 @@ class Installer {
       flags = {L"--target=arm64-apple-ios17.0", L"-nostdinc++", L"-nostdlibinc", L"-fno-stack-protector",
                L"-O2", L"-std=gnu++23", L"-mcpu=apple-a14", L"-fno-exceptions", L"-fno-rtti",
                L"-fno-threadsafe-statics", L"-fno-math-errno", L"-w", L"-isystem",
-               (root_ / L"ios" / L"include").wstring()};
+               PathWide(root_ / L"ios" / L"include")};
     } else if (android_) {
       // Android phones, from any host: aarch64, API 30, ARMv8.2 (LSE atomics; Snapdragon 845 and
       // newer). Freestanding like the others: no NDK headers; simde from the package's android/.
@@ -1106,7 +1296,7 @@ class Installer {
                L"-fno-semantic-interposition", L"-fno-stack-protector", L"-O2", L"-std=gnu++23",
                L"-march=armv8.2-a+lse+rcpc+dotprod", L"-fno-exceptions", L"-fno-rtti",
                L"-fno-threadsafe-statics", L"-fno-math-errno", L"-w", L"-isystem",
-               (root_ / L"android" / L"include").wstring()};
+               PathWide(root_ / L"android" / L"include")};
     } else {
 #ifdef _WIN32
     flags = {L"--target=x86_64-pc-windows-msvc", L"-nostdinc++", L"-nostdlibinc", L"-O2",
@@ -1125,7 +1315,7 @@ class Installer {
                   L"-fno-math-errno", L"-w"};
 #endif
     }
-    flags.insert(flags.end(), {L"-isystem", (fsdir / L"include").wstring(), L"-I", gen.wstring()});
+    flags.insert(flags.end(), {L"-isystem", PathWide(fsdir / L"include"), L"-I", PathWide(gen)});
 
     int jobs = JobCount();
     Log(L"Compiling " + Num(sources.size()) + L" files with " + Num(jobs) + L" parallel jobs");
@@ -1139,14 +1329,19 @@ class Installer {
     size_t next = 0, finished = 0;
     auto t0 = std::chrono::steady_clock::now();
     while (finished < sources.size()) {
+      if (ui_.Cancelled()) {
+        for (auto& r : running) r.child->Kill();
+        return false;
+      }
+      const size_t before = finished;
       while (running.size() < size_t(jobs) && next < sources.size()) {
         const fs::path& src = sources[next++];
-        fs::path o = obj / (src.filename().wstring() + kObjExt);
+        fs::path o = obj / (PathWide(src.filename()) + kObjExt);
         objects_.push_back(o);
-        Running r{std::make_unique<Child>(), obj / (src.filename().wstring() + L".log"), src};
-        Args cmd = {clang.wstring()};
+        Running r{std::make_unique<Child>(), obj / (PathWide(src.filename()) + L".log"), src};
+        Args cmd = {PathWide(clang)};
         cmd.insert(cmd.end(), flags.begin(), flags.end());
-        cmd.insert(cmd.end(), {L"-c", src.wstring(), L"-o", o.wstring()});
+        cmd.insert(cmd.end(), {L"-c", PathWide(src), L"-o", PathWide(o)});
         if (!r.child->Start(cmd, gen, r.log)) return SetError(L"Could not start " + std::wstring(kClang));
         running.push_back(std::move(r));
       }
@@ -1158,7 +1353,7 @@ class Installer {
         }
         if (code != 0) {
           for (auto& r : running) r.child->Kill();
-          return SetError(L"Compiling " + running[i].src.filename().wstring() + L" failed:\n" +
+          return SetError(L"Compiling " + PathWide(running[i].src.filename()) + L" failed:\n" +
                           Widen(Tail(running[i].log, 1500)));
         }
         fs::remove(running[i].log, ec);
@@ -1169,6 +1364,8 @@ class Installer {
         for (auto& r : running) r.child->Kill();
         return false;
       }
+      if (finished != before)
+        ui_.Stage(L"Compiling C++: " + Num(finished) + L" / " + Num(sources.size()) + L" files");
       double f = double(finished) / double(sources.size());
       ui_.Progress(kCheckEnd + f * (kCompileEnd - kCheckEnd));
     }
@@ -1192,17 +1389,17 @@ class Installer {
     error_ = error;
     ios_ = true;
     std::error_code ec;
-    fs::create_directories(data_ / L"logs", ec);
+    if (!LockBuild()) return false;
     log_.open(data_ / L"logs" / L"iphone.log", std::ios::app);
     Log(L"---- iPhone build");
-    if (!IsInstalled(home_))
-      return SetError(L"Set up the game on this computer first (Install), then build for iPhone.");
+    if (GetInstallStatus(root_, home_) != InstallStatus::Ready)
+      return SetError(L"Install or recompile the desktop game first, then build for iPhone.");
     const fs::path ios = root_ / L"ios", shell = ios / L"GTAV.app";
     for (const fs::path f : {shell / L"gtav", shell / L"librexruntime.dylib", shell / L"librexgpu-xenos.dylib",
                              shell / L"libMoltenVK.dylib", shell / L"Info.plist", ios / L"libSystem_ios.tbd",
                              ios / L"interface" / L"gtav_game.undefs", ios / L"include" / L"simde" / L"x86" / L"sse4.1.h"}) {
       if (!fs::exists(f, ec))
-        return SetError(L"This download has no iPhone files (" + fs::relative(f, root_).wstring() + L" is missing).");
+        return SetError(L"This download has no iPhone files (" + PathWide(fs::relative(f, root_)) + L" is missing).");
     }
 #ifdef __APPLE__
     std::wstring err;
@@ -1236,9 +1433,9 @@ class Installer {
     fs::remove_all(out / L"Documents", ec);  // (earlier builds' layout)
 
     ui_.Stage(L"Packing GTAV.ipa...");
-    if (!WriteIpa(out / L"Payload", out / L"GTAV.ipa")) return SetError(L"Could not write " + (out / L"GTAV.ipa").wstring());
+    if (!WriteIpa(out / L"Payload", out / L"GTAV.ipa")) return SetError(L"Could not write " + PathWide(out / L"GTAV.ipa"));
     fs::remove_all(data_ / L"build", ec);
-    Log(L"---- iPhone build finished: " + (out / L"GTAV.ipa").wstring());
+    Log(L"---- iPhone build finished: " + PathWide(out / L"GTAV.ipa"));
     ui_.Progress(1.0);
     ui_.Stage(L"Done: iphone/GTAV.ipa in the game folder. Install it with Sideloadly or AltStore.");
     return true;
@@ -1267,17 +1464,17 @@ class Installer {
     error_ = error;
     android_ = true;
     std::error_code ec;
-    fs::create_directories(data_ / L"logs", ec);
+    if (!LockBuild()) return false;
     log_.open(data_ / L"logs" / L"android.log", std::ios::app);
     Log(L"---- Android build");
-    if (!IsInstalled(home_))
-      return SetError(L"Set up the game on this computer first (Install), then build for Android.");
+    if (GetInstallStatus(root_, home_) != InstallStatus::Ready)
+      return SetError(L"Install or recompile the desktop game first, then build for Android.");
     const fs::path pkg = root_ / L"android";
     for (const fs::path f : {pkg / L"link" / L"libgtav_fast.so", pkg / L"link" / L"librexruntime.so",
                              pkg / L"interface" / L"gtav_game.exports", pkg / L"interface" / L"gtav_hooks.h",
                              pkg / L"include" / L"simde" / L"x86" / L"sse4.1.h"}) {
       if (!fs::exists(f, ec))
-        return SetError(L"This download has no Android files (" + fs::relative(f, root_).wstring() + L" is missing).");
+        return SetError(L"This download has no Android files (" + PathWide(fs::relative(f, root_)) + L" is missing).");
     }
 #ifdef __APPLE__
     std::wstring err;
@@ -1313,7 +1510,7 @@ class Installer {
     ui_.Stage(L"Packing gtav-android-pack.zip...");
     const fs::path zip = out / L"gtav-android-pack.zip";
     if (!WriteZip(pack, "", zip, [](const std::string&, const fs::path&) { return false; }))
-      return SetError(L"Could not write " + zip.wstring());
+      return SetError(L"Could not write " + PathWide(zip));
     // macOS: the package (with the APK) is inside GTAV.app; put the APK next to the pack, so the one
     // folder Finder shows holds both files for the phone. (Windows / Linux: it is that folder.)
     if (const fs::path apk = root_ / L"android" / L"GTAV.apk"; !fs::equivalent(root_, home_, ec)) {
@@ -1321,7 +1518,7 @@ class Installer {
       if (ec) return SetError(L"Could not copy GTAV.apk next to the pack: " + Widen(ec.message()));
     }
     fs::remove_all(data_ / L"build", ec);
-    Log(L"---- Android build finished: " + zip.wstring());
+    Log(L"---- Android build finished: " + PathWide(zip));
     ui_.Progress(1.0);
     ui_.Stage(L"Done: android/gtav-android-pack.zip in the game folder. Copy it and your disc files to the "
               L"phone, then open GTA V there and press Install.");
@@ -1352,10 +1549,10 @@ class Installer {
 #else
     const fs::path lld = root_ / L"tools" / L"llvm" / L"bin" / L"ld.lld";
 #endif
-    auto gen = [](const fs::path& p) { return p.generic_wstring(); };
+    auto gen = [](const fs::path& p) { return Widen(NarrowGeneric(p)); };
     fs::path tmp = out;
     tmp += ".new";
-    Args cmd = {lld.wstring(), L"-flavor", L"gnu", L"-shared", L"-soname", L"libgtav_game.so", L"-Bsymbolic",
+    Args cmd = {PathWide(lld), L"-flavor", L"gnu", L"-shared", L"-soname", L"libgtav_game.so", L"-Bsymbolic",
                 L"-z", L"now", L"-z", L"relro", L"-z", L"noexecstack", L"-z", L"max-page-size=16384",
                 L"--hash-style=gnu", L"-O1",
                 L"--version-script=" + gen(pkg / L"interface" / L"gtav_game.exports"), L"-o", gen(tmp),
@@ -1398,8 +1595,8 @@ class Installer {
 #else
     const fs::path lld = root_ / L"tools" / L"llvm" / L"bin" / L"ld.lld";
 #endif
-    auto gen = [](const fs::path& p) { return p.generic_wstring(); };
-    Args cmd = {lld.wstring(), L"-flavor", L"darwin", L"-arch", L"arm64", L"-platform_version", L"ios",
+    auto gen = [](const fs::path& p) { return Widen(NarrowGeneric(p)); };
+    Args cmd = {PathWide(lld), L"-flavor", L"darwin", L"-arch", L"arm64", L"-platform_version", L"ios",
                 L"17.0", L"17.0", L"-dylib", L"-install_name", L"@rpath/gtav_game.dylib", L"-dead_strip_dylibs",
                 L"-O1", L"-exported_symbols_list", gen(ios / L"interface" / L"gtav_game.exports"),
                 gen(ios / L"libSystem_ios.tbd"), gen(ios / L"GTAV.app" / L"librexruntime.dylib"), L"-o",
@@ -1446,12 +1643,12 @@ class Installer {
     static const std::regex f2(R"(vk::RawBufferLoad<float2>\((g_PushConstants\.SharedConstants \+ )(\d+)\))");
     common = std::regex_replace(common, f2, "float2(vk::RawBufferLoad<float>($1$2), vk::RawBufferLoad<float>($1$2 + 4))");
     if (common.empty() || common.find("RawBufferLoad<float2>") != std::string::npos)
-      return SetError(L"Unexpected shader_common.h in " + tools.wstring());
+      return SetError(L"Unexpected shader_common.h in " + PathWide(tools));
     if (android) {
       // The Adreno compiler asserts on 64-bit shifts (tfetchTexcoord).
       const std::string from = "(1ull << semanticIndex)";
       size_t at = common.find(from);
-      if (at == std::string::npos) return SetError(L"Unexpected shader_common.h (no 1ull shift) in " + tools.wstring());
+      if (at == std::string::npos) return SetError(L"Unexpected shader_common.h (no 1ull shift) in " + PathWide(tools));
       common.replace(at, from.size(), "(1u << semanticIndex)");
     }
     std::ofstream(work / L"shader_common.h", std::ios::binary) << common;
@@ -1483,13 +1680,13 @@ class Installer {
     std::atomic<size_t> next{0}, done{0}, failed{0}, made{0};
     std::atomic<bool> stop{false};
     auto dxc = [&](const fs::path& hlsl, const fs::path& out, bool pixel, const fs::path& log) {
-      Args cmd = {(tools / kDxc).wstring(), L"-T", pixel ? L"ps_6_0" : L"vs_6_0", L"-HV", L"2021",
+      Args cmd = {PathWide(tools / kDxc), L"-T", pixel ? L"ps_6_0" : L"vs_6_0", L"-HV", L"2021",
                   L"-all-resources-bound", L"-spirv", L"-fvk-use-dx-layout", L"-Wno-ignored-attributes",
                   L"-Qstrip_debug"};
       if (!pixel) cmd.push_back(L"-fvk-invert-y");
       fs::path tmp = out;
       tmp += ".tmp";
-      cmd.insert(cmd.end(), {L"-Fo", tmp.wstring(), hlsl.wstring()});
+      cmd.insert(cmd.end(), {L"-Fo", PathWide(tmp), PathWide(hlsl)});
       Child c;
       if (!c.Start(cmd, work, log) || c.Poll(INFINITE) != 0) return false;
       std::error_code e;
@@ -1517,8 +1714,8 @@ class Installer {
         return true;
       made++;
       Child xr;
-      if (!xr.Start({(tools / kXr).wstring(), bin.wstring(), hlsl.wstring(),
-                     (work / L"shader_common.h").wstring()},
+      if (!xr.Start({PathWide(tools / kXr), PathWide(bin), PathWide(hlsl),
+                     PathWide(work / L"shader_common.h")},
                     work, log) ||
           xr.Poll(INFINITE) != 0)
         return false;
@@ -1566,8 +1763,67 @@ class Installer {
     for (auto& w : workers) w.join();
     if (stop) return false;
     Log(L"Shaders: " + Num(items.size()) + L", " + Num(made - failed) + L" newly translated, " + Num(failed) +
-        L" failed (logs in " + work.wstring() + L")");
-    if (failed > items.size() / 50) return SetError(Num(failed) + L" shaders could not be translated (see " + work.wstring() + L").");
+        L" failed (logs in " + PathWide(work) + L")");
+    if (failed > items.size() / 50) return SetError(Num(failed) + L" shaders could not be translated (see " + PathWide(work) + L").");
+    return true;
+  }
+
+  int WaitForLink(Child& child) {
+    while (!ui_.Cancelled()) {
+      const int status = child.Poll(150);
+      if (status >= 0) return status;
+    }
+    child.Kill();
+    child.Poll(INFINITE);  // it must stop writing before we remove the staged output
+    return 1;
+  }
+
+  bool LinkGame(const Args& cmd, const fs::path& build, const fs::path& log, const fs::path& out) {
+    if (ui_.Cancelled()) return false;
+    std::error_code ec;
+    fs::remove(out, ec);
+    if (ec) return SetError(L"Could not clear the old temporary game library.");
+    Child c;
+    if (!c.Start(cmd, build, log)) return SetError(L"Could not start the linker.");
+    const int status = WaitForLink(c);
+    if (status || ui_.Cancelled()) {
+      fs::remove(out, ec);
+      return ui_.Cancelled() ? false : SetError(L"Linking failed:\n" + Widen(Tail(log, 1500)));
+    }
+    const auto size = fs::file_size(out, ec);
+    if (ec || size == 0) {
+      fs::remove(out, ec);
+      return SetError(L"The linker produced no game library.");
+    }
+    if (!CommitLibrary(out)) {
+      fs::remove(out, ec);
+      return false;
+    }
+    Log(L"Built " + std::wstring(kGameLib));
+    return true;
+  }
+
+  bool CommitLibrary(const fs::path& library) {
+    // The old game library is untouched until the new one is linked. Never leave a stamp for
+    // a different ABI pointing at the new library, even if the launcher is interrupted here.
+    OutFile stamp;
+    const auto marker = home_ / kInstalledMarker;
+    const std::string text = std::string(kInstallVersion) + "\n" + build_id_ + "\n";
+    if (!stamp.Open(marker, error_)) return false;
+    if (!stamp.Write(reinterpret_cast<const uint8_t*>(text.data()), text.size()))
+      return SetError(L"Could not write the local game build stamp.");
+    if (ui_.Cancelled()) return false;
+    std::error_code ec;
+    if (InstalledBuildId(home_) != build_id_) fs::remove(marker, ec);
+    if (ec) return SetError(L"Could not clear the old game build stamp: " + Widen(ec.message()));
+#ifdef _WIN32
+    const bool replaced = MoveFileExW(library.c_str(), (home_ / kGameLib).c_str(), MOVEFILE_REPLACE_EXISTING);
+#else
+    fs::rename(library, home_ / kGameLib, ec);
+    const bool replaced = !ec;
+#endif
+    if (!replaced) return SetError(L"Could not replace the game library. Close the game and check the folder permissions.");
+    if (!stamp.Commit()) return SetError(L"Could not save the local game build stamp.");
     return true;
   }
 
@@ -1590,20 +1846,12 @@ class Installer {
     fs::path log = data_ / L"logs" / L"link.log";
     // Keep in sync with tools/game_dll/build_game_dll.py. Kernel imports bind to
     // librexruntime.dylib, memcpy & co. and log2f to libSystem (libSystem.tbd: names only).
-    Args cmd = {lld.wstring(), L"-arch", L"arm64", L"-platform_version", L"macos", L"15.0", L"15.0",
+    Args cmd = {PathWide(lld), L"-arch", L"arm64", L"-platform_version", L"macos", L"15.0", L"15.0",
                 L"-dylib", L"-install_name", L"@rpath/gtav_game.dylib", L"-dead_strip_dylibs",
-                L"-O1", L"-exported_symbols_list", (gd / L"interface" / L"gtav_game.exports").wstring(),
-                (gd / L"libSystem.tbd").wstring(), (root_ / L"librexruntime.dylib").wstring(), L"-o",
-                out.wstring(), L"@" + rsp.wstring()};
-    Child c;
-    if (!c.Start(cmd, build, log)) return SetError(L"Could not start ld64.lld");
-    int code = c.Poll(INFINITE);
-    if (code != 0) return SetError(L"Linking failed:\n" + Widen(Tail(log, 1500)));
-    if (rename(out.c_str(), (home_ / kGameLib).c_str()) != 0)
-      return SetError(L"Could not put gtav_game.dylib in place: " + Widen(strerror(errno)));
-    Log(L"Built gtav_game.dylib");
-    ui_.Progress(1.0);
-    return true;
+                L"-O1", L"-exported_symbols_list", PathWide(gd / L"interface" / L"gtav_game.exports"),
+                PathWide(gd / L"libSystem.tbd"), PathWide(root_ / L"librexruntime.dylib"), L"-o",
+                PathWide(out), L"@" + PathWide(rsp)};
+    return LinkGame(cmd, build, log, out);
   }
 #elif !defined(_WIN32)
   bool Link() {
@@ -1616,24 +1864,16 @@ class Installer {
       std::ofstream f(rsp);
       for (auto& o : objects_) f << "\"" << o.string() << "\"\n";
     }
-    fs::path out = root_ / L"gtav_game.so.new";
+    fs::path out = home_ / L"gtav_game.so.new";
     fs::path log = data_ / L"logs" / L"link.log";
     // Keep in sync with tools/game_dll/build_game_dll.py. -Bsymbolic keeps calls between game
     // functions direct; the hooks, bridge, kernel imports and log2f bind to gtav_fast,
     // librexruntime.so and libm at load time (-z now: at once, so a missing one fails at start).
-    Args cmd = {lld.wstring(), L"-shared", L"-soname", L"gtav_game.so", L"-Bsymbolic", L"-z", L"now",
+    Args cmd = {PathWide(lld), L"-shared", L"-soname", L"gtav_game.so", L"-Bsymbolic", L"-z", L"now",
                 L"-z", L"relro", L"-z", L"noexecstack", L"--hash-style=gnu", L"-O1",
-                L"--version-script=" + (iface / L"gtav_game.exports").wstring(), L"-o",
-                out.wstring(), L"@" + rsp.wstring()};
-    Child c;
-    if (!c.Start(cmd, build, log)) return SetError(L"Could not start ld.lld");
-    int code = c.Poll(INFINITE);
-    if (code != 0) return SetError(L"Linking failed:\n" + Widen(Tail(log, 1500)));
-    if (rename(out.c_str(), (root_ / kGameLib).c_str()) != 0)
-      return SetError(L"Could not put gtav_game.so in place: " + Widen(strerror(errno)));
-    Log(L"Built gtav_game.so");
-    ui_.Progress(1.0);
-    return true;
+                L"--version-script=" + PathWide(iface / L"gtav_game.exports"), L"-o",
+                PathWide(out), L"@" + PathWide(rsp)};
+    return LinkGame(cmd, build, log, out);
   }
 #else
   bool Link() {
@@ -1645,34 +1885,27 @@ class Installer {
     for (const wchar_t* name : {L"gtav_fast", L"rexruntime", L"ucrtbase"}) {
       fs::path lib = build / (std::wstring(name) + L".lib");
       Child c;
-      Args cmd = {lld.wstring(), L"/lib", L"/machine:x64",
-                  L"/def:" + (iface / (std::wstring(name) + L".def")).wstring(),
-                  L"/out:" + lib.wstring()};
+      Args cmd = {PathWide(lld), L"/lib", L"/machine:x64",
+                  L"/def:" + PathWide(iface / (std::wstring(name) + L".def")),
+                  L"/out:" + PathWide(lib)};
       fs::path log = data_ / L"logs" / L"implib.log";
-      if (!c.Start(cmd, build, log) || c.Poll(INFINITE) != 0)
-        return SetError(L"Could not build an import library:\n" + Widen(Tail(log, 800)));
+      if (ui_.Cancelled()) return false;
+      if (!c.Start(cmd, build, log) || WaitForLink(c) != 0)
+        return ui_.Cancelled() ? false : SetError(L"Could not build an import library:\n" + Widen(Tail(log, 800)));
       libs.push_back(lib);
     }
     fs::path rsp = build / L"link.rsp";
     {
       std::ofstream f(rsp);
-      for (auto& o : objects_) f << "\"" << Narrow(o.wstring()) << "\"\n";
-      for (auto& l : libs) f << "\"" << Narrow(l.wstring()) << "\"\n";
+      for (auto& o : objects_) f << "\"" << Narrow(PathWide(o)) << "\"\n";
+      for (auto& l : libs) f << "\"" << Narrow(PathWide(l)) << "\"\n";
     }
-    fs::path out = root_ / L"gtav_game.dll.new";
+    fs::path out = home_ / L"gtav_game.dll.new";
     fs::path log = data_ / L"logs" / L"link.log";
-    Args cmd = {lld.wstring(), L"/dll", L"/noentry", L"/nodefaultlib", L"/machine:x64",
-                L"/debug:none", L"/def:" + (iface / L"gtav_game.def").wstring(),
-                L"/out:" + out.wstring(), L"@" + rsp.wstring()};
-    Child c;
-    if (!c.Start(cmd, build, log)) return SetError(L"Could not start lld-link.exe");
-    int code = c.Poll(INFINITE);
-    if (code != 0) return SetError(L"Linking failed:\n" + Widen(Tail(log, 1500)));
-    if (!MoveFileExW(out.c_str(), (root_ / L"gtav_game.dll").c_str(), MOVEFILE_REPLACE_EXISTING))
-      return SetError(L"Could not put gtav_game.dll in place (is the game running?)");
-    Log(L"Built gtav_game.dll");
-    ui_.Progress(1.0);
-    return true;
+    Args cmd = {PathWide(lld), L"/dll", L"/noentry", L"/nodefaultlib", L"/machine:x64",
+                L"/debug:none", L"/def:" + PathWide(iface / L"gtav_game.def"),
+                L"/out:" + PathWide(out), L"@" + PathWide(rsp)};
+    return LinkGame(cmd, build, log, out);
   }
 #endif
 
@@ -1683,7 +1916,10 @@ class Installer {
   std::wstring* error_ = nullptr;
   std::ofstream log_;
   ExpectedSet expected_;
+  BuildLock lock_;
+  std::string build_id_;
   std::unique_ptr<Source> disc1_, disc2_, tu_;
+  std::vector<std::pair<std::string, std::unique_ptr<Source>>> parts_;
   std::map<std::string, const Entry*> tu_files_;
   std::map<std::string, Expected> done_;
   std::vector<std::wstring> mismatches_;
@@ -1709,12 +1945,29 @@ bool IsDataInstalled(const fs::path& home) {
          fs::exists(home / "data" / "game" / "default.xex", ec);
 }
 
-bool IsInstalled(const fs::path& root) {
+InstallStatus GetInstallStatus(const fs::path& root, const fs::path& home) {
   std::error_code ec;
-  if (!fs::exists(root / kGameLib, ec)) return false;
-  std::ifstream f(root / kInstalledMarker);
-  std::string line;
-  return std::getline(f, line) && line == kInstallVersion;
+  const auto data = home / "data";
+  if (!fs::is_regular_file(data / "game/default.xex", ec) ||
+      !fs::is_regular_file(data / "game/default.xexp", ec)) return InstallStatus::NeedsSources;
+  ExpectedSet files;
+  std::wstring error;
+  if (!files.Load(root / "tools/game_dll/expected.txt", &error) ||
+      !VisitLocalFiles(files, data, [&](const fs::path& path, const Expected&) {
+        return fs::is_regular_file(path, ec);
+      })) return InstallStatus::NeedsSources;
+  std::string target;
+  if (!fs::is_regular_file(home / kGameLib, ec) || fs::file_size(home / kGameLib, ec) == 0 || ec ||
+      !ReadPackageBuildId(root, &target) || InstalledBuildId(home) != target) return InstallStatus::NeedsRebuild;
+  return InstallStatus::Ready;
+}
+
+const wchar_t* InstallStatusText(InstallStatus status) {
+  switch (status) {
+    case InstallStatus::Ready: return L"Ready to play. Recompile only if you want to rebuild the local game library.";
+    case InstallStatus::NeedsRebuild: return L"Game files found. Choose Recompile to build for this release without the discs.";
+    default: return L"Choose the three sources, then select Install & build.";
+  }
 }
 
 #ifdef __APPLE__
@@ -1746,12 +1999,12 @@ bool CheckGameFolder(const fs::path& home, std::wstring* error) {
   std::error_code ec;
   fs::create_directories(home, ec);
   if (ec) {
-    *error = L"Could not create " + home.wstring() + L": " + Widen(ec.message());
+    *error = L"Could not create " + PathWide(home) + L": " + Widen(ec.message());
     return false;
   }
   // Xbox paths ignore case: the game data must be on a case-insensitive volume (macOS default).
   if (pathconf(home.c_str(), _PC_CASE_SENSITIVE) == 1) {
-    *error = home.wstring() + L" is on a case-sensitive volume. Pick a folder on a normal "
+    *error = PathWide(home) + L" is on a case-sensitive volume. Pick a folder on a normal "
              L"(case-insensitive) APFS or Mac OS Extended volume.";
     return false;
   }
@@ -1765,7 +2018,8 @@ bool SyncRuntime(const fs::path& root, const fs::path& home, std::wstring* error
   std::error_code ec;
   for (auto& e : fs::directory_iterator(root, ec)) {
     auto name = e.path().filename().string();
-    if (name == "gtav_fast" || e.path().extension() == ".dylib") files.push_back(e.path().filename());
+    if (name == "gtav_fast" || (e.path().extension() == ".dylib" && e.path().filename() != kGameLib))
+      files.push_back(e.path().filename());
   }
   for (const char* dir : {"vulkan", "tools/shaders"}) {
     for (auto it = fs::recursive_directory_iterator(root / dir, ec);
@@ -1775,7 +2029,7 @@ bool SyncRuntime(const fs::path& root, const fs::path& home, std::wstring* error
   }
   for (const fs::path& rel : files) {
     fs::path src = root / rel, dst = home / rel;
-    if (rel.begin()->string() == "tools") dst = home / "tools" / fs::relative(rel, "tools/shaders");
+    if (rel.begin()->string() == "tools") dst = home / "tools" / rel.lexically_relative("tools/shaders");
     std::error_code e1, e2;
     if (fs::exists(dst, e1) && fs::file_size(dst, e1) == fs::file_size(src, e2) &&
         fs::last_write_time(dst, e1) == fs::last_write_time(src, e2))
@@ -1786,7 +2040,7 @@ bool SyncRuntime(const fs::path& root, const fs::path& home, std::wstring* error
     fs::copy_file(src, tmp, fs::copy_options::overwrite_existing, e1);
     if (!e1) fs::last_write_time(tmp, fs::last_write_time(src, e2), e2);
     if (e1 || rename(tmp.c_str(), dst.c_str()) != 0) {
-      *error = L"Could not copy " + rel.wstring() + L" into the game folder";
+      *error = L"Could not copy " + PathWide(rel) + L" into the game folder";
       return false;
     }
   }
@@ -1875,6 +2129,11 @@ bool RunInstall(const fs::path& root, const fs::path& home, const InstallInputs&
   return inst.Run(error);
 }
 
+bool RunRebuild(const fs::path& root, const fs::path& home, InstallUi& ui, std::wstring* error) {
+  Installer inst(root, home, InstallInputs{}, ui);
+  return inst.Rebuild(error);
+}
+
 bool RunIphoneBuild(const fs::path& root, const fs::path& home, InstallUi& ui, std::wstring* error) {
   Installer inst(root, home, InstallInputs{}, ui);
   return inst.RunIphone(error);
@@ -1896,19 +2155,19 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
   std::vector<uint8_t> buf(8u << 20);
   for (auto it = fs::directory_iterator(root, ec); !ec && it != fs::directory_iterator();
        it.increment(ec)) {
-    auto ext = Lower(Narrow(it->path().extension().wstring()));
+    auto ext = Lower(Narrow(PathWide(it->path().extension())));
     if (ext != ".dll" && ext != ".so" && ext != ".dylib" && it->path().filename() != kGameExe)
       continue;
     std::wstring err;
-    if (auto b = OpenFileBlob(it->path().wstring(), &err)) {
+    if (auto b = OpenFileBlob(PathWide(it->path()), &err)) {
       for (uint64_t off = 0; off < b->size(); off += buf.size())
         b->ReadAt(off, buf.data(), size_t(std::min<uint64_t>(buf.size(), b->size() - off)));
     }
   }
   auto arg = [](const std::wstring& name, const fs::path& p) {
-    return L"--" + name + L"=" + p.wstring();
+    return L"--" + name + L"=" + PathWide(p);
   };
-  Args args = {(root / kGameExe).wstring(), arg(L"game_data_root", data / L"game"),
+  Args args = {PathWide(root / kGameExe), arg(L"game_data_root", data / L"game"),
                arg(L"user_data_root", data / L"user"), arg(L"update_data_root", data / L"update"),
                arg(L"log_file", data / L"logs" / L"gtav.log"),
                arg(L"gtav_native_spirv_dir", data / L"spirv"), L"--gpu_plugin=xenos",
@@ -1950,7 +2209,7 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
 #elif !defined(_WIN32)
   // The launcher becomes the game: it keeps the terminal and the exit code.
   if (chdir(root.c_str()) != 0) {
-    *error = L"Could not enter " + root.wstring();
+    *error = L"Could not enter " + PathWide(root);
     return false;
   }
   std::vector<std::string> narrow = NarrowArgs(args);

@@ -5,6 +5,8 @@
 //   ./gtav_launcher --setup DISC1 DISC2 TU  setup in the terminal with these paths
 //   ./gtav_launcher --cli [--setup]         terminal setup even with a desktop (paths asked for)
 //   ./gtav_launcher --unattended            setup from data/launcher.ini, no questions (testing)
+//   ./gtav_launcher --rebuild               validate the installed data and recompile without discs
+//   ./gtav_launcher --check-updates         check the fork's stable GitHub release
 //   ./gtav_launcher --iphone                after setup: iphone/GTAV.ipa for Sideloadly / AltStore
 //   ./gtav_launcher -- ARGS...              pass ARGS to the game (for example --vulkan_device=1)
 //
@@ -37,6 +39,7 @@
 
 #include "install.h"
 #include "sources.h"
+#include "update.h"
 
 namespace fs = std::filesystem;
 using namespace loader;
@@ -184,11 +187,35 @@ int Unattended() {
 
 void AddDesktopEntry(InstallUi* ui);
 
+int Rebuild() {
+  TermUi ui;
+  std::wstring error;
+  if (!RunRebuild(g_root, g_root, ui, &error)) {
+    fprintf(stderr, "\nRecompile stopped: %s\n(log: %s)\n", Narrow(error).c_str(),
+            (g_root / "data/logs/install.log").c_str());
+    return 1;
+  }
+  AddDesktopEntry(&ui);
+  return 0;
+}
+
+int CheckUpdates() {
+  const auto result = CheckForUpdate();
+  puts(result.message.c_str());
+  if (!result.url.empty()) puts(result.url.c_str());
+  else if (result.status == UpdateStatus::Error) printf("Releases: %s\n", kReleasePage.data());
+  return result.status == UpdateStatus::Error ? 1 : 0;
+}
+
 int Setup(std::vector<std::string> given, const std::vector<std::wstring>& game_args) {
-  printf("GTA V recomp setup\n\n"
-         "This builds the game from your own Xbox 360 copy of GTA V: Disc 1 (Install), Disc 2\n"
-         "(Play) and Title Update 27. Nothing is downloaded. Press Ctrl+C to stop; running setup\n"
-         "again continues where it stopped.\n\n");
+  printf("GTA V Recomp | Launcher v%s\n\n"
+         "Use your own Xbox 360 discs and Title Update 27. Setup checks, copies and builds locally.\n"
+         "Allow about 25 GB free for a first install. Ctrl+C stops the task.\n"
+         "Check project updates separately with --check-updates.\n\n", kLauncherVersion);
+  if (given.empty() && GetInstallStatus(g_root, g_root) != InstallStatus::NeedsSources) {
+    TermUi ui;
+    if (ui.Ask(L"Existing game files found. Recompile without the discs?")) return Rebuild();
+  }
   std::vector<std::string> saved = LoadInputs();
   std::vector<std::string> paths(3);
   for (int i = 0; i < 3; ++i) {
@@ -210,7 +237,7 @@ int Setup(std::vector<std::string> given, const std::vector<std::wstring>& game_
   }
   for (int i = 0; i < 3; ++i) {
     std::error_code ec;
-    if (!fs::exists(paths[i], ec)) {
+    if (!fs::is_regular_file(paths[i], ec) && !fs::is_directory(paths[i], ec)) {
       fprintf(stderr, "%s: %s does not exist.\n", kRowLabels[i], paths[i].c_str());
       return 1;
     }
@@ -240,7 +267,7 @@ int Setup(std::vector<std::string> given, const std::vector<std::wstring>& game_
 }
 
 // "GTA V recomp" in the desktop's applications menu (~/.local/share/applications), pointing at
-// this launcher, with a "Run setup again" action. Rewritten after every setup (the folder may move).
+// this launcher, with a "Setup and updates" action. Rewritten after every setup (the folder may move).
 void AddDesktopEntry(InstallUi* ui) {
   const char* home = getenv("HOME");
   if (!home || !*home) return;
@@ -259,7 +286,7 @@ void AddDesktopEntry(InstallUi* ui) {
        "Comment=GTA V for Xbox 360, recompiled from your own copy\n"
     << "Exec=\"" << exe << "\"\nPath=" << g_root.string() << "\n"
     << "Icon=applications-games\nTerminal=false\nCategories=Game;\nActions=Setup;\n\n"
-       "[Desktop Action Setup]\nName=Run setup again\n"
+       "[Desktop Action Setup]\nName=Setup and updates\n"
     << "Exec=\"" << exe << "\" --setup\n";
   f.close();
   if (f && ui) ui->Log(L"Added \"GTA V recomp\" to the applications menu.");
@@ -293,7 +320,7 @@ struct Gtk {
   X(gtk_text_buffer_place_cursor) X(gtk_text_buffer_get_insert) X(gtk_file_chooser_dialog_new)      \
   X(gtk_file_chooser_get_filename) X(gtk_file_chooser_set_filename) X(gtk_dialog_run)               \
   X(gtk_message_dialog_new) X(gtk_button_box_new) X(gtk_button_box_set_layout) X(g_signal_connect_data) \
-  X(g_idle_add) X(g_free)
+  X(g_idle_add) X(g_free) X(gtk_show_uri_on_window) X(g_error_free)
 #define GTAV_GTK_MEMBER(name) decltype(&::name) name = nullptr;
   GTAV_GTK_FUNCTIONS(GTAV_GTK_MEMBER)
 #undef GTAV_GTK_MEMBER
@@ -352,8 +379,9 @@ class SetupWindow : public InstallUi {
 
   void Build() {
     g_window = window_ = g.gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    g.gtk_window_set_title(GTK_WINDOW(window_), "GTA V recomp setup");
-    g.gtk_window_set_default_size(GTK_WINDOW(window_), 760, 620);
+    const auto version = std::string("GTA V Recomp  |  Launcher v") + kLauncherVersion;
+    g.gtk_window_set_title(GTK_WINDOW(window_), version.c_str());
+    g.gtk_window_set_default_size(GTK_WINDOW(window_), 760, 630);
     g.gtk_window_set_position(GTK_WINDOW(window_), GTK_WIN_POS_CENTER);
     g.gtk_container_set_border_width(GTK_CONTAINER(window_), 16);
     Connect(window_, "delete-event", +[](GtkWidget*, GdkEvent*, gpointer self) -> gboolean {
@@ -363,11 +391,13 @@ class SetupWindow : public InstallUi {
 
     GtkWidget* box = g.gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     g.gtk_container_add(GTK_CONTAINER(window_), box);
+    GtkWidget* heading = g.gtk_label_new(nullptr);
+    g.gtk_label_set_markup(GTK_LABEL(heading), R"(<span size="x-large" weight="bold">Set up GTA V Recomp</span>)");
+    g.gtk_label_set_xalign(GTK_LABEL(heading), 0);
+    g.gtk_box_pack_start(GTK_BOX(box), heading, FALSE, FALSE, 4);
     GtkWidget* intro = g.gtk_label_new(
-        "Point setup at your own copy of the game: both Xbox 360 discs and Title Update 27. Setup copies "
-        "the game data into this folder, recompiles the game executable on this computer and checks "
-        "every file. Nothing is downloaded and nothing is sent anywhere. It needs about 25 GB free "
-        "during setup (17 GB after) and 15-40 minutes.");
+        "Use your own Xbox 360 discs and Title Update 27. Setup checks, copies and builds locally. "
+        "Allow about 25 GB free for a first install. The update check is separate and optional.");
     g.gtk_label_set_line_wrap(GTK_LABEL(intro), TRUE);
     g.gtk_label_set_xalign(GTK_LABEL(intro), 0);
     g.gtk_box_pack_start(GTK_BOX(box), intro, FALSE, FALSE, 4);
@@ -375,7 +405,7 @@ class SetupWindow : public InstallUi {
     std::vector<std::string> saved = LoadInputs();
     for (int i = 0; i < 3; ++i) {
       GtkWidget* label = g.gtk_label_new(nullptr);
-      std::string markup = std::string("<b>") + kRowLabels[i] + "</b>  <span alpha=\"60%\">" + kRowHints[i] + "</span>";
+      std::string markup = "<b>" + std::to_string(i + 1) + ". " + kRowLabels[i] + "</b>  <span alpha=\"60%\">" + kRowHints[i] + "</span>";
       g.gtk_label_set_markup(GTK_LABEL(label), Escape(markup).c_str());
       g.gtk_label_set_xalign(GTK_LABEL(label), 0);
       g.gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, i ? 6 : 10);
@@ -395,6 +425,7 @@ class SetupWindow : public InstallUi {
 
     stage_ = g.gtk_label_new("");
     g.gtk_label_set_xalign(GTK_LABEL(stage_), 0);
+    g.gtk_label_set_line_wrap(GTK_LABEL(stage_), TRUE);
     g.gtk_box_pack_start(GTK_BOX(box), stage_, FALSE, FALSE, 10);
     progress_ = g.gtk_progress_bar_new();
     g.gtk_box_pack_start(GTK_BOX(box), progress_, FALSE, FALSE, 0);
@@ -412,24 +443,30 @@ class SetupWindow : public InstallUi {
     GtkWidget* buttons = g.gtk_button_box_new(GTK_ORIENTATION_HORIZONTAL);
     g.gtk_button_box_set_layout(GTK_BUTTON_BOX(buttons), GTK_BUTTONBOX_END);
     g.gtk_box_set_spacing(GTK_BOX(buttons), 8);
-    install_ = g.gtk_button_new_with_label("Install");
+    install_ = g.gtk_button_new_with_label("Install & build");
+    rebuild_ = g.gtk_button_new_with_label("Recompile");
+    cancel_ = g.gtk_button_new_with_label("Cancel");
     play_ = g.gtk_button_new_with_label("Play");
-    // Phone builds from the installed game (install.h RunIphoneBuild / RunAndroidBuild).
-    iphone_ = g.gtk_button_new_with_label("Build for iPhone");
-    android_ = g.gtk_button_new_with_label("Build for Android");
-    Connect(install_, "clicked", +[](GtkButton*, gpointer self) { static_cast<SetupWindow*>(self)->InstallClicked(); }, this);
+    Connect(install_, "clicked", +[](GtkButton*, gpointer self) { static_cast<SetupWindow*>(self)->InstallClicked(false); }, this);
+    Connect(rebuild_, "clicked", +[](GtkButton*, gpointer self) { static_cast<SetupWindow*>(self)->InstallClicked(true); }, this);
+    Connect(cancel_, "clicked", +[](GtkButton*, gpointer self) { static_cast<SetupWindow*>(self)->Cancel(); }, this);
     Connect(play_, "clicked", +[](GtkButton*, gpointer self) { static_cast<SetupWindow*>(self)->Play(); }, this);
-    Connect(iphone_, "clicked", +[](GtkButton*, gpointer self) { static_cast<SetupWindow*>(self)->PhoneClicked(false); }, this);
-    Connect(android_, "clicked", +[](GtkButton*, gpointer self) { static_cast<SetupWindow*>(self)->PhoneClicked(true); }, this);
-    g.gtk_container_add(GTK_CONTAINER(buttons), iphone_);
-    g.gtk_container_add(GTK_CONTAINER(buttons), android_);
-    g.gtk_container_add(GTK_CONTAINER(buttons), install_);
-    g.gtk_container_add(GTK_CONTAINER(buttons), play_);
+    for (auto* button : {install_, rebuild_, cancel_, play_}) g.gtk_container_add(GTK_CONTAINER(buttons), button);
     g.gtk_box_pack_start(GTK_BOX(box), buttons, FALSE, FALSE, 0);
 
+    GtkWidget* tools = g.gtk_button_box_new(GTK_ORIENTATION_HORIZONTAL);
+    g.gtk_button_box_set_layout(GTK_BUTTON_BOX(tools), GTK_BUTTONBOX_END);
+    g.gtk_box_set_spacing(GTK_BOX(tools), 8);
+    update_ = g.gtk_button_new_with_label("Check for updates");
+    iphone_ = g.gtk_button_new_with_label("Build for iPhone");
+    android_ = g.gtk_button_new_with_label("Build for Android");
+    Connect(update_, "clicked", +[](GtkButton*, gpointer self) { static_cast<SetupWindow*>(self)->UpdateClicked(); }, this);
+    Connect(iphone_, "clicked", +[](GtkButton*, gpointer self) { static_cast<SetupWindow*>(self)->PhoneClicked(false); }, this);
+    Connect(android_, "clicked", +[](GtkButton*, gpointer self) { static_cast<SetupWindow*>(self)->PhoneClicked(true); }, this);
+    for (auto* button : {update_, iphone_, android_}) g.gtk_container_add(GTK_CONTAINER(tools), button);
+    g.gtk_box_pack_start(GTK_BOX(box), tools, FALSE, FALSE, 0);
+
     SetBusy(false);
-    g.gtk_label_set_text(GTK_LABEL(stage_), IsInstalled(g_root) ? "Installed. Press Play, or Install to redo setup."
-                                                                : "Pick the three inputs, then press Install.");
     g.gtk_widget_show_all(window_);
   }
 
@@ -455,7 +492,7 @@ class SetupWindow : public InstallUi {
     std::condition_variable cv;
     int answer = -1;
     OnMain([&] {
-      bool yes = Question(s);
+      bool yes = !Cancelled() && Question(s);
       std::lock_guard lock(m);
       answer = yes;
       cv.notify_one();
@@ -491,27 +528,60 @@ class SetupWindow : public InstallUi {
       g.gtk_widget_set_sensitive(folder_[i], !busy);
       g.gtk_editable_set_editable(GTK_EDITABLE(paths_[i]), !busy);
     }
-    const bool installed = IsInstalled(g_root);
-    g.gtk_button_set_label(GTK_BUTTON(install_), busy ? "Cancel" : "Install");
-    g.gtk_widget_set_sensitive(install_, !busy || phone_ < 0);
-    g.gtk_widget_set_sensitive(play_, !busy && installed);
-    g.gtk_widget_set_sensitive(iphone_, (!busy && installed) || (busy && phone_ == 0));
-    g.gtk_widget_set_sensitive(android_, (!busy && installed) || (busy && phone_ == 1));
-    g.gtk_button_set_label(GTK_BUTTON(iphone_), busy && phone_ == 0 ? "Cancel" : "Build for iPhone");
-    g.gtk_button_set_label(GTK_BUTTON(android_), busy && phone_ == 1 ? "Cancel" : "Build for Android");
+    const auto status = busy ? InstallStatus::NeedsSources : GetInstallStatus(g_root, g_root);
+    const bool ready = status == InstallStatus::Ready;
+    g.gtk_widget_set_sensitive(install_, !busy);
+    g.gtk_widget_set_sensitive(rebuild_, !busy && status != InstallStatus::NeedsSources);
+    g.gtk_widget_set_sensitive(play_, !busy && ready);
+    g.gtk_widget_set_sensitive(iphone_, !busy && ready);
+    g.gtk_widget_set_sensitive(android_, !busy && ready);
+    g.gtk_widget_set_sensitive(cancel_, busy);
+    g.gtk_widget_set_sensitive(update_, !busy);
+    if (!busy) g.gtk_label_set_text(GTK_LABEL(stage_), Narrow(InstallStatusText(status)).c_str());
   }
 
-  // Build for iPhone / Android: the game's own install must be done first (the button is greyed
-  // out until then). Runs on a thread like the install; the same button cancels it.
+  void Cancel() {
+    cancelled_ = true;
+    g.gtk_label_set_text(GTK_LABEL(stage_), "Stopping the current task...");
+  }
+
+  bool EndTask() {
+    SetBusy(false);
+    if (!quit_when_stopped_) return false;
+    g.gtk_widget_destroy(window_);
+    return true;
+  }
+
+  void UpdateClicked() {
+    if (busy_) return;
+    cancelled_ = false;
+    SetBusy(true);
+    g.gtk_label_set_text(GTK_LABEL(stage_), "Checking GitHub for project updates...");
+    std::thread([this] {
+      auto result = CheckForUpdate();
+      OnMain([this, result = std::move(result)] {
+        if (EndTask() || Cancelled()) return;
+        Append(result.message);
+        if (result.url.empty() && result.status != UpdateStatus::Error) {
+          g.gtk_label_set_text(GTK_LABEL(stage_), result.message.c_str());
+          return;
+        }
+        if (!Question(result.message + "\n\nOpen GitHub Releases in your browser?")) return;
+        const auto url = result.url.empty() ? std::string(kReleasePage) : result.url;
+        GError* error = nullptr;
+        if (!g.gtk_show_uri_on_window(GTK_WINDOW(window_), url.c_str(), GDK_CURRENT_TIME, &error)) {
+          ErrorBox("Could not open your browser. Visit: " + url);
+          if (error) g.g_error_free(error);
+        }
+      });
+    }).detach();
+  }
+
   void PhoneClicked(bool android) {
-    if (busy_) {
-      cancelled_ = true;
-      g.gtk_label_set_text(GTK_LABEL(stage_), "Cancelling...");
-      return;
-    }
+    if (busy_) return;
     cancelled_ = false;
     last_ = -1;
-    phone_ = android ? 1 : 0;
+    g.gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_), 0);
     SetBusy(true);
     std::thread([this, android] {
       std::wstring err;
@@ -522,15 +592,14 @@ class SetupWindow : public InstallUi {
   }
 
   void PhoneFinished(bool ok, const std::string& error, bool android) {
-    phone_ = -1;
-    SetBusy(false);
+    if (EndTask()) return;
     if (ok) {
+      g.gtk_label_set_text(GTK_LABEL(stage_), android ? "Android pack ready in android/." : "iPhone build ready in iphone/.");
       g.gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_), 1.0);
-      return;  // the build's last Stage() says where the file is
+      return;
     }
     if (cancelled_) {
       g.gtk_label_set_text(GTK_LABEL(stage_), "Cancelled.");
-      if (quit_when_stopped_) g.gtk_widget_destroy(window_);
       return;
     }
     g.gtk_label_set_text(GTK_LABEL(stage_), android ? "Android build stopped." : "iPhone build stopped.");
@@ -558,62 +627,67 @@ class SetupWindow : public InstallUi {
     g.gtk_widget_destroy(d);
   }
 
-  void InstallClicked() {
-    if (busy_) {
-      cancelled_ = true;
-      g.gtk_label_set_text(GTK_LABEL(stage_), "Cancelling...");
-      return;
-    }
-    std::vector<std::string> paths(3);
-    for (int i = 0; i < 3; ++i) {
-      paths[i] = Trim(g.gtk_entry_get_text(GTK_ENTRY(paths_[i])));
-      std::error_code ec;
-      if (paths[i].empty() || !fs::exists(paths[i], ec)) {
-        ErrorBox(std::string(kRowLabels[i]) + ": pick the image, file or folder.");
-        return;
+  void InstallClicked(bool rebuild) {
+    if (busy_) return;
+    InstallInputs in;
+    if (!rebuild) {
+      std::vector<std::string> paths(3);
+      for (int i = 0; i < 3; ++i) {
+        paths[i] = Trim(g.gtk_entry_get_text(GTK_ENTRY(paths_[i])));
+        std::error_code ec;
+        auto path = fs::absolute(paths[i], ec);
+        if (paths[i].empty() || ec || (!fs::is_regular_file(path, ec) && !fs::is_directory(path, ec))) {
+          ErrorBox(std::string(kRowLabels[i]) + ": choose an existing file or folder.");
+          return;
+        }
+        paths[i] = path.string();
       }
-      paths[i] = fs::absolute(paths[i], ec).string();
+      SaveInputs(paths);
+      in = {Widen(paths[0]), Widen(paths[1]), Widen(paths[2])};
     }
-    SaveInputs(paths);
     cancelled_ = false;
     last_ = -1;
     SetBusy(true);
-    InstallInputs in{Widen(paths[0]), Widen(paths[1]), Widen(paths[2])};
-    std::thread([this, in] {
+    std::thread([this, in, rebuild] {
       std::wstring err;
-      bool ok = RunInstall(g_root, in, *this, &err);
+      bool ok = rebuild ? RunRebuild(g_root, g_root, *this, &err) : RunInstall(g_root, in, *this, &err);
       if (ok) AddDesktopEntry(this);
       std::string e = Narrow(err);
-      OnMain([this, ok, e] { Finished(ok, e); });
+      OnMain([this, ok, e, rebuild] { Finished(ok, e, rebuild); });
     }).detach();
   }
 
-  void Finished(bool ok, const std::string& error) {
-    SetBusy(false);
+  void Finished(bool ok, const std::string& error, bool rebuild) {
+    if (EndTask()) return;
     if (ok) {
-      g.gtk_label_set_text(GTK_LABEL(stage_), "Setup finished. Press Play.");
+      g.gtk_label_set_text(GTK_LABEL(stage_), "Game build ready. Press Play.");
       g.gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_), 1.0);
       return;
     }
-    if (cancelled_) {
-      g.gtk_label_set_text(GTK_LABEL(stage_), "Cancelled. Install again to continue where it stopped.");
-      if (quit_when_stopped_) g.gtk_widget_destroy(window_);
+    if (Cancelled()) {
+      g.gtk_label_set_text(GTK_LABEL(stage_), rebuild ? "Recompile cancelled." :
+          "Cancelled. Retry setup to resume copying, or recompile if all files are present.");
       return;
     }
-    g.gtk_label_set_text(GTK_LABEL(stage_), "Setup stopped.");
-    ErrorBox(error + "\n\n(log: " + (g_root / "data" / "logs" / "install.log").string() + ")");
+    g.gtk_label_set_text(GTK_LABEL(stage_), "Setup stopped. See the log below.");
+    ErrorBox(error + "\n\n(log: " + (g_root / "data/logs/install.log").string() + ")");
   }
 
   bool CloseRequested() {
     if (!busy_) return true;
-    if (Question("Setup is running. Stop it and close? Running setup again continues where it stopped.")) {
-      cancelled_ = true;
-      quit_when_stopped_ = true;  // the window closes when the install thread has stopped
+    if (!quit_when_stopped_ && Question("Stop the current task and close when it finishes?")) {
+      if (!busy_) return true;
+      Cancel();
+      quit_when_stopped_ = true;
     }
     return false;
   }
 
   void Play() {
+    if (busy_ || GetInstallStatus(g_root, g_root) != InstallStatus::Ready) {
+      if (!busy_) SetBusy(false);
+      return;
+    }
     // The launcher process becomes the game (exec): take the window down first.
     g.gtk_widget_hide(window_);
     while (g.gtk_events_pending()) g.gtk_main_iteration();
@@ -635,7 +709,9 @@ class SetupWindow : public InstallUi {
   GtkWidget* play_ = nullptr;
   GtkWidget* iphone_ = nullptr;
   GtkWidget* android_ = nullptr;
-  int phone_ = -1;  // the phone build running: 0 iPhone, 1 Android (-1: none, or the install)
+  GtkWidget* rebuild_ = nullptr;
+  GtkWidget* cancel_ = nullptr;
+  GtkWidget* update_ = nullptr;
   bool busy_ = false;
   bool quit_when_stopped_ = false;
   std::atomic<bool> cancelled_{false};
@@ -651,12 +727,6 @@ bool LoadGui() {
 // The setup window until it is closed (or the game starts). false: no GTK / display.
 bool RunSetupWindow(const std::vector<std::wstring>& game_args, int* code) {
   if (!LoadGui()) return false;
-  std::wstring error;
-  if (!Preflight(g_root, &error)) {
-    ErrorBox(Narrow(error));
-    *code = 1;
-    return true;
-  }
   SetupWindow w(game_args);
   w.Build();
   g.gtk_main();
@@ -683,6 +753,7 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, [](int) { g_cancelled = 1; });
 
   bool setup = false, unattended = false, cli = false, iphone = false, android = false;
+  bool rebuild = false, update = false;
   std::vector<std::string> paths;
   std::vector<std::wstring> game_args;
   for (int i = 1; i < argc; ++i) {
@@ -701,8 +772,15 @@ int main(int argc, char** argv) {
       iphone = true;
     } else if (a == "--android") {
       android = true;
+    } else if (a == "--rebuild") {
+      rebuild = true;
+    } else if (a == "--check-updates") {
+      update = true;
+    } else if (a == "--version") {
+      puts(kLauncherVersion);
+      return 0;
     } else if (a == "--help" || a == "-h") {
-      printf("usage: %s [--setup [DISC1 DISC2 TU]] [--cli] [--unattended] [--iphone] [--android] [-- GAME_ARGS...]\n", argv[0]);
+      printf("usage: %s [--setup [DISC1 DISC2 TU]] [--cli] [--unattended] [--rebuild] [--check-updates] [--version] [--iphone] [--android] [-- GAME_ARGS...]\n", argv[0]);
       return 0;
     } else if (a.rfind("--", 0) == 0) {
       fprintf(stderr, "unknown option %s (game options go after --)\n", a.c_str());
@@ -711,6 +789,8 @@ int main(int argc, char** argv) {
       paths.push_back(a);
     }
   }
+  if (update) return CheckUpdates();
+  if (rebuild) return Rebuild();
   if (unattended) return Unattended();
   if (iphone) {
     // The iPhone build (install.h RunIphoneBuild) from the installed game.
@@ -742,14 +822,13 @@ int main(int argc, char** argv) {
   const bool window = !cli && paths.empty();
 
   std::wstring error;
-  if (!setup && IsInstalled(g_root)) {
+  if (!setup && GetInstallStatus(g_root, g_root) == InstallStatus::Ready) {
     if (LaunchGame(g_root, &error, game_args)) return 0;
-    if (window) {
-      ShowError(Narrow(error));
-    } else {
+    if (!window) {
       fprintf(stderr, "%s\n", Narrow(error).c_str());
+      return 1;
     }
-    return 1;
+    ShowError(Narrow(error));
   }
   int code = 0;
   if (window && RunSetupWindow(game_args, &code)) return code;

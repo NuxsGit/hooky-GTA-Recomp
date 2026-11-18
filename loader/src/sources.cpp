@@ -81,6 +81,30 @@ std::string Narrow(const std::wstring& w) {
 }
 #endif
 
+fs::path PathFromWide(const std::wstring& s) {
+#ifdef _WIN32
+  return fs::path(s);
+#else
+  return fs::path(Narrow(s));
+#endif
+}
+
+fs::path PathFromUtf8(const std::string& s) {
+#ifdef _WIN32
+  return PathFromWide(Widen(s));
+#else
+  return fs::path(s);
+#endif
+}
+
+std::wstring PathWide(const fs::path& p) {
+#ifdef _WIN32
+  return p.native();
+#else
+  return Widen(p.native());
+#endif
+}
+
 namespace {
 
 std::string Lower(std::string s) {
@@ -292,12 +316,13 @@ class DiscFolder : public Source {
          !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
       if (!it->is_regular_file(ec)) continue;
       Entry e;
-      e.path = Narrow(fs::relative(it->path(), root_, ec).generic_wstring());
+      const auto name = fs::relative(it->path(), root_, ec).generic_u8string();
+      e.path.assign(name.begin(), name.end());
       e.size = it->file_size(ec);
       entries_.push_back(e);
     }
     if (ec) {
-      *error = L"Could not list " + root_.wstring() + L": " + Widen(ec.message());
+      *error = L"Could not list " + PathWide(root_) + L": " + Widen(ec.message());
       return false;
     }
     std::sort(entries_.begin(), entries_.end(),
@@ -309,17 +334,17 @@ class DiscFolder : public Source {
     auto blob = OpenEntry(e, error);
     if (!blob) return false;
     if (!StreamBlob(*blob, 0, e.size, sink)) {
-      *error = L"Read error in " + (root_ / Widen(e.path)).wstring();
+      *error = L"Read error in " + PathWide(root_ / PathFromUtf8(e.path));
       return false;
     }
     return true;
   }
 
   std::unique_ptr<Blob> OpenEntry(const Entry& e, std::wstring* error) override {
-    return OpenFileBlob((root_ / Widen(e.path)).wstring(), error);
+    return OpenFileBlob(PathWide(root_ / PathFromUtf8(e.path)), error);
   }
 
-  std::wstring Describe() const override { return root_.wstring(); }
+  std::wstring Describe() const override { return PathWide(root_); }
 
  private:
   fs::path root_;
@@ -536,8 +561,9 @@ const Entry* Source::Find(const std::string& path) const {
 
 std::unique_ptr<Source> OpenDisc(const std::wstring& path, std::wstring* error) {
   std::error_code ec;
-  if (fs::is_directory(path, ec)) {
-    auto folder = std::make_unique<DiscFolder>(path);
+  const fs::path native = PathFromWide(path);
+  if (fs::is_directory(native, ec)) {
+    auto folder = std::make_unique<DiscFolder>(native);
     if (!folder->Load(error)) return nullptr;
     return folder;
   }

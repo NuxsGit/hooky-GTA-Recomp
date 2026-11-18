@@ -1,5 +1,3 @@
-Just want to play the game on Windows, Android, IOS, Mac or Linux? go here https://github.com/andrewnakas/gtav-recomp/releases
-
 # GTA V (Xbox 360) recompiled: Windows, Linux, macOS, iPhone and Android
 
 Grand Theft Auto V for Xbox 360 (Title Update 27), **statically recompiled** from the console's
@@ -18,9 +16,11 @@ the translated shaders) is made on your own computer and stays there.
 > download link. This project's GPL license covers only our own code and cannot give anyone the
 > right to share Rockstar's.
 
-**Downloads: [Releases](https://github.com/andrewnakas/gtav-recomp/releases).** Pick the package
-for your computer (Windows, Linux or macOS). Every package can also build the **iPhone** and
-**Android** versions, so you never need a separate phone download.
+**Downloads for this fork: [Hooky GTA Recomp Releases](https://github.com/NuxsGit/hooky-GTA-Recomp/releases).**
+Pick the package for your computer (Windows, Linux or macOS). Packages with the phone shells can
+also build the **iPhone** and **Android** versions. If the fork has no published package yet, the
+[upstream releases](https://github.com/andrewnakas/gtav-recomp/releases) are separate builds and do
+not include this fork's changes.
 
 ---
 
@@ -28,6 +28,7 @@ for your computer (Windows, Linux or macOS). Every package can also build the **
 - [How it works](#how-it-works)
 - [What you need](#what-you-need)
 - [Windows](#windows) · [Linux](#linux) · [macOS](#macos)
+- [Recompiling and updating](#recompiling-and-updating)
 - [iPhone](#iphone) · [Android](#android)
 - [Performance](#performance)
 - [Troubleshooting](#troubleshooting)
@@ -43,7 +44,7 @@ for your computer (Windows, Linux or macOS). Every package can also build the **
 1. **Setup copies and checks your game.** The launcher reads your Disc 1 and Disc 2 (ISO images or
    extracted folders) and your Title Update 27, copies the game files into its game folder, and
    checks every file against known-good SHA-256 hashes, so a damaged or wrong dump is caught
-   up front.
+   up front. The executable and TU27 patch are verified before copying the large game files.
 2. **Your executable is recompiled on your machine.** The bundled ReXGlue codegen turns the game's
    PowerPC code into C++ (811 source files). Their hashes are checked against the reference build,
    so every player gets the same code. Then the bundled LLVM/clang compiles them into a native game
@@ -84,22 +85,23 @@ from them.
 
 1. Download `gtav-recomp-windows-x64.zip`, unzip it somewhere with enough space, and run
    `gtav_launcher.exe`.
-2. Pick **Disc 1**, **Disc 2** and the **title update** (File... or Folder...), then press **Install**.
+2. Pick **Disc 1**, **Disc 2** and the **title update** (File... or Folder...), then press
+   **Install & build**.
 3. When setup finishes, press **Play**.
 
 Later: running `gtav_launcher.exe` starts the game directly. Hold **Shift** while starting it to
-get the setup window (redo setup, or **Build for iPhone** / **Build for Android**). Logs: `data\logs`.
+open setup and updates. Logs: `data\logs`.
 
 ## Linux
 
 1. Download `gtav-recomp-linux-x64.tar.gz` and unpack it: `tar xf gtav-recomp-linux-x64.tar.gz`.
 2. Open `gtav_launcher` (double-click it, or run `./gtav_launcher`). The setup window opens: choose
-   Disc 1, Disc 2 and the title update, then press **Install**. (Without a desktop, setup runs in the
-   terminal: `./gtav_launcher --setup "Disc 1.iso" "Disc 2.iso" tu00000009_00000000`.)
+   Disc 1, Disc 2 and the title update, then press **Install & build**. Without a desktop, run
+   `./gtav_launcher --setup "Disc 1.iso" "Disc 2.iso" tu00000009_00000000` in the terminal.
 3. Press **Play**. Setup also adds "GTA V recomp" to your applications menu.
 
 Later: the menu entry or `./gtav_launcher` starts the game. `./gtav_launcher --setup` (or the menu
-entry's "Run setup again") opens the setup window with the phone buttons. Logs: `data/logs`.
+entry's "Setup and updates" action) opens the setup window. Logs: `data/logs`.
 
 ## macOS
 
@@ -107,10 +109,36 @@ entry's "Run setup again") opens the setup window with the phone buttons. Logs: 
 2. The app is not notarized, so open it once, then go to System Settings > Privacy & Security >
    **Open Anyway** (or run `xattr -dr com.apple.quarantine /Applications/GTAV.app`).
 3. Choose Disc 1, Disc 2, the title update and a game folder (default
-   `~/Library/Application Support/GTAV Recomp`), then press **Install**, then **Play**.
+   `~/Library/Application Support/GTAV Recomp`), then press **Install & build**, then **Play**.
 
-Later: opening `GTAV.app` starts the game. Hold **Option** while opening it to get the setup window
-with **Build for iPhone** / **Build for Android**.
+Later: opening `GTAV.app` starts the game if the local build is compatible. Hold **Option** while
+opening it (or pass `--setup`) to manage the install and updates.
+
+## Recompiling and updating
+
+- **Recompile** checks the files already in `data/` and builds the game library again, without
+  needing the original discs or TU file. Use it after an interrupted compilation or when a new
+  runtime needs a new game library. If game files are missing or damaged, use **Install & build**
+  with your originals. Windows, Linux and macOS also support `--rebuild`; the build log is
+  `data/logs/install.log`. Recompiling does not replace your game data, saves or settings.
+- **Check for updates** queries the fork's latest stable GitHub release and looks for the package
+  for your platform. It runs only on request (`--check-updates` also works); on Linux the check
+  uses the system `curl`. It does not send any game files or download/install anything by itself.
+  When an update is available, you can open the release page and download the named archive.
+
+**Installing the update:** Close the game and launcher first. On Windows and Linux, extract the
+new package to a **new folder**, keeping the old one as a backup. Copy `data/` and, if present,
+your local `gtav_game.dll` (Windows) or `gtav_game.so` (Linux), `gtav.toml`, `gamecontrollerdb.txt`,
+and `args.txt` to the new folder. Don't copy old runtime binaries or `tools/` over the new package.
+Start the launcher in the new folder and point your shortcuts there. Locally built phone exports
+can stay in the old folder.
+
+On macOS, replace **the whole `GTAV.app`** and keep the same game folder. Don't copy files into the
+signed bundle. Keep a backup of your game folder if you want to roll back.
+
+If setup says the local game library needs to be rebuilt, choose **Recompile**. Builds from older
+launchers without a compatibility stamp need this once. A runtime/launcher-only update that
+keeps the same game build inputs and ABI can play without recompiling.
 
 ## Controls
 
@@ -199,7 +227,7 @@ free during setup.
 3. **Copy both files and your Disc 1 ISO, Disc 2 ISO and TU file** to the phone (for example its
    Download folder).
 4. **Install `GTAV.apk`** on the phone (allow installing apps from that source).
-5. **Open GTA V**, choose the pack and the three disc files, and press **Install**. It copies and
+5. **Open GTA V**, choose the pack and the three disc files, and press **Install & build**. It copies and
    checks about 16 GB, then starts. You can delete the disc images and the pack afterwards.
 
 **Missing objects?** Copy the phone's `Android/data/com.gtavrecomp.app/files/shader_cache` folder to

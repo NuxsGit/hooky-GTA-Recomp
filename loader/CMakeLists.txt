@@ -5,7 +5,12 @@
 # Linux: a setup window (GTK 3, dlopen'ed) or the terminal (src/main_linux.cpp) that builds
 # gtav_game.so; static libstdc++ and libgcc, so it needs only glibc.
 cmake_minimum_required(VERSION 3.25)
-project(gtav_launcher LANGUAGES CXX)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS VERSION)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" GTAV_VERSION LIMIT_COUNT 1)
+if(NOT GTAV_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
+    message(FATAL_ERROR "loader/VERSION must be MAJOR.MINOR.PATCH")
+endif()
+project(gtav_launcher VERSION ${GTAV_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,11 +23,12 @@ if(WIN32)
         src/sources.cpp
         src/launcher.manifest)  # visual styles, DPI awareness, long paths
     target_compile_definitions(gtav_launcher PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(gtav_launcher PRIVATE comctl32 ole32 shell32 bcrypt)
+    target_link_libraries(gtav_launcher PRIVATE comctl32 ole32 shell32 bcrypt winhttp)
 elseif(APPLE)
     # GTAV.app: the launcher is the bundle's executable; the package (gtav_fast, dylibs, rexglue,
     # tools/) goes to Contents/Resources/gtav (tools/release/make_release_macos.py).
     enable_language(OBJCXX)
+    math(EXPR GTAV_MAC_BUILD_MAJOR "${PROJECT_VERSION_MAJOR} + 1")  # CFBundleVersion starts at 1
     add_executable(gtav_launcher MACOSX_BUNDLE
         src/main_mac.mm
         src/install.cpp
@@ -30,6 +36,10 @@ elseif(APPLE)
     set_target_properties(gtav_launcher PROPERTIES
         OUTPUT_NAME GTAV
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/src/Info.plist.in
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION}
+        MACOSX_BUNDLE_BUNDLE_VERSION ${GTAV_MAC_BUILD_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}
+        OBJCXX_STANDARD 20
+        OBJCXX_STANDARD_REQUIRED ON
         XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES)
     target_compile_options(gtav_launcher PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     target_link_libraries(gtav_launcher PRIVATE "-framework Cocoa" "-framework UniformTypeIdentifiers")
@@ -54,6 +64,14 @@ else()
     endif()
 endif()
 
+target_sources(gtav_launcher PRIVATE src/update.cpp src/update_http.cpp)
+target_compile_definitions(gtav_launcher PRIVATE GTAV_LAUNCHER_VERSION="${PROJECT_VERSION}")
+# Release staging checks this sidecar to catch packaging a launcher built for another version.
+add_custom_command(TARGET gtav_launcher POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/VERSION"
+            "${CMAKE_CURRENT_BINARY_DIR}/launcher-version.txt"
+    VERBATIM)
+
 # The phone builds (RunIphone, RunAndroid) translate shaders with the Adreno passes, C++ ports of
 # tools/android/ubo_constants.py and lower_int64.py; the int64 lowering needs SPIRV-Tools (static,
 # from the SDK's thirdparty tree).
@@ -72,4 +90,23 @@ if(EXISTS ${_gtav_tp}/spirv-tools/CMakeLists.txt)
     target_link_libraries(gtav_launcher PRIVATE SPIRV-Tools-static)
 else()
     message(WARNING "rexglue-sdk/thirdparty/spirv-tools missing: the launcher cannot build for Android")
+endif()
+
+option(GTAV_LAUNCHER_TESTS "Build asset-free launcher tests" OFF)
+if(GTAV_LAUNCHER_TESTS)
+    enable_testing()
+    add_executable(gtav_update_tests tests/update_tests.cpp src/update.cpp)
+    target_include_directories(gtav_update_tests PRIVATE src)
+    target_compile_definitions(gtav_update_tests PRIVATE GTAV_LAUNCHER_VERSION="${PROJECT_VERSION}")
+    add_test(NAME update_policy COMMAND gtav_update_tests)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_library(gtav_test_vulkan SHARED tests/vulkan_stub.cpp)
+        set_target_properties(gtav_test_vulkan PROPERTIES OUTPUT_NAME vulkan SOVERSION 1
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fixture-libs")
+        add_test(NAME launcher_fixture COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/rebuild_test.py"
+            $<TARGET_FILE:gtav_launcher> $<TARGET_FILE_DIR:gtav_test_vulkan>)
+        set_tests_properties(launcher_fixture PROPERTIES TIMEOUT 90)
+    endif()
 endif()

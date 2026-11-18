@@ -39,7 +39,7 @@ First run
      cd gtav-recomp-linux-x64
 2. Open gtav_launcher: double-click it in your file manager (GNOME Files: right-click it, "Run as
    a Program"), or run ./gtav_launcher in a terminal. The setup window opens: choose Disc 1,
-   Disc 2 and the title update (each an image/file or an extracted folder), then press Install.
+   Disc 2 and the title update (each an image/file or an extracted folder), then press Install & build.
    Without a desktop (or with --cli) the same setup runs in the terminal instead, and
      ./gtav_launcher --setup "/path/Disc 1.iso" "/path/Disc 2.iso" /path/tu00000009_00000000
    runs it with the paths given.
@@ -52,12 +52,26 @@ First run
    "GTA V recomp" to your applications menu.
 
 Later runs: the menu entry or ./gtav_launcher starts the game directly. ./gtav_launcher --setup
-(or the menu entry's "Run setup again") opens the setup window again, for example after moving
+(or the menu entry's "Setup and updates") opens the setup window again, for example after moving
 your discs.
 
 Game options go after "--". On a laptop with two GPUs, pick the dedicated one with
   ./gtav_launcher -- --vulkan_device=1
 The game log is data/logs/gtav.log, the setup log data/logs/install.log.
+
+Recompile and update
+--------------------
+Choose Recompile (or run the launcher with --rebuild) to check the existing game data and build
+the game library without recopying the discs. Use Install & build when the data is missing or
+damaged. Recompile leaves your game data, saves and settings in place.
+
+Choose Check for updates (or --check-updates) to look for a newer stable release of this fork. On Linux this check needs curl.
+When offered, open the GitHub release and download the named archive. No update is applied by
+the launcher. https://github.com/NuxsGit/hooky-GTA-Recomp/releases
+Quit the game and launcher. Unpack the new archive in a new folder and keep the old folder
+as a backup. Copy data/, gtav_game.so, gtav.toml, gamecontrollerdb.txt and args.txt if present.
+Use the new folder's launcher and tools; don't copy the old runtime or tools over them.
+Recompile if the new launcher asks; compatible runtime-only updates can play immediately.
 
 Controls
 --------
@@ -120,7 +134,7 @@ android/gtav-android-pack.zip). Do not share any of it: it contains Rockstar Gam
 work. (android/GTAV.apk as downloaded holds no game and is fine to share.)
 
 This project is free software under the GNU GPL, version 3 or later (LICENSES/gtav-recomp-GPL-3.0.txt).
-Source code: https://github.com/andrewnakas/gtav-recomp. The complete source of every program in
+Source code: https://github.com/NuxsGit/hooky-GTA-Recomp. The complete source of every program in
 this package that is under the GPL or LGPL (this project, the ReXGlue SDK runtime with the FFmpeg
 it links statically, XenosRecomp, plume) is in gtav-recomp-src-<version>.tar.xz on the same
 release page.
