@@ -2636,7 +2636,7 @@ index a53a222..087fada 100644
 +  return true;
 +}
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..0a6a909 100644
+index 001f36b..c6c4561 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -10,6 +10,7 @@
@@ -2647,7 +2647,7 @@ index 001f36b..0a6a909 100644
  #include <array>
  #include <cstdint>
  #include <cstring>
-@@ -21,6 +22,10 @@
+@@ -21,11 +22,16 @@
  #include <utility>
  #include <vector>
 
@@ -2658,7 +2658,13 @@ index 001f36b..0a6a909 100644
  #include <SPIRV/GlslangToSpv.h>
  #include <glslang/Public/ShaderLang.h>
  #include <rex/assert.h>
-@@ -47,6 +52,30 @@
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
++#include <rex/filesystem.h>
+ #include <rex/logging.h>
+ #include <rex/math.h>
+ #include <rex/graphics/util/draw.h>
+@@ -47,6 +53,30 @@
  #include <rex/ui/vulkan/util.h>
 
  // Legacy backend compatibility aliases for shared readback controls.
@@ -2689,7 +2695,7 @@ index 001f36b..0a6a909 100644
  REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
                      "Read render-to-texture results on the CPU")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
-@@ -1066,6 +1095,10 @@ bool VulkanCommandProcessor::SetupContext() {
+@@ -1066,6 +1096,10 @@ bool VulkanCommandProcessor::SetupContext() {
      shared_memory_descriptor_buffer_info.buffer = shared_memory_->buffer();
      shared_memory_descriptor_buffer_info.offset = shared_memory_binding_range * i;
      shared_memory_descriptor_buffer_info.range = shared_memory_binding_range;
@@ -2700,7 +2706,7 @@ index 001f36b..0a6a909 100644
    }
    VkWriteDescriptorSet write_descriptor_sets[2];
    VkWriteDescriptorSet& write_descriptor_set_shared_memory = write_descriptor_sets[0];
-@@ -2275,7 +2308,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2275,7 +2309,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
 
@@ -2715,7 +2721,7 @@ index 001f36b..0a6a909 100644
      return;
    ui::Presenter* presenter = graphics_system_->presenter();
    if (!presenter) {
-@@ -3594,8 +3633,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3594,8 +3634,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
@@ -2728,7 +2734,7 @@ index 001f36b..0a6a909 100644
    auto draw_fail = [&](const char* stage) {
      auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
      REXGPU_ERROR(
-@@ -4385,6 +4428,9 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4385,6 +4429,9 @@ bool VulkanCommandProcessor::IssueCopy() {
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -2738,7 +2744,7 @@ index 001f36b..0a6a909 100644
 
    if (!BeginSubmission(true)) {
      return false;
-@@ -4400,6 +4446,64 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4400,6 +4447,64 @@ bool VulkanCommandProcessor::IssueCopy() {
    return IssueCopy_ReadbackResolvePath();
  }
 
@@ -2772,7 +2778,7 @@ index 001f36b..0a6a909 100644
 +  std::error_code ec;
 +  std::filesystem::create_directories(dir, ec);
 +  auto path = dir / fmt::format("{:03}_{:08X}.bin", emu_dump_sequence_++, address);
-+  if (FILE* f = std::fopen(path.c_str(), "wb")) {
++  if (FILE* f = rex::filesystem::OpenFile(path, "wb")) {
 +    std::fwrite(data, 1, length, f);
 +    std::fclose(f);
 +  }
@@ -2791,7 +2797,7 @@ index 001f36b..0a6a909 100644
 +                              fmt::format("frame_{}", frame_current_);
 +  std::error_code ec;
 +  std::filesystem::create_directories(dir, ec);
-+  if (FILE* f = std::fopen((dir / "draws.bin").c_str(), "ab")) {
++  if (FILE* f = rex::filesystem::OpenFile(dir / "draws.bin", "ab")) {
 +    uint64_t ps = active_pixel_shader_ ? active_pixel_shader_->ucode_data_hash() : 0;
 +    uint32_t header[4] = {prim, count, uint32_t(ps), uint32_t(ps >> 32)};
 +    std::fwrite(header, 4, 4, f);
@@ -2803,7 +2809,7 @@ index 001f36b..0a6a909 100644
  bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-@@ -4682,6 +4786,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4682,6 +4787,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      uint8_t* destination = memory_->TranslatePhysical(written_address);
      if (destination) {
        std::memcpy(destination, readback.mapped_data[read_index], written_length);

@@ -133,7 +133,8 @@ def main():
     # The fork's renderer calls Vulkan-only functions exported by rexgpu-xenosrd.dll.
     run("cmake", "--preset", "win-amd64", "-DREXGLUE_USE_VULKAN=ON", *clang, cwd=sdk)
     sdk_build = sdk / "out/build/win-amd64"
-    run("cmake", "--build", sdk_build, "--config", rel, "--parallel")
+    # Keep Ninja compiling independent targets after a failure to surface all diagnostics at once.
+    run("cmake", "--build", sdk_build, "--config", rel, "--parallel", "--", "-k", "0")
     run("cmake", "--install", sdk_build, "--config", rel)
 
     run("cmake", "-S", "thirdparty/XenosRecomp", "-B", "build-xr", "-G", "Ninja",
