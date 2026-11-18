@@ -183,8 +183,11 @@ keybind_right_shoulder = "3,Mouse5"
 
 Use `mnk_mouse = false` for keyboard-only camera or `mnk_mode = false` to disable keyboard/mouse.
 On Windows, `input_backend = "xinput"` switches to the XInput backend for compatible pads if SDL
-isn't working for your setup (use F1 for the overlay in this mode). macOS and Linux launchers also
-forward flags after `--`, e.g. `./gtav_launcher -- --mnk_mouse=false` on Linux. On phones the
+isn't working for your setup (use F1 for the overlay in this mode). For a native DualSense on
+Windows, use `input_backend = "sdl"` (including in settings copied from an older install). See the
+[controller checks](tools/input_tests/README.md#windows-usb-and-bluetooth-before-release) for
+USB and Bluetooth troubleshooting. macOS and Linux launchers also forward flags after `--`,
+e.g. `./gtav_launcher -- --mnk_mouse=false` on Linux. On phones the
 on-screen controls remain the default. To try an external keyboard and mouse, add `--mnk_mode=true`
 and `--mnk_mouse=true` to `args.txt` in the app's Documents (iPhone) or external files (Android)
 folder. External input on phones depends on what the OS forwards to SDL.

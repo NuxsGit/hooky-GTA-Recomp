@@ -2,43 +2,35 @@
 player's machine, and licenses. Nothing from the game or the console ships: no XEX/XEXP, disc or
 title-update files, no generated C++, no compiled game code, no shaders, no dumps.
 
-usage: make_release.py OUT_DIR --llvm DIR --expected FILE [--zip]
+usage: make_release.py OUT_DIR --llvm DIR --expected FILE --licenses DIR [--zip]
   OUT_DIR     a new or empty staging folder (never a live installation)
-  --llvm      folder with bin/clang.exe, bin/lld-link.exe, lib/clang/19/include, LICENSE.TXT
+  --llvm      unpacked LLVM with bin/clang.exe, bin/lld-link.exe, bin/llvm-readobj.exe,
+              lib/clang/19/include and LICENSE.TXT
+  --sdk       patched SDK source tree, installed in out/install/win-amd64 (RelWithDebInfo)
   --expected  tools/game_dll/expected.txt (make_expected.py data + gen, concatenated)
-  --licenses  folder with extra license texts (dxc-LICENSE.TXT)
+  --licenses  folder with dxc-LICENSE.TXT and GPL-3.0.txt
 Run taint_scan.py on OUT_DIR before publishing.
 """
 import argparse
+import filecmp
 import os
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
 
 from release_metadata import launcher_version, prepare_output, write_metadata
 
-REPO = Path(__file__).resolve().parents[2]  # E:\gtav-native
+REPO = Path(__file__).resolve().parents[2]
 BUILD = REPO / "build-dll"
-SDK = Path(r"E:\gtav-rex\rexglue-sdk")
-SDK_BIN = SDK / "out" / "install" / "win-amd64" / "bin"
 XR = REPO / "thirdparty" / "XenosRecomp"
+SDL_DLL = "SDL3rd.dll"
 
 # (source, destination below OUT_DIR)
 FILES = [
     (REPO / "build-launcher" / "gtav_launcher.exe", "gtav_launcher.exe"),
     (BUILD / "gtav_fast.exe", "gtav_fast.exe"),
-    (BUILD / "rexruntimerd.dll", "rexruntimerd.dll"),
-    (BUILD / "rexgpu-xenosrd.dll", "rexgpu-xenosrd.dll"),
-    (BUILD / "TracyClientrd.dll", "TracyClientrd.dll"),
-    (BUILD / "SDL3rd.dll", "SDL3rd.dll"),
-    (SDK_BIN / "rexgluerd.exe", "rexgluerd.exe"),
-    # Shader translation on the player's machine (shader_compiler.cpp). dxil.dll is not needed
-    # for SPIR-V and stays out.
-    (BUILD / "tools" / "XenosRecomp.exe", "tools/XenosRecomp.exe"),
-    (BUILD / "tools" / "shader_common.h", "tools/shader_common.h"),
-    (BUILD / "tools" / "dxc.exe", "tools/dxc.exe"),
-    (BUILD / "tools" / "dxcompiler.dll", "tools/dxcompiler.dll"),
     # Game DLL build inputs: our freestanding header and CRT, the hook list, import lists.
     (REPO / "gtav" / "fs" / "gtav_pch.h", "tools/game_dll/fs/gtav_pch.h"),
     (REPO / "gtav" / "fs" / "layout_check.h", "tools/game_dll/fs/layout_check.h"),
@@ -53,13 +45,12 @@ FILES = [
     (BUILD / "game_interface" / "ucrtbase.def", "tools/game_dll/interface/ucrtbase.def"),
     # Codegen inputs: function addresses and sizes only.
     (REPO / "gtav" / "gtav_manifest.toml", "tools/game_dll/gtav_manifest.toml"),
-    (REPO / "gtav" / "generated" / "default" / "codegen.partition.json", "tools/game_dll/codegen.partition.json"),
+    (REPO / "tools" / "game_dll" / "codegen.partition.json", "tools/game_dll/codegen.partition.json"),
     (REPO / "tools" / "release" / "README.txt", "README.txt"),
 ]
 
 LICENSES = [
     (REPO / "LICENSE", "gtav-recomp-GPL-3.0.txt"),
-    (SDK / "LICENSE", "ReXGlue-SDK.txt"),
     (XR / "LICENSE.md", "XenosRecomp.txt"),
 ]
 # Third-party code linked into the SDK runtime / codegen and XenosRecomp.
@@ -116,6 +107,29 @@ def copy(src, dst):
     shutil.copy2(src, dst)
 
 
+def check_shared_sdl(readobj, build, sdk_bin):
+    """Reject missing/stale SDL builds and binaries linked to separate SDL copies."""
+    for dll in ("rexruntimerd.dll", SDL_DLL):
+        installed = sdk_bin / dll
+        staged = build / dll
+        if not (installed.is_file() and staged.is_file() and filecmp.cmp(installed, staged, shallow=False)):
+            sys.exit(f"{dll} in {build} must match the patched SDK install in {sdk_bin}. Rebuild gtav_fast.")
+
+    for binary in (build / "gtav_fast.exe", sdk_bin / "rexruntimerd.dll", sdk_bin / SDL_DLL):
+        try:
+            pe = subprocess.run([str(readobj), "--file-headers", "--coff-imports", str(binary)],
+                                check=True, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=30).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            sys.exit(f"Could not inspect {binary} with {readobj}: {getattr(exc, 'stderr', '') or exc}")
+        if "Machine: IMAGE_FILE_MACHINE_AMD64 " not in pe:
+            sys.exit(f"Not a Windows x64 binary: {binary}")
+        if binary.name != SDL_DLL:
+            deps = {line.strip()[6:].casefold() for line in pe.splitlines() if line.strip().startswith("Name: ")}
+            if SDL_DLL.casefold() not in deps:
+                sys.exit(f"{binary} must import the shared {SDL_DLL} from the patched SDK")
+
+
 # App-local Visual C++ runtime (see main): what gtav_fast.exe, the SDK DLLs, the launcher and the
 # shader tools import from it.
 VC_RUNTIME = ("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll",
@@ -126,6 +140,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--llvm", required=True)
+    ap.add_argument("--sdk", type=Path, help="patched SDK tree (default: rexglue-sdk in the checkout)")
+    ap.add_argument("--xenosrecomp", type=Path, default=REPO / "build-xr" / "XenosRecomp" / "XenosRecomp.exe",
+                    help="patched XenosRecomp executable (default: build-xr/XenosRecomp/XenosRecomp.exe)")
     ap.add_argument("--ios", help="tools/ios/make_shell.sh output (built on a Mac): the iPhone step's ios/ folder")
     ap.add_argument("--android", help="tools/android/make_shell.sh output (built on Linux): the Android step's android/ folder")
     ap.add_argument("--expected", required=True)
@@ -136,10 +153,22 @@ def main():
     a = ap.parse_args()
 
     version = launcher_version(REPO / "build-launcher")
+    sdk = a.sdk or REPO / "rexglue-sdk"
+    sdk_bin = sdk / "out" / "install" / "win-amd64" / "bin"
+    llvm = Path(a.llvm).resolve()
+    check_shared_sdl(llvm / "bin" / "llvm-readobj.exe", BUILD, sdk_bin)
     out = prepare_output(a.out)
 
     for src, rel in FILES:
         copy(src, out / rel)
+    for name in ("rexruntimerd.dll", "rexgpu-xenosrd.dll", "TracyClientrd.dll", SDL_DLL, "rexgluerd.exe"):
+        copy(sdk_bin / name, out / name)
+    tools = out / "tools"
+    copy(a.xenosrecomp, tools / "XenosRecomp.exe")
+    copy(XR / "XenosRecomp" / "shader_common.h", tools / "shader_common.h")
+    dxc = XR / "thirdparty" / "dxc-bin" / "bin" / "x64"
+    for name in ("dxc.exe", "dxcompiler.dll"):
+        copy(dxc / name, tools / name)
     # The Visual C++ runtime, app-local (Microsoft's redistributable files, deployed next to the
     # executables that use them): players no longer install the VC++ redistributable. tools\ gets a
     # copy too (XenosRecomp.exe, dxc.exe use it); clang/lld are statically linked.
@@ -175,7 +204,6 @@ def main():
                 sys.exit(f"--android: missing {f}")
         shutil.copytree(android, out / "android")
 
-    llvm = Path(a.llvm)
     copy(llvm / "bin" / "clang.exe", out / "tools/llvm/bin/clang++.exe")
     copy(llvm / "bin" / "lld-link.exe", out / "tools/llvm/bin/lld-link.exe")
     shutil.copytree(llvm / "lib" / "clang" / "19" / "include", out / "tools/llvm/lib/clang/19/include")
@@ -183,9 +211,10 @@ def main():
     lic = out / "LICENSES"
     for src, name in LICENSES:
         copy(src, lic / name)
+    copy(sdk / "LICENSE", lic / "ReXGlue-SDK.txt")
     copy(llvm / "LICENSE.TXT", lic / "LLVM.txt")
     copy(Path(a.licenses) / "dxc-LICENSE.TXT", lic / "DirectXShaderCompiler.txt")
-    for base, names, prefix in ((SDK / "thirdparty", SDK_THIRDPARTY, "sdk-"), (XR / "thirdparty", XR_THIRDPARTY, "xenosrecomp-")):
+    for base, names, prefix in ((sdk / "thirdparty", SDK_THIRDPARTY, "sdk-"), (XR / "thirdparty", XR_THIRDPARTY, "xenosrecomp-")):
         for n in names:
             dst = lic / "third_party" / (prefix + n.replace("/", "-") + ".txt")
             p = find_license(base / n)

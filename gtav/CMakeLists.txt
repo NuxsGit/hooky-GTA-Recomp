@@ -32,14 +32,9 @@ else()
     include(generated/rexglue.cmake)
 endif()
 
-# The SDK installs its codegen tool for Release only; the Windows SDK is a RelWithDebInfo build.
-# (On Linux the SDK is built in Release, so rex::rexglue resolves without this.)
-if(WIN32 AND TARGET rex::rexglue)
-    # rexglueConfig maps every config to Release, so give Release a location (copied into <prefix>/bin).
-    get_filename_component(_rex_prefix "${rexglue_DIR}/../../.." ABSOLUTE)
-    set_property(TARGET rex::rexglue APPEND PROPERTY IMPORTED_CONFIGURATIONS RELEASE)
-    set_target_properties(rex::rexglue PROPERTIES
-        IMPORTED_LOCATION_RELEASE "${_rex_prefix}/bin/rexgluerd.exe")
+# The renderer and the SDK input driver must see the same gamepad events.
+if(WIN32 AND NOT TARGET SDL3::SDL3-shared)
+    message(FATAL_ERROR "Use the patched ReXGlue SDK with shared SDL3 on Windows")
 endif()
 
 # Cross builds (Android): codegen runs on the build host, with the host SDK's rexglue tool.
@@ -122,6 +117,7 @@ if(GTAV_GAME_DLL)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     set(GTAV_INTERFACE_DIR ${CMAKE_BINARY_DIR}/game_interface)
     if(WIN32)
+        set_target_properties(gtav PROPERTIES OUTPUT_NAME gtav_fast)
         get_filename_component(GTAV_LLVM_BIN "${CMAKE_LINKER}" DIRECTORY)
         add_custom_command(TARGET gtav PRE_LINK
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/game_dll/gen_interface.py

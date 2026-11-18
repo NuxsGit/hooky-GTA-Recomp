@@ -67,8 +67,10 @@ RB + Back to toggle it, D-pad and A to navigate, and B to close.
 If a pad isn't mapped, try the community gamecontrollerdb.txt from
 https://github.com/mdqinc/SDL_GameControllerDB next to the game executable. Customize keybind_*
 options and mnk_sensitivity in gtav.toml in the same folder. Set mnk_mode = false to opt out.
-For an XInput-compatible pad that doesn't work through SDL, set input_backend = "xinput" in
-that file (use F1 for the settings overlay in this mode).
+For a native DualSense over USB or Bluetooth, keep input_backend = "sdl" in gtav.toml.
+If an older install was set to XInput, change it back to SDL and restart the game. Test without
+Steam Input or DS4Windows if the pad is not detected directly. For an XInput-compatible pad only,
+input_backend = "xinput" is a fallback (use F1 for the settings overlay in this mode).
 
 iPhone (experimental)
 ---------------------

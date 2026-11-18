@@ -63,25 +63,49 @@ index 41e6dce..a46a433 100644
          _rexglue_stage_macos_vulkan_runtime(${target_name})
      endif()
  endfunction()
+diff --git a/cmake/rexglueConfig.cmake.in b/cmake/rexglueConfig.cmake.in
+--- a/cmake/rexglueConfig.cmake.in
++++ b/cmake/rexglueConfig.cmake.in
+@@ -41,7 +41,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/rexglueTargets.cmake")
+-# Only Release rexglue is installed, so every consumer config has to reach it.
++# Use the optimized codegen tool installed by the SDK (Windows can install RelWithDebInfo).
+ if(TARGET rex::rexglue)
+     set_target_properties(rex::rexglue PROPERTIES
+-        MAP_IMPORTED_CONFIG_DEBUG Release
+-        MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release
+-        MAP_IMPORTED_CONFIG_MINSIZEREL Release)
++        MAP_IMPORTED_CONFIG_DEBUG "Release;RelWithDebInfo"
++        MAP_IMPORTED_CONFIG_RELWITHDEBINFO "RelWithDebInfo;Release"
++        MAP_IMPORTED_CONFIG_MINSIZEREL "Release;RelWithDebInfo")
+ endif()
 diff --git a/cmake/rexglue_install.cmake b/cmake/rexglue_install.cmake
-index d9a64eb..cdf0918 100644
 --- a/cmake/rexglue_install.cmake
 +++ b/cmake/rexglue_install.cmake
-@@ -52,11 +52,13 @@ install(TARGETS ${REXGLUE_INSTALL_TARGETS}
+@@ -52,11 +52,17 @@ install(TARGETS ${REXGLUE_INSTALL_TARGETS}
  )
  
- # A Debug codegen tool runs an order of magnitude slower, so only Release ships.
+-# A Debug codegen tool runs an order of magnitude slower, so only Release ships.
+-install(TARGETS rexglue
+-    EXPORT rexglueTargets
+-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+-    CONFIGURATIONS Release
+-)
++# A Debug codegen tool runs an order of magnitude slower and must not ship.
 +if(TARGET rexglue)
- install(TARGETS rexglue
-     EXPORT rexglueTargets
-     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-     CONFIGURATIONS Release
- )
++    set(_rex_codegen_configs Release)
++    if(WIN32)
++        list(APPEND _rex_codegen_configs RelWithDebInfo)
++    endif()
++    install(TARGETS rexglue
++        EXPORT rexglueTargets
++        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
++        CONFIGURATIONS ${_rex_codegen_configs}
++    )
 +endif()
  
  if(REXGLUE_INSTALL_FIDELITYFX_TARGETS)
      install(TARGETS ${REXGLUE_INSTALL_FIDELITYFX_TARGETS}
-@@ -137,7 +139,7 @@ if(REXGLUE_USE_D3D12)
+@@ -137,7 +143,7 @@ if(REXGLUE_USE_D3D12)
      )
  endif()
  
