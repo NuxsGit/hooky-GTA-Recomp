@@ -209,27 +209,143 @@ index 696ff48..d087448 100644
    bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
    bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
  
+diff --git a/include/rex/input/input_driver.h b/include/rex/input/input_driver.h
+index 52116f1..0765fe5 100644
+--- a/include/rex/input/input_driver.h
++++ b/include/rex/input/input_driver.h
+@@ -12,6 +12,7 @@
+
+ #include <cstddef>
+ #include <functional>
++#include <utility>
+ #include <vector>
+
+ #include <rex/input/device.h>
+@@ -50,6 +51,13 @@ class InputDriver {
+     is_active_callback_ = is_active_callback;
+   }
+
++  void add_is_active_callback(std::function<bool()> callback) {
++    auto previous = std::move(is_active_callback_);
++    is_active_callback_ = [previous = std::move(previous), callback = std::move(callback)] {
++      return callback() && (!previous || previous());
++    };
++  }
++
+  protected:
+   explicit InputDriver(rex::ui::Window* window, size_t window_z_order)
+       : window_(window), window_z_order_(window_z_order) {}
 diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
-index 1cb3faa..a68b9cc 100644
+index 1cb3faa..076ec0d 100644
 --- a/include/rex/input/input_system.h
 +++ b/include/rex/input/input_system.h
-@@ -11,6 +11,7 @@
+@@ -10,7 +10,9 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
   */
- 
+
++#include <array>
  #include <memory>
 +#include <mutex>
  #include <vector>
- 
+
  #include <rex/input/device_assignment.h>
-@@ -65,6 +66,8 @@ class InputSystem : public system::IInputSystem {
+@@ -38,6 +40,8 @@ class InputSystem : public system::IInputSystem {
+   void AddDriver(std::unique_ptr<InputDriver> driver);
+   void AttachWindow(rex::ui::Window* window);
+   void SetActiveCallback(std::function<bool()> callback);
++  // An extra gameplay gate, without replacing the SDK's own overlay gate.
++  void AddActiveCallback(std::function<bool()> callback);
+
+   /// Replaces any previous assignment. Call before the guest starts polling.
+   void SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment);
+@@ -60,11 +64,15 @@ class InputSystem : public system::IInputSystem {
+
+   std::unique_ptr<DeviceAssignment> assignment_;
+   ActiveDeviceTracker active_devices_;
++  std::array<X_INPUT_STATE, kMaxGuestUsers> last_merged_states_{};
++  std::array<bool, kMaxGuestUsers> was_connected_{};
+
+   // Ordered by ordinal. Ordinals are never recycled, so unplugging pad one
    // does not renumber pad two.
    std::vector<DeviceInfo> devices_;
    std::vector<InputDriver*> device_owners_;
 +  // Serializes the public X* entry points (several guest threads poll input at once).
 +  std::recursive_mutex mutex_;
  };
- 
+
  /// Create a default InputSystem with SDL + NOP drivers.
+diff --git a/include/rex/input/mnk/mnk_input_driver.h b/include/rex/input/mnk/mnk_input_driver.h
+index c8751b7..8972b97 100644
+--- a/include/rex/input/mnk/mnk_input_driver.h
++++ b/include/rex/input/mnk/mnk_input_driver.h
+@@ -15,6 +15,7 @@
+ #include <rex/ui/window_listener.h>
+
+ #include <atomic>
++#include <chrono>
+ #include <cstdint>
+ #include <mutex>
+ #include <queue>
+@@ -25,6 +26,17 @@ namespace rex::input::mnk {
+ void SetMouseLookActive(bool active);
+ bool IsMouseLookActive();
+
++// Titles with a second, native-renderer window can supply a snapshot from it.
++// Return false when the SDK window should handle input instead. Motion is
++// relative (positive Y down) and must be drained by the reader on each call.
++struct ExternalInput {
++  bool keys[256] = {};
++  float dx = 0, dy = 0;
++  bool reset_motion = false;
++};
++using ExternalInputReader = bool (*)(ExternalInput&);
++void SetExternalInputReader(ExternalInputReader reader);
++
+ class MnkInputDriver final : public InputDriver,
+                              public rex::ui::WindowInputListener,
+                              public rex::ui::WindowListener {
+@@ -76,6 +88,15 @@ class MnkInputDriver final : public InputDriver,
+   std::mutex state_mutex_;
+   bool key_down_[256] = {};
+
++  // Guest-side sample-and-hold: titles can poll multiple times per update.
++  // Draining relative motion into only the first poll made it disappear.
++  std::chrono::steady_clock::time_point next_mouse_sample_{};
++  float pending_dx_ = 0, pending_dy_ = 0;
++  int32_t mouse_rx_ = 0, mouse_ry_ = 0;
++  bool was_external_ = false;
++  bool was_enabled_ = false;
++  std::atomic<bool> reset_mouse_sample_{false};
++
+   // Mouse delta tracking. Fractional because relative motion arrives in
+   // fractions of a pixel, and truncating each event drops slow movement.
+   // Filled on the UI thread, drained on the guest thread, hence the lock.
+diff --git a/include/rex/input/sdl/sdl_input_driver.h b/include/rex/input/sdl/sdl_input_driver.h
+index cf0e3d1..f32598f 100644
+--- a/include/rex/input/sdl/sdl_input_driver.h
++++ b/include/rex/input/sdl/sdl_input_driver.h
+@@ -27,6 +27,12 @@
+
+ namespace rex::input::sdl {
+
++// Handle mapped SDL button events before the gameplay gate. Returning true
++// consumes a button-down for an overlay; releases and removals still reach the
++// driver so it never keeps a button held past a release.
++using GamepadEventFilter = bool (*)(const SDL_Event&);
++void SetGamepadEventFilter(GamepadEventFilter filter);
++
+ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener {
+  public:
+   explicit SDLInputDriver(rex::ui::Window* window, size_t window_z_order);
+@@ -74,6 +80,8 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener
+   void OnLostFocus(rex::ui::UISetupEvent& e) override;
+   void OnGotFocus(rex::ui::UISetupEvent& e) override;
+
++  void DetachFromWindow();
++  static bool SDLCALL WatchEvent(void* userdata, SDL_Event* event);
+   void HandleEvent(const SDL_Event& event);
+   std::unique_lock<std::mutex> DrainAndLock();
+   void ProcessEventLocked(const SDL_Event& event);
 diff --git a/include/rex/platform.h b/include/rex/platform.h
 index e90418d..9f5d0f8 100644
 --- a/include/rex/platform.h
@@ -326,6 +442,45 @@ index 0000000..a721b58
 +
 +}  // namespace ui
 +}  // namespace rex
+diff --git a/include/rex/ui/ui_event.h b/include/rex/ui/ui_event.h
+index 80dd79c..fdaccce 100644
+--- a/include/rex/ui/ui_event.h
++++ b/include/rex/ui/ui_event.h
+@@ -126,7 +126,7 @@ class MouseEvent : public UIEvent {
+   static constexpr uint32_t kScrollPerDetent = 120;
+
+   explicit MouseEvent(Window* target, Button button, int32_t x, int32_t y, int32_t scroll_x = 0,
+-                      int32_t scroll_y = 0, float dx = 0.0f, float dy = 0.0f)
++                      int32_t scroll_y = 0, float dx = 0.0f, float dy = 0.0f, bool from_touch = false)
+       : UIEvent(target),
+         button_(button),
+         x_(x),
+@@ -134,7 +134,8 @@ class MouseEvent : public UIEvent {
+         scroll_x_(scroll_x),
+         scroll_y_(scroll_y),
+         dx_(dx),
+-        dy_(dy) {}
++        dy_(dy),
++        from_touch_(from_touch) {}
+   ~MouseEvent() override = default;
+
+   bool is_handled() const { return handled_; }
+@@ -150,6 +151,7 @@ class MouseEvent : public UIEvent {
+   // Fractional, so accumulate before rounding.
+   float dx() const { return dx_; }
+   float dy() const { return dy_; }
++  bool from_touch() const { return from_touch_; }
+
+  private:
+   bool handled_ = false;
+@@ -161,6 +163,7 @@ class MouseEvent : public UIEvent {
+   int32_t scroll_y_ = 0;
+   float dx_ = 0.0f;
+   float dy_ = 0.0f;
++  bool from_touch_ = false;
+ };
+
+ class TouchEvent : public UIEvent {
 diff --git a/include/rex/ui/windowed_app.h b/include/rex/ui/windowed_app.h
 index 50638d6..feec200 100644
 --- a/include/rex/ui/windowed_app.h
@@ -2678,33 +2833,34 @@ index 6788214..dbe172a 100644
                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
    buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
-index 813bb1c..bf17297 100644
+index 813bb1c..26fb0cd 100644
 --- a/src/input/input_system.cpp
 +++ b/src/input/input_system.cpp
-@@ -10,7 +10,12 @@
+@@ -10,7 +10,13 @@
   */
- 
+
  #include <algorithm>
 +#include <chrono>
 +#include <cstdio>
++#include <cstring>
 +#include <filesystem>
 +#include <mutex>
  #include <cmath>
 +#include <vector>
- 
+
  #include <rex/dbg.h>
  #include <rex/input/device_assignment.h>
-@@ -28,10 +33,82 @@ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput
+@@ -28,10 +34,82 @@ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput
      .allowed({"sdl", "xinput"});
- 
+
  REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
 +REXCVAR_DEFINE_STRING(input_script, "", "Input",
 +                      "Scripted pad for unattended runs: once this file exists, user 0 plays its lines "
 +                      "'start_s dur_s buttons_hex lt rt lx ly rx ry' in a loop instead of the real pads");
  namespace rex::input {
- 
+
  namespace {
- 
+
 +// --input_script: lets an unattended (hidden) run play the game, e.g. to reproduce audio glitches
 +// that only happen during gameplay. The clock starts when the file first appears, so a capture
 +// script can write it once the world is loaded.
@@ -2777,7 +2933,20 @@ index 813bb1c..bf17297 100644
  // Synthetic devices are parked past every physical ordinal so they cannot push
  // a real pad off guest user 0. SlotAssignment routes them by their synthetic
  // flag and never reads this value.
-@@ -187,6 +264,7 @@ const DeviceInfo* InputSystem::DeviceInfoFor(DeviceId id) const {
+@@ -71,6 +149,12 @@ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
+   }
+ }
+
++void InputSystem::AddActiveCallback(std::function<bool()> callback) {
++  for (auto& driver : drivers_) {
++    driver->add_is_active_callback(callback);
++  }
++}
++
+ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment) {
+   assignment_ = std::move(assignment);
+   if (assignment_) {
+@@ -187,6 +271,7 @@ const DeviceInfo* InputSystem::DeviceInfoFor(DeviceId id) const {
  X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
                                        X_INPUT_CAPABILITIES* out_caps) {
    SCOPE_profile_cpu_f("hid");
@@ -2785,7 +2954,7 @@ index 813bb1c..bf17297 100644
    if (!out_caps || !assignment_) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
-@@ -195,6 +273,17 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+@@ -195,6 +280,17 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
    std::vector<DeviceId> ids;
    assignment_->DevicesForUser(user_index, ids);
    if (ids.empty()) {
@@ -2802,9 +2971,9 @@ index 813bb1c..bf17297 100644
 +    }
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
- 
-@@ -214,6 +303,14 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
- 
+
+@@ -214,6 +310,14 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+
  X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
    SCOPE_profile_cpu_f("hid");
 +  std::lock_guard lock(mutex_);  // guest threads poll input concurrently; RefreshDevices rebuilds devices_
@@ -2818,15 +2987,34 @@ index 813bb1c..bf17297 100644
    if (!assignment_) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
-@@ -253,6 +350,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
- 
+@@ -242,6 +346,18 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+     }
+   }
+
++  // A quiet device may have a larger packet number than the active one.
++  // Count changes to the merged pad, not to the driver with the highest counter.
++  if (user_index < kMaxGuestUsers) {
++    auto& previous = last_merged_states_[user_index];
++    if (any && (!was_connected_[user_index] ||
++                std::memcmp(&previous.gamepad, &merged.gamepad, sizeof(X_INPUT_GAMEPAD)) != 0)) {
++      ++previous.packet_number;
++      previous.gamepad = merged.gamepad;
++    }
++    was_connected_[user_index] = any;
++    merged.packet_number = previous.packet_number;
++  }
+   if (!any) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -253,6 +369,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+
  X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
    SCOPE_profile_cpu_f("hid");
 +  std::lock_guard lock(mutex_);  // guest threads poll input concurrently; RefreshDevices rebuilds devices_
    if (!assignment_) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
-@@ -295,6 +393,7 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
+@@ -295,6 +412,7 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
  X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
                                     X_INPUT_KEYSTROKE* out_keystroke) {
    SCOPE_profile_cpu_f("hid");
@@ -2834,22 +3022,682 @@ index 813bb1c..bf17297 100644
    if (!assignment_) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
+@@ -325,16 +443,24 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
+   auto input = std::make_unique<InputSystem>(nullptr);
+
+   if (!tool_mode) {
++    bool use_sdl = true;
+ #if REX_PLATFORM_WIN32
+     if (REXCVAR_GET(input_backend) == "xinput") {
+       auto xinput_driver = std::make_unique<xinput::XinputInputDriver>(nullptr, 0);
+       if (xinput_driver->Setup() == X_STATUS_SUCCESS) {
+         input->AddDriver(std::move(xinput_driver));
++        use_sdl = false;  // Never open a second copy of the same physical pad via SDL.
++      } else {
++        REXLOG_WARN("XInput is unavailable; using SDL gamepads instead.");
+       }
+     }
++#else
++    if (REXCVAR_GET(input_backend) == "xinput") {
++      REXLOG_WARN("XInput is Windows-only; using SDL gamepads instead.");
++    }
+ #endif
+
+-    if (REXCVAR_GET(input_backend) == "sdl") {
++    if (use_sdl) {
+       auto sdl_driver = std::make_unique<sdl::SDLInputDriver>(nullptr, 0);
+       if (sdl_driver->Setup() == X_STATUS_SUCCESS) {
+         input->AddDriver(std::move(sdl_driver));
+diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
+index 3f9422d..d0f5a9a 100644
+--- a/src/input/mnk/mnk_input_driver.cpp
++++ b/src/input/mnk/mnk_input_driver.cpp
+@@ -66,11 +66,10 @@ namespace {
+ constexpr rex::input::DeviceId kMnkDevice = static_cast<rex::input::DeviceId>(0x4D4E4B00);
+
+ // Bind values are a comma-separated list of alternatives, each optionally
+-// carrying modifier prefixes: "Q,I" or "Shift+W". Modifier matching is exact,
+-// so "Up" stays silent while Shift is held and "Shift+Up" stays silent without
+-// it. That is what lets the D-pad share the arrow keys. A consequence is
+-// that binding a bare modifier name ("Shift") can never fire, since holding it
+-// makes the live mask non-zero while the bind wants zero.
++// carrying modifier prefixes: "Q,I" or "Shift+W". Chords match exactly.
++// Unmodified keys can be used while holding other actions on a modifier
++// (e.g. Shift to sprint). Right-stick arrows are the exception, so the SDK's
++// original Shift+arrows D-pad bindings don't move the camera too.
+ constexpr uint8_t kModShift = 1u << 0;
+ constexpr uint8_t kModCtrl = 1u << 1;
+ constexpr uint8_t kModAlt = 1u << 2;
+@@ -122,20 +121,25 @@ std::string_view TrimSpaces(std::string_view s) {
+   return s;
+ }
+
+-bool TokenPressed(const bool (&key_down)[256], std::string_view token, uint8_t live_mods) {
+-  uint8_t want = TakeModifiers(token);
+-  if (want != live_mods) {
++bool TokenPressed(const bool (&key_down)[256], std::string_view token, uint8_t live_mods,
++                  bool right_stick) {
++  const uint8_t want = TakeModifiers(token);
++  using rex::ui::VirtualKey;
++  const VirtualKey vk = rex::ui::ParseVirtualKey(token);
++  const uint16_t idx = static_cast<uint16_t>(vk);
++  if (vk == VirtualKey::kNone || idx >= 256 || !key_down[idx]) {
+     return false;
+   }
+-  rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(token);
+-  if (vk == rex::ui::VirtualKey::kNone) {
+-    return false;
+-  }
+-  uint16_t idx = static_cast<uint16_t>(vk);
+-  return idx < 256 && key_down[idx];
++  // A modifier bound as the action itself must not count against its chord.
++  if (vk == VirtualKey::kShift) live_mods &= ~kModShift;
++  if (vk == VirtualKey::kControl) live_mods &= ~kModCtrl;
++  if (vk == VirtualKey::kMenu) live_mods &= ~kModAlt;
++  const bool arrow = vk >= VirtualKey::kLeft && vk <= VirtualKey::kDown;
++  return (!want && !(right_stick && arrow)) || want == live_mods;
+ }
+
+ std::atomic<bool> mouse_look_active{true};
++std::atomic<ExternalInputReader> external_reader{nullptr};
+
+ }  // namespace
+
+@@ -147,6 +151,10 @@ bool IsMouseLookActive() {
+   return mouse_look_active.load(std::memory_order_relaxed);
+ }
+
++void SetExternalInputReader(ExternalInputReader reader) {
++  external_reader.store(reader);
++}
++
+ using rex::ui::VirtualKey;
+
+ MnkInputDriver::MnkInputDriver(rex::ui::Window* window, size_t window_z_order)
+@@ -162,10 +170,13 @@ X_STATUS MnkInputDriver::Setup() {
+ }
+
+ void MnkInputDriver::OnWindowAvailable(rex::ui::Window* window) {
++  if (window == attached_window_) return;
++  DetachFromWindow();
+   if (window) {
+     {
+       std::lock_guard lock(state_mutex_);
+       attached_window_ = window;
++      has_focus_ = window->HasFocus();
+     }
+     window->AddInputListener(this, window_z_order());
+     window->AddListener(this);
+@@ -186,7 +197,12 @@ void MnkInputDriver::DetachFromWindow() {
+     {
+       std::lock_guard lock(state_mutex_);
+       attached_window_ = nullptr;
++      has_focus_ = false;
++      std::memset(key_down_, 0, sizeof(key_down_));
++      mouse_dx_ = mouse_dy_ = 0;
+     }
++    mouse_capture_requested_ = false;
++    reset_mouse_sample_ = true;
+     if (mouse_capture_update_queued_.load(std::memory_order_relaxed)) {
+       window->app_context().ExecutePendingFunctionsFromUIThread();
+     }
+@@ -200,7 +216,8 @@ bool MnkInputDriver::IsEnabled() const {
+   return REXCVAR_GET(mnk_mode);
+ }
+
+-static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_val) {
++static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_val,
++                          bool right_stick = false) {
+   const uint8_t live_mods = LiveModifiers(key_down);
+   std::string_view rest(cvar_val);
+   while (!rest.empty()) {
+@@ -212,7 +229,7 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
+       rest.remove_prefix(comma + 1);
+     }
+     token = TrimSpaces(token);
+-    if (!token.empty() && TokenPressed(key_down, token, live_mods)) {
++    if (!token.empty() && TokenPressed(key_down, token, live_mods, right_stick)) {
+       return true;
+     }
+   }
+@@ -222,8 +239,17 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
+ void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
+   // Disabled means no device at all, so it never occupies a guest user slot.
+   if (!IsEnabled()) {
++    QueueMouseCaptureUpdate(false);
++    if (was_enabled_) {
++      std::lock_guard lock(state_mutex_);
++      std::memset(key_down_, 0, sizeof(key_down_));
++      mouse_dx_ = mouse_dy_ = 0;
++      reset_mouse_sample_ = true;
++      was_enabled_ = false;
++    }
+     return;
+   }
++  was_enabled_ = true;
+   DeviceInfo info;
+   info.id = kMnkDevice;
+   info.name = "Keyboard and Mouse";
+@@ -255,93 +281,119 @@ X_RESULT MnkInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
+ }
+
+ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+-  if (!IsEnabled() || id != kMnkDevice) {
++  if (id != kMnkDevice) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
++  const bool enabled = IsEnabled();
++  ExternalInput external_input;
++  const auto reader = external_reader.load();
++  const bool external = reader && reader(external_input);
++  const bool active = enabled && is_active() && (external || has_focus_);
++  const bool mouse = active && REXCVAR_GET(mnk_mouse) && IsMouseLookActive();
++  QueueMouseCaptureUpdate(mouse && !external);
+
+-  // Mouse look is opt in. Without this gate, keyboard input alone would hide
+-  // and lock the cursor, breaking the ImGui overlays.
+-  QueueMouseCaptureUpdate(IsEnabled() && REXCVAR_GET(mnk_mouse) && IsMouseLookActive() &&
+-                          has_focus_ && is_active());
+-
+-  if (!is_active() || !has_focus_) {
++  std::lock_guard lock(state_mutex_);
++  const bool reset_motion = reset_mouse_sample_.exchange(false) || external_input.reset_motion;
++  if (!mouse || external != was_external_ || reset_motion) {
++    next_mouse_sample_ = {};
++    pending_dx_ = pending_dy_ = 0;
++    mouse_rx_ = mouse_ry_ = 0;
++  }
++  was_external_ = external;
++  if (!active) {
++    std::memset(key_down_, 0, sizeof(key_down_));
++    mouse_dx_ = mouse_dy_ = 0;
+     if (out_state) {
+-      std::memset(out_state, 0, sizeof(*out_state));
+-      out_state->packet_number = packet_number_;
++      *out_state = {};
++      out_state->packet_number = ++packet_number_;
+     }
+-    return X_ERROR_SUCCESS;
++    return enabled ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+-
+-  std::lock_guard lock(state_mutex_);
++  const auto& keys = external ? external_input.keys : key_down_;
+
+   uint16_t buttons = 0;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_a)))
+     buttons |= X_INPUT_GAMEPAD_A;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_b)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_b)))
+     buttons |= X_INPUT_GAMEPAD_B;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_x)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_x)))
+     buttons |= X_INPUT_GAMEPAD_X;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_y)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_y)))
+     buttons |= X_INPUT_GAMEPAD_Y;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_left_shoulder)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_left_shoulder)))
+     buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_right_shoulder)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_right_shoulder)))
+     buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_press)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_press)))
+     buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_press)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_press)))
+     buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_back)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_back)))
+     buttons |= X_INPUT_GAMEPAD_BACK;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_start)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_start)))
+     buttons |= X_INPUT_GAMEPAD_START;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_guide)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_guide)))
+     buttons |= X_INPUT_GAMEPAD_GUIDE;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_up)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_up)))
+     buttons |= X_INPUT_GAMEPAD_DPAD_UP;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_down)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_down)))
+     buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_left)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_left)))
+     buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_right)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_right)))
+     buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
+
+-  uint8_t lt = IsBindPressed(key_down_, REXCVAR_GET(keybind_left_trigger)) ? 0xFF : 0;
+-  uint8_t rt = IsBindPressed(key_down_, REXCVAR_GET(keybind_right_trigger)) ? 0xFF : 0;
++  uint8_t lt = IsBindPressed(keys, REXCVAR_GET(keybind_left_trigger)) ? 0xFF : 0;
++  uint8_t rt = IsBindPressed(keys, REXCVAR_GET(keybind_right_trigger)) ? 0xFF : 0;
+
+   int32_t lx = 0;
+   int32_t ly = 0;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_left)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_left)))
+     lx -= INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_right)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_right)))
+     lx += INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_up)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_up)))
+     ly += INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_down)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_down)))
+     ly -= INT16_MAX;
+
+   int32_t rx = 0;
+   int32_t ry = 0;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_left)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_left), true))
+     rx -= INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_right)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_right), true))
+     rx += INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_up)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_up), true))
+     ry += INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
++  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_down), true))
+     ry -= INT16_MAX;
+
+-  if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive()) {
+-    double sensitivity = REXCVAR_GET(mnk_sensitivity);
+-    constexpr double kBaseScale = 200.0;
+-    rx += static_cast<int32_t>(double(mouse_dx_) * sensitivity * kBaseScale);
+-    ry += static_cast<int32_t>(double(-mouse_dy_) * sensitivity * kBaseScale);
++  if (mouse) {
++    pending_dx_ += external ? external_input.dx : mouse_dx_;
++    pending_dy_ += external ? external_input.dy : mouse_dy_;
++    const auto now = std::chrono::steady_clock::now();
++    if (now >= next_mouse_sample_) {
++      // Start past a typical controller deadzone so small movements can still
++      // turn the camera. Preserve direction and clamp the radial deflection.
++      const float distance = std::hypot(pending_dx_, pending_dy_);
++      mouse_rx_ = mouse_ry_ = 0;
++      if (distance > 0.01f && std::isfinite(distance)) {
++        constexpr double kDeadzoneFloor = 0.28;
++        const double stick = kDeadzoneFloor + (1.0 - kDeadzoneFloor) *
++            std::min(1.0, distance * REXCVAR_GET(mnk_sensitivity) / 80.0);
++        const double scale = stick * INT16_MAX / distance;
++        mouse_rx_ = static_cast<int32_t>(pending_dx_ * scale);
++        mouse_ry_ = static_cast<int32_t>(-pending_dy_ * scale);
++      }
++      pending_dx_ = pending_dy_ = 0;
++      next_mouse_sample_ = now + std::chrono::milliseconds(16);
++    }
++    if (!rx && !ry) {
++      rx = mouse_rx_;
++      ry = mouse_ry_;
++    }
+   }
+-  // Drained unconditionally: deltas keep accumulating in OnMouseMove while the
+-  // mouse is off, and toggling it on would otherwise dump the whole backlog
+-  // into one frame as a camera snap.
+-  mouse_dx_ = 0.0f;
+-  mouse_dy_ = 0.0f;
++  mouse_dx_ = mouse_dy_ = 0;
+
+   auto clamp16 = [](int32_t v) -> int16_t {
+     return static_cast<int16_t>(std::clamp(v, (int32_t)INT16_MIN, (int32_t)INT16_MAX));
+@@ -397,7 +449,9 @@ void MnkInputDriver::EnqueueKeystroke(uint16_t vk_pad, bool down) {
+ }
+
+ void MnkInputDriver::QueueMouseCaptureUpdate(bool should_capture) {
+-  mouse_capture_requested_.store(should_capture, std::memory_order_relaxed);
++  if (mouse_capture_requested_.exchange(should_capture, std::memory_order_relaxed) == should_capture) {
++    return;
++  }
+   bool already_queued = false;
+   if (!mouse_capture_update_queued_.compare_exchange_strong(already_queued, true)) {
+     return;
+@@ -408,10 +462,12 @@ void MnkInputDriver::QueueMouseCaptureUpdate(bool should_capture) {
+     return;
+   }
+   // Deferred, not CallInUIThread: running inline would re-enter state_mutex_.
+-  attached_window_->app_context().CallInUIThreadDeferred([this] {
++  if (!attached_window_->app_context().CallInUIThreadDeferred([this] {
++        mouse_capture_update_queued_.store(false, std::memory_order_relaxed);
++        ApplyMouseCaptureFromUIThread();
++      })) {
+     mouse_capture_update_queued_.store(false, std::memory_order_relaxed);
+-    ApplyMouseCaptureFromUIThread();
+-  });
++  }
+ }
+
+ void MnkInputDriver::ApplyMouseCaptureFromUIThread() {
+@@ -435,7 +491,8 @@ void MnkInputDriver::ApplyMouseCaptureFromUIThread() {
+   if (!relative_mouse_mode_) {
+     REXLOG_WARN("Pointer lock unavailable, mouse look falls back to recentering the cursor");
+   }
+-  // Reset deltas to avoid a spike on capture start
++  // Reset deltas to avoid a spike on capture start.
++  reset_mouse_sample_ = true;
+   std::lock_guard lock(state_mutex_);
+   mouse_dx_ = 0.0f;
+   mouse_dy_ = 0.0f;
+@@ -481,7 +538,7 @@ void MnkInputDriver::SetKeyState(uint16_t vk, bool down) {
+ }
+
+ void MnkInputDriver::OnKeyDown(rex::ui::KeyEvent& e) {
+-  if (!IsEnabled() || !has_focus_)
++  if (!IsEnabled() || !has_focus_ || e.prev_state())
+     return;
+   std::lock_guard lock(state_mutex_);
+   uint16_t vk = static_cast<uint16_t>(e.virtual_key());
+@@ -497,7 +554,7 @@ void MnkInputDriver::OnKeyUp(rex::ui::KeyEvent& e) {
+ }
+
+ void MnkInputDriver::OnMouseDown(rex::ui::MouseEvent& e) {
+-  if (!IsEnabled() || !has_focus_)
++  if (!IsEnabled() || !has_focus_ || e.from_touch())
+     return;
+   std::lock_guard lock(state_mutex_);
+   switch (e.button()) {
+@@ -510,13 +567,19 @@ void MnkInputDriver::OnMouseDown(rex::ui::MouseEvent& e) {
+     case rex::ui::MouseEvent::Button::kMiddle:
+       SetKeyState(static_cast<uint16_t>(VirtualKey::kMButton), true);
+       break;
++    case rex::ui::MouseEvent::Button::kX1:
++      SetKeyState(static_cast<uint16_t>(VirtualKey::kXButton1), true);
++      break;
++    case rex::ui::MouseEvent::Button::kX2:
++      SetKeyState(static_cast<uint16_t>(VirtualKey::kXButton2), true);
++      break;
+     default:
+       break;
+   }
+ }
+
+ void MnkInputDriver::OnMouseUp(rex::ui::MouseEvent& e) {
+-  if (!IsEnabled())
++  if (!IsEnabled() || e.from_touch())
+     return;
+   std::lock_guard lock(state_mutex_);
+   switch (e.button()) {
+@@ -529,13 +592,19 @@ void MnkInputDriver::OnMouseUp(rex::ui::MouseEvent& e) {
+     case rex::ui::MouseEvent::Button::kMiddle:
+       SetKeyState(static_cast<uint16_t>(VirtualKey::kMButton), false);
+       break;
++    case rex::ui::MouseEvent::Button::kX1:
++      SetKeyState(static_cast<uint16_t>(VirtualKey::kXButton1), false);
++      break;
++    case rex::ui::MouseEvent::Button::kX2:
++      SetKeyState(static_cast<uint16_t>(VirtualKey::kXButton2), false);
++      break;
+     default:
+       break;
+   }
+ }
+
+ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+-  if (!IsEnabled() || !has_focus_)
++  if (!IsEnabled() || !has_focus_ || e.from_touch())
+     return;
+   int32_t x = e.x();
+   int32_t y = e.y();
+@@ -545,7 +614,7 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+       // The pointer is locked, so the absolute position no longer moves.
+       mouse_dx_ += e.dx();
+       mouse_dy_ += e.dy();
+-    } else {
++    } else if (mouse_captured_) {
+       mouse_dx_ += float(x - prev_mouse_x_);
+       mouse_dy_ += float(y - prev_mouse_y_);
+     }
+@@ -560,6 +629,7 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
+
+ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
+   has_focus_ = false;
++  reset_mouse_sample_ = true;
+   // Withdraw the request too, or an update queued before the focus loss grabs
+   // the cursor straight back.
+   mouse_capture_requested_.store(false, std::memory_order_relaxed);
+@@ -568,6 +638,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
+     std::memset(key_down_, 0, sizeof(key_down_));
+     mouse_dx_ = 0.0f;
+     mouse_dy_ = 0.0f;
++    prev_mouse_x_ = prev_mouse_y_ = 0;
+   }
+   if (attached_window_) {
+     ReleaseMouseCaptureFromUIThread(attached_window_);
 diff --git a/src/input/sdl/sdl_input_driver.cpp b/src/input/sdl/sdl_input_driver.cpp
-index c7c440d..95eaccf 100644
+index c7c440d..a218297 100644
 --- a/src/input/sdl/sdl_input_driver.cpp
 +++ b/src/input/sdl/sdl_input_driver.cpp
 @@ -12,6 +12,8 @@
  #include <array>
  #include <filesystem>
- 
+
 +#include <atomic>
 +#include <chrono>
  #include <rex/assert.h>
  #include <rex/chrono/clock.h>
  #include <rex/cvar.h>
-@@ -669,7 +671,17 @@ void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
+@@ -20,6 +22,8 @@
+ #include <rex/logging.h>
+ #include <rex/ui/virtual_key.h>
+
++REXCVAR_DEFINE_BOOL(hid_background_input, false, "Input",
++                    "Process SDL gamepad events even if no SDL window is focused");
+ REXCVAR_DEFINE_STRING(hid_mappings_file, "gamecontrollerdb.txt", "Input",
+                       "Path to SDL gamecontroller mappings file");
+
+@@ -30,8 +34,14 @@ namespace {
+ // SDL clamps to SDL_MAX_RUMBLE_DURATION_MS, which is not a public constant.
+ constexpr uint32_t kRumbleDurationMs = 0xFFFF;
+
++std::atomic<GamepadEventFilter> gamepad_filter{nullptr};
++
+ }  // namespace
+
++void SetGamepadEventFilter(GamepadEventFilter filter) {
++  gamepad_filter.store(filter);
++}
++
+ SDLInputDriver::SDLInputDriver(rex::ui::Window* window, size_t window_z_order)
+     : InputDriver(window, window_z_order),
+       sdl_events_initialized_(false),
+@@ -41,7 +51,9 @@ SDLInputDriver::SDLInputDriver(rex::ui::Window* window, size_t window_z_order)
+       controllers_(),
+       controllers_mutex_() {}
+
+-SDLInputDriver::~SDLInputDriver() {}
++SDLInputDriver::~SDLInputDriver() {
++  DetachFromWindow();
++}
+
+ X_STATUS SDLInputDriver::Setup() {
+   if (!TestSDLVersion()) {
+@@ -52,7 +64,9 @@ X_STATUS SDLInputDriver::Setup() {
  }
- 
+
+ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
+-  if (window && !attached_window_) {
++  if (window == attached_window_) return;
++  DetachFromWindow();
++  if (window) {
+     attached_window_ = window;
+     window->AddListener(this);
+     window->app_context().CallInUIThreadSynchronous([this]() {
+@@ -66,27 +80,13 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
+
+       // With an event watch we will always get notified, even if the event queue
+       // is full, which can happen if another subsystem does not clear its events.
+-      SDL_AddEventWatch(
+-          [](void* userdata, SDL_Event* event) -> bool {
+-            if (!userdata || !event) {
+-              assert_always();
+-              return false;
+-            }
+-
+-            const auto type = event->type;
+-            if (type < SDL_EVENT_JOYSTICK_AXIS_MOTION || type >= SDL_EVENT_FINGER_DOWN) {
+-              return false;
+-            }
+-
+-            // If another part of rex uses another SDL subsystem that generates
+-            // events, this may seem like a bad idea. They will however not
+-            // subscribe to controller events so we get away with that.
+-            const auto driver = static_cast<SDLInputDriver*>(userdata);
+-            driver->HandleEvent(*event);
+-
+-            return false;
+-          },
+-          this);
++      if (!SDL_AddEventWatch(WatchEvent, this)) {
++        REXLOG_ERROR("SDL: Failed to watch gamepad events: {}", SDL_GetError());
++        return;
++      }
++      if (REXCVAR_GET(hid_background_input)) {
++        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
++      }
+
+       // Initialize game controller subsystem
+       if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
+@@ -96,17 +96,18 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
+       SDL_Gamepad_initialized_ = true;
+
+       // Load custom controller mappings if available
+-      if (!REXCVAR_GET(hid_mappings_file).empty()) {
+-        std::filesystem::path mappings_path(REXCVAR_GET(hid_mappings_file));
+-        if (!std::filesystem::exists(mappings_path)) {
++      const auto& mappings_file = REXCVAR_GET(hid_mappings_file);
++      if (!mappings_file.empty()) {
++        const std::filesystem::path mappings_path(std::u8string(mappings_file.begin(), mappings_file.end()));
++        std::error_code ec;
++        if (!std::filesystem::is_regular_file(mappings_path, ec)) {
+           REXLOG_WARN("SDL GameControllerDB: file '{}' does not exist.",
+-                      REXCVAR_GET(hid_mappings_file));
++                      mappings_file);
+         } else {
+-          auto mappings_result =
+-              SDL_AddGamepadMappingsFromFile(REXCVAR_GET(hid_mappings_file).c_str());
++          const auto mappings_result = SDL_AddGamepadMappingsFromFile(mappings_file.c_str());
+           if (mappings_result < 0) {
+             REXLOG_ERROR("SDL GameControllerDB: error loading file '{}': {}.",
+-                         REXCVAR_GET(hid_mappings_file), mappings_result);
++                         mappings_file, SDL_GetError());
+           } else {
+             REXLOG_INFO("SDL GameControllerDB: loaded {} mappings.", mappings_result);
+           }
+@@ -118,12 +119,20 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
+ }
+
+ void SDLInputDriver::OnClosing(rex::ui::UIEvent&) {
+-  if (attached_window_) {
+-    attached_window_->RemoveListener(this);
++  DetachFromWindow();
++}
++
++void SDLInputDriver::DetachFromWindow() {
++  auto* window = attached_window_;
++  if (!window) return;
++  window->app_context().CallInUIThreadSynchronous([this, window] {
++    attached_window_ = nullptr;
++    window->RemoveListener(this);
++    SDL_RemoveEventWatch(WatchEvent, this);
+     if (sdl_pumpevents_queued_) {
+-      attached_window_->app_context().CallInUIThreadSynchronous(
+-          [this]() { attached_window_->app_context().ExecutePendingFunctionsFromUIThread(); });
++      window->app_context().ExecutePendingFunctionsFromUIThread();
+     }
++    pending_events_.clear();
+     for (auto& controller : controllers_) {
+       SDL_CloseGamepad(controller.sdl);
+     }
+@@ -136,8 +145,7 @@ void SDLInputDriver::OnClosing(rex::ui::UIEvent&) {
+       SDL_QuitSubSystem(SDL_INIT_EVENTS);
+       sdl_events_initialized_ = false;
+     }
+-    attached_window_ = nullptr;
+-  }
++  });
+ }
+
+ void SDLInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {}
+@@ -150,6 +158,10 @@ void SDLInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
+     return;
+   }
+
++#if !REX_PLATFORM_ANDROID && !REX_PLATFORM_IOS
++  // Discover desktop pads after boot even when no pad is available for GetDeviceState to poll.
++  QueueControllerUpdate();
++#endif
+   auto guard = DrainAndLock();
+
+   for (const auto& controller : controllers_) {
+@@ -323,6 +335,9 @@ X_RESULT SDLInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+   // Handle repeating
+   auto guest_now = rex::chrono::Clock::QueryGuestUptimeMillis();
+   static_assert(HID_SDL_REPEAT_DELAY >= HID_SDL_REPEAT_RATE);
++  if (last.repeat_state != RepeatState::Idle && !(curr_butts & (uint64_t(1) << last.repeat_butt_idx))) {
++    last.repeat_state = RepeatState::Idle;
++  }
+   if (last.repeat_state == RepeatState::Waiting &&
+       (last.repeat_time + HID_SDL_REPEAT_DELAY < guest_now)) {
+     last.repeat_state = RepeatState::Repeating;
+@@ -387,6 +402,27 @@ X_RESULT SDLInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+   return X_ERROR_EMPTY;
+ }
+
++bool SDLCALL SDLInputDriver::WatchEvent(void* userdata, SDL_Event* event) {
++  switch (event->type) {
++    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
++    case SDL_EVENT_GAMEPAD_BUTTON_UP:
++    case SDL_EVENT_GAMEPAD_REMOVED:
++      if (const auto filter = gamepad_filter.load()) {
++        if (filter(*event) && event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
++          break;
++        }
++      }
++      [[fallthrough]];
++    case SDL_EVENT_GAMEPAD_AXIS_MOTION:
++    case SDL_EVENT_GAMEPAD_ADDED:
++      static_cast<SDLInputDriver*>(userdata)->HandleEvent(*event);
++      break;
++    default:
++      break;
++  }
++  return true;
++}
++
+ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
+   // This callback will likely run on the thread that posts the event, which
+   // may be a dedicated thread SDL has created for the joystick subsystem.
+@@ -441,9 +477,13 @@ void SDLInputDriver::ProcessEventLocked(const SDL_Event& event) {
+ }
+
+ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
++  if (GetControllerIndexFromInstanceID(event.gdevice.which)) {
++    return;
++  }
+   const auto controller = SDL_OpenGamepad(event.gdevice.which);
+   if (!controller) {
+-    assert_always();
++    // It can disappear before the UI event queue is drained.
++    REXLOG_DEBUG("SDL: Could not open gamepad {}: {}", event.gdevice.which, SDL_GetError());
+     return;
+   }
+   REXLOG_INFO(
+@@ -560,7 +600,7 @@ void SDLInputDriver::OnControllerDeviceButtonChangedLocked(const SDL_Event& even
+   static_assert(SDL_GAMEPAD_BUTTON_SOUTH == 0);
+   static_assert(SDL_GAMEPAD_BUTTON_DPAD_RIGHT == 14);
+
+-  auto idx = GetControllerIndexFromInstanceID(event.gdevice.which);
++  auto idx = GetControllerIndexFromInstanceID(event.gbutton.which);
+   if (!idx) {
+     // The pad can be removed between the event being posted and drained.
+     return;
+@@ -669,14 +709,26 @@ void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
+ }
+
  void SDLInputDriver::QueueControllerUpdate() {
 -  // Pump SDL events to ensure controller state is up to date.
 +  // Pump SDL events to ensure controller state is up to date. Titles poll every pad several times
@@ -2866,6 +3714,70 @@ index c7c440d..95eaccf 100644
    bool is_queued = false;
    sdl_pumpevents_queued_.compare_exchange_strong(is_queued, true);
    if (!is_queued) {
+-    attached_window_->app_context().CallInUIThread([this]() {
+-      SDL_PumpEvents();
++    if (!attached_window_ || !attached_window_->app_context().CallInUIThread([this]() {
++          SDL_PumpEvents();
++          sdl_pumpevents_queued_ = false;
++        })) {
+       sdl_pumpevents_queued_ = false;
+-    });
++    }
+   }
+ }
+
+diff --git a/src/input/xinput/xinput_input_driver.cpp b/src/input/xinput/xinput_input_driver.cpp
+index a6a1da9..b979403 100644
+--- a/src/input/xinput/xinput_input_driver.cpp
++++ b/src/input/xinput/xinput_input_driver.cpp
+@@ -115,12 +115,12 @@ X_STATUS XinputInputDriver::Setup() {
+   }
+
+   module_ = module;
+-  XInputGetCapabilities_ = xigc;
+-  XInputGetState_ = xigs;
+-  XInputGetStateEx_ = xigsEx;
+-  XInputGetKeystroke_ = xigk;
+-  XInputSetState_ = xiss;
+-  XInputEnable_ = xie;
++  XInputGetCapabilities_ = reinterpret_cast<void*>(xigc);
++  XInputGetState_ = reinterpret_cast<void*>(xigs);
++  XInputGetStateEx_ = reinterpret_cast<void*>(xigsEx);
++  XInputGetKeystroke_ = reinterpret_cast<void*>(xigk);
++  XInputSetState_ = reinterpret_cast<void*>(xiss);
++  XInputEnable_ = reinterpret_cast<void*>(xie);
+
+   return X_STATUS_SUCCESS;
+ }
+@@ -204,7 +204,7 @@ X_RESULT XinputInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state
+
+   // If the guide button is enabled use XInputGetStateEx, otherwise use the
+   // default XInputGetState.
+-  auto xigs = REXCVAR_GET(guide_button) ? (decltype(&XInputGetState))XInputGetStateEx_
++  auto xigs = (REXCVAR_GET(guide_button) && XInputGetStateEx_) ? (decltype(&XInputGetState))XInputGetStateEx_
+                                         : (decltype(&XInputGetState))XInputGetState_;
+
+   DWORD result = xigs(user_index, &native_state.state);
+@@ -223,6 +223,9 @@ X_RESULT XinputInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state
+   out_state->gamepad.thumb_ly = native_state.state.Gamepad.sThumbLY;
+   out_state->gamepad.thumb_rx = native_state.state.Gamepad.sThumbRX;
+   out_state->gamepad.thumb_ry = native_state.state.Gamepad.sThumbRY;
++  if (!is_active()) {
++    out_state->gamepad = {};
++  }
+
+   return result;
+ }
+@@ -269,6 +272,9 @@ X_RESULT XinputInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+     return result;
+   }
+
++  if (!is_active()) {
++    return X_ERROR_EMPTY;
++  }
+   XINPUT_KEYSTROKE native_keystroke;
+   auto xigk = (decltype(&XInputGetKeystroke))XInputGetKeystroke_;
+   result = xigk(user_index, 0, &native_keystroke);
 diff --git a/src/kernel/xam/xam_info.cpp b/src/kernel/xam/xam_info.cpp
 index 1fda053..fe2e5e3 100644
 --- a/src/kernel/xam/xam_info.cpp
@@ -3154,14 +4066,27 @@ index 5bd3dc5..adff0de 100644
      find_package(PkgConfig REQUIRED)
      pkg_check_modules(X11_XCB REQUIRED x11-xcb)
      # Required, not optional: vulkan/api.h pulls in <wayland-client.h> on every
+diff --git a/src/ui/keybinds.cpp b/src/ui/keybinds.cpp
+index 9822f3b..abeaf2a 100644
+--- a/src/ui/keybinds.cpp
++++ b/src/ui/keybinds.cpp
+@@ -141,6 +141,8 @@ static const std::unordered_map<std::string, VirtualKey> kKeyNames = {
+     {"LMB", VirtualKey::kLButton},
+     {"RMB", VirtualKey::kRButton},
+     {"MMB", VirtualKey::kMButton},
++    {"Mouse4", VirtualKey::kXButton1},
++    {"Mouse5", VirtualKey::kXButton2},
+ };
+
+ VirtualKey ParseVirtualKey(std::string_view name) {
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
-index b94fe9e..b112566 100644
+index b94fe9e..58c63c9 100644
 --- a/src/ui/rex_app.cpp
 +++ b/src/ui/rex_app.cpp
 @@ -46,6 +46,9 @@
  #include <filesystem>
  #include <string_view>
- 
+
 +REXCVAR_DEFINE_BOOL(window_presenter, true, "UI",
 +                    "Attach the emulated GPU's presenter to the window (off when the title presents "
 +                    "to the window with its own renderer)");
@@ -3181,6 +4106,16 @@ index b94fe9e..b112566 100644
    } else if (!graphics_system) {
      // Detached mode: the app brings its own renderer and drives its own paint
      // loop. ReXApp owns the returned drawer via immediate_drawer_.
+@@ -598,6 +605,9 @@ void ReXApp::OnDestroy() {
+   if (module_thread_.joinable()) {
+     module_thread_.join();
+   }
++  if (runtime_ && runtime_->input_system()) {
++    static_cast<rex::input::InputSystem*>(runtime_->input_system())->AttachWindow(nullptr);
++  }
+   if (window_) {
+     window_->RemoveInputListener(this);
+     window_->RemoveListener(this);
 diff --git a/src/ui/surface_android.cpp b/src/ui/surface_android.cpp
 new file mode 100644
 index 0000000..913511e
@@ -3240,12 +4175,12 @@ index 914b311..0c76c51 100644
    loader_candidates.emplace_back("libvulkan.dylib");
    loader_candidates.emplace_back("libMoltenVK.dylib");
 diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
-index 2251429..f7aeaf0 100644
+index 2251429..e4fd839 100644
 --- a/src/ui/window_sdl.cpp
 +++ b/src/ui/window_sdl.cpp
 @@ -35,6 +35,8 @@
  #include <SDL3/SDL_metal.h>
- 
+
  #include <rex/ui/surface_mac.h>
 +#elif REX_PLATFORM_ANDROID
 +#include <rex/ui/surface_android.h>
@@ -3267,6 +4202,24 @@ index 2251429..f7aeaf0 100644
  #else
    SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window_);
    if (allowed_types & Surface::kTypeFlag_WaylandSurface) {
+@@ -560,14 +570,15 @@ void WindowSDL::HandleMouseEvent(SDL_Event& event) {
+       }
+       MouseEvent e(this, MouseEvent::Button::kNone, int32_t(event.motion.x * density),
+                    int32_t(event.motion.y * density), 0, 0, event.motion.xrel * density,
+-                   event.motion.yrel * density);
++                   event.motion.yrel * density, event.motion.which == SDL_TOUCH_MOUSEID);
+       OnMouseMove(e, destruction_receiver);
+       break;
+     }
+     case SDL_EVENT_MOUSE_BUTTON_DOWN:
+     case SDL_EVENT_MOUSE_BUTTON_UP: {
+       MouseEvent e(this, TranslateSDLMouseButton(event.button.button),
+-                   int32_t(event.button.x * density), int32_t(event.button.y * density));
++                   int32_t(event.button.x * density), int32_t(event.button.y * density), 0, 0, 0, 0,
++                   event.button.which == SDL_TOUCH_MOUSEID);
+       if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+         OnMouseDown(e, destruction_receiver);
+       } else {
 diff --git a/src/ui/windowed_app_context_sdl.cpp b/src/ui/windowed_app_context_sdl.cpp
 index dc0b4c2..0742758 100644
 --- a/src/ui/windowed_app_context_sdl.cpp
@@ -3414,7 +4367,7 @@ index 77bb1dc..4b57917 100644
  
  int main(int argc, char* argv[]) {
 diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
-index f102b56..3030ad5 100644
+index f102b56..757811a 100644
 --- a/thirdparty/CMakeLists.txt
 +++ b/thirdparty/CMakeLists.txt
 @@ -49,7 +49,7 @@ if(REXGLUE_USE_VULKAN)
@@ -3429,7 +4382,7 @@ index f102b56..3030ad5 100644
 @@ -201,7 +201,9 @@ if(REXGLUE_USE_VULKAN)
      set(VMA_ENABLE_INSTALL ON CACHE BOOL "" FORCE)
      add_subdirectory(vulkan-memory-allocator)
- 
+
 -    if(APPLE)
 +    # iOS: no Vulkan loader; the app embeds a prebuilt MoltenVK (ios-arm64) and the runtime
 +    # opens it from the app bundle.
@@ -3450,6 +4403,24 @@ index f102b56..3030ad5 100644
  target_include_directories(imgui PUBLIC
      $<BUILD_INTERFACE:${IMGUI_DIR}>
      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+@@ -245,8 +251,15 @@ target_compile_options(imgui PRIVATE -w)
+ # SDL3 - Cross-platform media layer
+ #=============================================================================
+ set(SDL_INSTALL ON CACHE BOOL "" FORCE)
+-set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+-set(SDL_STATIC ON CACHE BOOL "" FORCE)
++if(WIN32)
++    # The runtime pumps SDL and the game host uses it too (controller and touch UI).
++    # Windows cannot share that state via separate copies of a static library.
++    set(SDL_SHARED ON CACHE BOOL "" FORCE)
++    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
++else()
++    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
++    set(SDL_STATIC ON CACHE BOOL "" FORCE)
++endif()
+ set(SDL_TEST OFF CACHE BOOL "" FORCE)
+ set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
+
 diff --git a/thirdparty/disruptorplus/include/disruptorplus/blocking_wait_strategy.hpp b/thirdparty/disruptorplus/include/disruptorplus/blocking_wait_strategy.hpp
 index 32d427d..23fd3e1 100644
 --- a/thirdparty/disruptorplus/include/disruptorplus/blocking_wait_strategy.hpp

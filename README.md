@@ -76,8 +76,8 @@ from them.
   | GPU | Vulkan driver | Vulkan driver + loader | built in (Metal) |
   | Extra | none (the Visual C++ runtime is included) | a desktop session (X11 or Wayland) | none |
 
-  8 GB RAM or more. About 25 GB free during setup, about 17 GB afterwards. A controller is
-  recommended (Xbox or PlayStation through SDL; Windows: XInput). The keyboard works on Mac and Linux.
+  8 GB RAM or more. About 25 GB free during setup, about 17 GB afterwards. See [Controls](#controls)
+  for gamepads and the default keyboard/mouse bindings.
 - **For the phones** (optional): see [iPhone](#iphone) and [Android](#android).
 
 ## Windows
@@ -110,7 +110,56 @@ entry's "Run setup again") opens the setup window with the phone buttons. Logs: 
    `~/Library/Application Support/GTAV Recomp`), then press **Install**, then **Play**.
 
 Later: opening `GTAV.app` starts the game. Hold **Option** while opening it to get the setup window
-with **Build for iPhone** / **Build for Android**. Esc in game opens the settings menu.
+with **Build for iPhone** / **Build for Android**.
+
+## Controls
+
+On Windows, Linux and macOS, both gamepads and keyboard/mouse are enabled by default. The game
+still sees an Xbox 360 controller, so its prompts use Xbox button names. You can switch devices
+without restarting; connected gamepads, keyboard/mouse and touch (where enabled) all control the
+same player.
+
+**Gamepads.** SDL uses the controller support provided by your OS (USB/Bluetooth) and its built-in
+mappings. Xbox, PlayStation, Switch and compatible third-party pads can work this way; the exact
+support depends on the device and OS. If your controller isn't mapped or has the wrong buttons,
+try a [`gamecontrollerdb.txt`](https://github.com/mdqinc/SDL_GameControllerDB) with an entry for
+its SDL GUID and platform. Place it next to the **game** executable (in the installed game folder
+on macOS, not in `GTAV.app`), or set `hid_mappings_file` to its path. On iPhone use the app's
+Documents folder; on Android use the app's external `files` folder. A mapping can't add support
+for a device the OS or SDL doesn't detect.
+
+**Keyboard and mouse.** The letters below are physical QWERTY positions: use **ZQSD** to move on
+AZERTY. The mouse steers the right stick, not the PC version's native camera.
+
+| Xbox 360 input | Default binding |
+|---|---|
+| Left stick | W / A / S / D (Z / Q / S / D on AZERTY) |
+| Right stick | Mouse, or I / J / K / L |
+| A / B / X / Y | Shift or Enter / R or Backspace / Space / F |
+| LT / RT | Right click or Q / left click or E |
+| LB / RB | 1 or Mouse4 / 3 or Mouse5 |
+| Left / right stick click | Ctrl / middle click or C |
+| D-pad / Back / Start | Arrow keys / Tab / Esc |
+
+**Native settings overlay.** **F1** opens or closes it and frees the mouse when open. **Esc** closes
+it when open; otherwise Esc pauses the game. On an SDL gamepad press **RB + Back** together;
+use the D-pad and A to navigate and B to close. Touch controls keep their Menu button.
+
+**Options.** Add settings to `gtav.toml` next to the game executable, or pass them to the game as
+`--name=value`. Example:
+
+```toml
+mnk_sensitivity = 0.8
+keybind_right_shoulder = "3,Mouse5"
+```
+
+Use `mnk_mouse = false` for keyboard-only camera or `mnk_mode = false` to disable keyboard/mouse.
+On Windows, `input_backend = "xinput"` switches to the XInput backend for compatible pads if SDL
+isn't working for your setup (use F1 for the overlay in this mode). macOS and Linux launchers also
+forward flags after `--`, e.g. `./gtav_launcher -- --mnk_mouse=false` on Linux. On phones the
+on-screen controls remain the default. To try an external keyboard and mouse, add `--mnk_mode=true`
+and `--mnk_mouse=true` to `args.txt` in the app's Documents (iPhone) or external files (Android)
+folder. External input on phones depends on what the OS forwards to SDL.
 
 ## iPhone
 
@@ -200,6 +249,10 @@ the exact commits used. Platform notes:
 Release scripts: `tools/release/build_release_macos.sh` (+ `IOS_SHELL=1` for the iPhone shell),
 `tools/release/make_release.py` (Windows), `tools/release/make_release_linux.py`; phone shells:
 `tools/ios/make_shell.sh`, `tools/android/make_shell.sh`.
+
+After updating the SDK patch, rebuild and reinstall the SDK before rebuilding the game host.
+Windows builds now stage the SDL DLL (`SDL3rd.dll` in the player release) alongside the game
+executable so the host and SDK share the same SDL input state. See [`tools/input_tests`](tools/input_tests) for tests that don't need game files.
 
 ## Repository layout
 

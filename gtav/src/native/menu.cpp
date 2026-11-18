@@ -3,6 +3,7 @@
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
+#include "input.h"
 #include "touch_controls.h"
 
 #include "paths.h"
@@ -33,6 +34,7 @@ struct Input {
 std::mutex g_input_mutex;
 std::vector<Input> g_input;
 std::atomic<bool> g_open{false};
+bool g_clear_imgui_input = false;
 
 ImGuiContext* g_context = nullptr;
 bool g_font_uploaded = false;
@@ -55,7 +57,7 @@ std::filesystem::path SettingsPath() { return ExeDir() / "gtav_settings.ini"; }
 
 void SaveSettings() {
   std::ofstream out(SettingsPath());
-  out << "# GTA V native renderer settings (Esc menu). name=value, applied over the command line.\n";
+  out << "# GTA V native renderer settings (F1 menu). name=value, applied over the command line.\n";
   for (const char* name : kSettings) out << name << '=' << rex::cvar::GetFlagByName(name) << '\n';
 }
 
@@ -125,7 +127,7 @@ void EnsureContext(uint32_t h) {
 void Push(const Input& in) {
   if (!g_open) return;
   std::lock_guard lock(g_input_mutex);
-  if (g_input.size() < 1024) g_input.push_back(in);
+  if (g_open && g_input.size() < 1024) g_input.push_back(in);
 }
 
 ImGuiKey ToImGui(Key key) {
@@ -151,7 +153,7 @@ void Build(uint32_t fps, double frame_ms) {
 #endif
   ImGui::SetNextWindowSize(ImVec2(520.0f * g_scale, 0.0f), ImGuiCond_FirstUseEver);
   bool open = true;
-  if (!ImGui::Begin("Settings (Esc / B to close)", &open, ImGuiWindowFlags_NoCollapse)) {
+  if (!ImGui::Begin("Settings (F1 / Esc / B to close)", &open, ImGuiWindowFlags_NoCollapse)) {
     ImGui::End();
     return;
   }
@@ -223,17 +225,24 @@ void Build(uint32_t fps, double frame_ms) {
   ImGui::TextDisabled("Controller: RB + Back opens/closes this menu; D-pad + A to change, B to close.");
   if (changed) SaveSettings();
   ImGui::End();
-  if (!open) g_open = false;
+  if (!open) Close();
 }
 
 }  // namespace
 
-void OnEscape() {
-  bool was_open = g_open.exchange(!g_open.load());
-  if (!was_open) {
-    std::lock_guard lock(g_input_mutex);
-    g_input.clear();
-  }
+void Toggle() {
+  std::lock_guard lock(g_input_mutex);
+  g_open = !g_open.load();
+  g_input.clear();
+  g_clear_imgui_input = true;
+  input::Reset();
+}
+void Close() {
+  std::lock_guard lock(g_input_mutex);
+  g_open = false;
+  g_input.clear();
+  g_clear_imgui_input = true;
+  input::Reset();
 }
 bool IsOpen() { return g_open.load(); }
 void OnMouseMove(float x, float y) { Push({Input::kMove, x, y}); }
@@ -278,6 +287,12 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms) {
   io.DeltaTime = 1.0f / 60.0f;
   {
     std::lock_guard lock(g_input_mutex);
+    if (g_clear_imgui_input) {
+      io.ClearEventsQueue();
+      io.ClearInputKeys();
+      io.ClearInputMouse();
+      g_clear_imgui_input = false;
+    }
     for (const auto& in : g_input) {
       switch (in.type) {
         case Input::kMove: io.AddMousePosEvent(in.x, in.y); break;

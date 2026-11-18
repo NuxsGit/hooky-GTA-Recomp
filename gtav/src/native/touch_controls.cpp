@@ -132,6 +132,7 @@ bool OnEvent(void*, SDL_Event* e) {
   if (e->type != SDL_EVENT_FINGER_DOWN && e->type != SDL_EVENT_FINGER_MOTION && e->type != SDL_EVENT_FINGER_UP &&
       e->type != SDL_EVENT_FINGER_CANCELED)
     return true;
+  if (e->tfinger.touchID == SDL_MOUSE_TOUCHID || !REXCVAR_GET(gtav_touch_controls)) return true;
   float w = g_w.load(), h = g_h.load();
   if (w <= 0 || h <= 0) return true;
   float x = e->tfinger.x * w, y = e->tfinger.y * h;
@@ -140,7 +141,7 @@ bool OnEvent(void*, SDL_Event* e) {
     Finger f;
     f.owner = Hit(x, y, w, h);
     if (f.owner >= 0 && kControls[f.owner].kind == kMenu) {
-      menu::OnEscape();  // toggles the settings menu; the finger is not a game input
+      menu::Toggle();  // toggles the settings menu; the finger is not a game input
       return true;
     }
     // While the menu is open touches drive it (SDL turns them into mouse events), not the game.
@@ -228,7 +229,12 @@ class TouchDriver final : public InputDriver {
     if (out) {
       std::memset(out, 0, sizeof(*out));
       out->packet_number = g_packet.load();
-      Fill(&out->gamepad);
+      if (is_active()) {
+        Fill(&out->gamepad);
+      } else {
+        std::lock_guard lock(g_mutex);
+        g_fingers.clear();
+      }
     }
     return X_ERROR_SUCCESS;
   }

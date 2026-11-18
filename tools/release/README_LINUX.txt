@@ -28,7 +28,7 @@ What you need
   Vulkan loader (libvulkan.so.1; on Ubuntu/Debian: libvulkan1 and mesa-vulkan-drivers, or the
   NVIDIA driver). A desktop session (X11 or Wayland): the X11/xcb and Wayland client libraries,
   zlib and zstd that every desktop system has.
-- A controller (Xbox-style, through SDL).
+- A keyboard and mouse, or a gamepad recognized by SDL.
 - About 25 GB free on this drive during setup (about 17 GB once installed), 8 GB RAM or more.
   Put the package on a Linux filesystem (ext4, btrfs, xfs) or exFAT; it needs executable files.
 
@@ -57,8 +57,23 @@ your discs.
 
 Game options go after "--". On a laptop with two GPUs, pick the dedicated one with
   ./gtav_launcher -- --vulkan_device=1
-Esc in game opens the settings menu (quality presets, frame rate limit, VSync, FPS counter).
 The game log is data/logs/gtav.log, the setup log data/logs/install.log.
+
+Controls
+--------
+Gamepads and keyboard/mouse are enabled by default. SDL handles mapped USB/Bluetooth gamepads
+(including Xbox, PlayStation, Switch and compatible third-party models; support varies by OS).
+The game uses Xbox 360 button prompts. Hot-plugged pads and keyboard/mouse control the same player.
+Default bindings (physical positions):
+- WASD (ZQSD on AZERTY) = left stick; mouse or IJKL = right stick.
+- Shift or Enter = A; R or Backspace = B; Space = X; F = Y.
+- Right click or Q = LT; left click or E = RT; Ctrl = L3; middle click or C = R3.
+- 1 or Mouse4 = LB; 3 or Mouse5 = RB; arrows = D-pad; Tab = Back; Esc = Start.
+F1 opens/closes the native settings overlay. Esc closes it when open. On an SDL gamepad use
+RB + Back to toggle it, D-pad and A to navigate, and B to close.
+If a pad isn't mapped, try the community gamecontrollerdb.txt from
+https://github.com/mdqinc/SDL_GameControllerDB next to the game executable. Customize keybind_*
+options and mnk_sensitivity in gtav.toml in the same folder. Set mnk_mode = false to opt out.
 
 iPhone (experimental)
 ---------------------

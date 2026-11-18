@@ -22,7 +22,7 @@ What you need
 - Title Update 27 for GTA V from your own console: the TU file (tu00000009_00000000) or a folder
   with disc002\default.xexp and disc002\update.rpf.
 - Windows 10/11 x64, a CPU with AVX2 (Intel Haswell / AMD Zen or newer), a GPU with current Vulkan drivers.
-- An Xbox-compatible (XInput) controller.
+- A keyboard and mouse, or a gamepad recognized by SDL.
 - About 25 GB free on this drive during setup (about 17 GB once installed), 8 GB RAM or more.
 
 First run
@@ -37,6 +37,24 @@ First run
 
 Later runs start the game directly. Hold Shift while starting the launcher (or pass --setup) to
 open setup again, for example after moving your discs.
+
+Controls
+--------
+Gamepads and keyboard/mouse are enabled by default. SDL handles mapped USB/Bluetooth gamepads
+(including Xbox, PlayStation, Switch and compatible third-party models; support varies by OS).
+The game uses Xbox 360 button prompts. Hot-plugged pads and keyboard/mouse control the same player.
+Default bindings (physical positions):
+- WASD (ZQSD on AZERTY) = left stick; mouse or IJKL = right stick.
+- Shift or Enter = A; R or Backspace = B; Space = X; F = Y.
+- Right click or Q = LT; left click or E = RT; Ctrl = L3; middle click or C = R3.
+- 1 or Mouse4 = LB; 3 or Mouse5 = RB; arrows = D-pad; Tab = Back; Esc = Start.
+F1 opens/closes the native settings overlay. Esc closes it when open. On an SDL gamepad use
+RB + Back to toggle it, D-pad and A to navigate, and B to close.
+If a pad isn't mapped, try the community gamecontrollerdb.txt from
+https://github.com/mdqinc/SDL_GameControllerDB next to the game executable. Customize keybind_*
+options and mnk_sensitivity in gtav.toml in the same folder. Set mnk_mode = false to opt out.
+For an XInput-compatible pad that doesn't work through SDL, set input_backend = "xinput" in
+that file (use F1 for the settings overlay in this mode).
 
 iPhone (experimental)
 ---------------------

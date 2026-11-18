@@ -30,6 +30,7 @@ FILES = [
     (BUILD / "rexruntimerd.dll", "rexruntimerd.dll"),
     (BUILD / "rexgpu-xenosrd.dll", "rexgpu-xenosrd.dll"),
     (BUILD / "TracyClientrd.dll", "TracyClientrd.dll"),
+    (BUILD / "SDL3rd.dll", "SDL3rd.dll"),
     (SDK_BIN / "rexgluerd.exe", "rexgluerd.exe"),
     # Shader translation on the player's machine (shader_compiler.cpp). dxil.dll is not needed
     # for SPIR-V and stays out.

@@ -1848,7 +1848,8 @@ bool Preflight(const fs::path& root, std::wstring* error) {
     FreeLibrary(m);
   }
   for (const wchar_t* f :
-       {L"gtav_fast.exe", L"rexruntimerd.dll", L"rexgluerd.exe", L"tools\\llvm\\bin\\clang++.exe",
+       {L"gtav_fast.exe", L"rexruntimerd.dll", L"SDL3rd.dll", L"rexgluerd.exe",
+        L"tools\\llvm\\bin\\clang++.exe",
         L"tools\\llvm\\bin\\lld-link.exe", L"tools\\game_dll\\expected.txt",
         L"tools\\game_dll\\gtav_manifest.toml", L"tools\\game_dll\\fs\\gtav_pch.h",
         L"tools\\game_dll\\interface\\gtav_game.def"}) {
@@ -1913,14 +1914,11 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
                arg(L"gtav_native_spirv_dir", data / L"spirv"), L"--gpu_plugin=xenos",
                L"--headless=true", L"--log_level=info", L"--log_max_file_size_mb=256",
                L"--log_max_files=2",
-#ifdef _WIN32
-               L"--input_backend=xinput",
-#endif
 #ifdef __APPLE__
                // The runtime's own window would open in a fullscreen Space of its own; the native
                // renderer hides it and opens the game window on the desktop, leaving the player
                // looking at an empty black Space.
-               L"--fullscreen=false", L"--mnk_mode=true",
+               L"--fullscreen=false",
 #endif
                L"--gtav_native=on", L"--gtav_fps_limit=0", L"--gpu_skip_rendering=true",
                L"--gpu_skip_rendering_lag_ms=4", L"--vsync=false", L"--gtav_native_vsync=false"};
