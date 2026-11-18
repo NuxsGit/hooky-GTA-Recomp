@@ -96,13 +96,40 @@ recompiled functions the exe calls; 9 `gtavfs_*` bridge functions (`src/game_bri
 DLL MMIO, timebase, indirect-call lookup, the global lock, traps. `gtav/fs/layout_check.h` pins
 the PPCContext / PPCImageInfo layout on both sides with static_asserts.
 
-Developer side:
-- `build_release_exe.cmd` (exe, tree `build-dll`), `build_launcher.cmd`.
-- `tools/game_dll/build_game_dll.py` = the installer's compile + link, for testing.
-- `tools/game_dll/make_expected.py data ...` + `gen ...` → `tools/release/expected.txt`.
-- `tools/release/make_release.py OUT --llvm DIR --expected tools/release/expected.txt --licenses DIR --zip`
-  (refuses forbidden extensions; collects every third-party license; LLVM 19.1.5 from the
-  official installer: clang.exe → `tools/llvm/bin/clang++.exe`, lld-link.exe, `lib/clang/19/include`).
+Developer side (Windows x64):
+
+- From a VS x64 developer prompt with LLVM, CMake, Ninja and Python on PATH, get the
+  [pinned upstream sources and submodules](MAC_THEN_ANDROID_PLAN.md#1-set-up-the-tree)
+  under `rexglue-sdk/` and `thirdparty/`. Apply the canonical patches to fresh trees. No game
+  files or codegen output are needed to build or package the host.
+- Build and install the **RelWithDebInfo** SDK. This installs `rexgluerd.exe` and one shared
+  `SDL3rd.dll` used by both `gtav_fast.exe` and `rexruntimerd.dll`:
+
+  ```bat
+  cmake -S rexglue-sdk --preset win-amd64
+  cmake --build rexglue-sdk/out/build/win-amd64 --config RelWithDebInfo
+  cmake --install rexglue-sdk/out/build/win-amd64 --config RelWithDebInfo
+  cmake -S thirdparty/XenosRecomp -B build-xr -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DXENOS_RECOMP_DXIL=OFF
+  cmake --build build-xr --target XenosRecomp
+  build_release_exe.cmd
+  cmake -S loader -B build-launcher -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl "-DGTAV_SDK_THIRDPARTY=%CD%/rexglue-sdk/thirdparty"
+  cmake --build build-launcher
+  ```
+
+- `tools/game_dll/build_game_dll.py` = the installer's compile + link, for testing from a local
+  game copy. Reference hashes: `tools/release/expected.txt`. The public package takes its seed
+  from the tracked `tools/game_dll/codegen.partition.json`, not a generated tree.
+- `python tools/release/make_release.py dist/gtav-recomp-windows-x64 --llvm DIR --expected tools/release/expected.txt --licenses DIR --zip`
+  collects licenses, refuses forbidden extensions and uses `llvm-readobj.exe` from the official
+  LLVM installation to check the x64 host and runtime both import the shared SDL DLL. The SDL
+  and runtime copies staged by the host build must match those in the SDK install. Pass `--sdk`
+  (same source tree as `GTAV_SDK_TREE` for `build_release_exe.cmd`) or `--xenosrecomp` if using a
+  different build location. The DLL, compiler/lld and headers are packaged; `llvm-readobj.exe`
+  is only needed on the build machine.
+- Before publication, run the [Windows controller checks](../tools/input_tests/README.md#windows-usb-and-bluetooth-before-release)
+  on the same SDL build, then verify a physical DualSense **in-game, both over USB and over
+  Bluetooth**, from the unpacked candidate. A virtual pad or successful link does not replace
+  this check. Keep the release in draft until the targeted packages pass.
 - `tools/release/scan_release.cmd` → `taint_scan.py`: content-defined 32-byte windows of the
   release vs the decrypted executable image, the TU xexp, update.rpf, every dumped/translated/
   compiled game shader and the generated C++. Windows also found in a control set (system
