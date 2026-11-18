@@ -3,6 +3,8 @@
 //   open GTAV.app                 installed: start the game and quit; otherwise the setup window
 //                                 (hold Option while opening it to get the setup window anyway)
 //   GTAV --unattended [--home D]  setup from D/data/launcher.ini, no questions (testing)
+//   GTAV --rebuild [--home D]    rebuild from the local files (no discs, no window)
+//   GTAV --check-updates         check public release metadata, without touching D
 //   GTAV --iphone [--home D]      iPhone build from the installed game folder, no window
 //   GTAV --android [--home D]     Android pack (D/android/gtav-android-pack.zip), no window
 //                                 (data/logs/iphone_unattended.txt; out: D/iphone, see install.h)
@@ -18,6 +20,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include <atomic>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -27,6 +30,7 @@
 
 #include "install.h"
 #include "sources.h"
+#include "update.h"
 
 namespace fs = std::filesystem;
 using namespace loader;
@@ -112,7 +116,7 @@ class FileUi : public InstallUi {
   int last_ = -1;
 };
 
-int Unattended() {
+int Unattended(bool rebuild) {
   std::error_code ec;
   fs::create_directories(g_home / "data" / "logs", ec);
   FileUi ui(g_home / "data" / "logs" / "unattended.txt");
@@ -180,7 +184,7 @@ class WindowUi : public InstallUi {
   bool Ask(const std::wstring& q) override {
     NSString* s = NS(q);
     __block bool yes = false;
-    dispatch_sync(dispatch_get_main_queue(), ^{ yes = [c_ ask:s]; });
+    dispatch_sync(dispatch_get_main_queue(), ^{ yes = !g_cancelled && [c_ ask:s]; });
     return yes;
   }
 
@@ -201,6 +205,9 @@ class WindowUi : public InstallUi {
   NSButton* _iphone;
   NSButton* _android;
   NSButton* _play;
+  NSButton* _rebuild;
+  NSButton* _cancel;
+  NSButton* _update;
   NSButton* _browse[4];
   std::unique_ptr<WindowUi> _ui;
   bool _busy;
@@ -222,30 +229,30 @@ class WindowUi : public InstallUi {
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)n {
-  const CGFloat w = 720, h = 560;
+  const CGFloat w = 720, h = 600;
   _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, w, h)
                                         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                                   NSWindowStyleMaskMiniaturizable
                                           backing:NSBackingStoreBuffered
                                             defer:NO];
-  _window.title = @"GTA V recomp setup";
+  _window.title = [NSString stringWithFormat:@"GTA V Recomp  |  Launcher v%s", kLauncherVersion];
   _window.delegate = self;
-  [self label:@"Point setup at your own copy of the game: both Xbox 360 discs and Title Update 27. "
-              @"Setup copies the game data into the game folder, recompiles the game executable on "
-              @"this Mac and checks every file. Nothing is downloaded and nothing is sent anywhere. "
-              @"It needs about 17 GB and 15-40 minutes."
-        frame:NSMakeRect(16, h - 68, w - 32, 56)];
+  NSTextField* heading = [self label:@"Set up GTA V Recomp" frame:NSMakeRect(16, h - 44, w - 32, 30)];
+  heading.font = [NSFont systemFontOfSize:22 weight:NSFontWeightSemibold];
+  [self label:@"Use your own Xbox 360 discs and Title Update 27. Setup checks, copies and builds locally. "
+              @"Allow about 25 GB free for a first install. The update check is separate and optional."
+        frame:NSMakeRect(16, h - 85, w - 32, 36)];
 
   std::vector<std::string> saved = LoadInputs();
   for (int i = 0; i < 4; ++i) {
-    CGFloat y = h - 110 - i * 52;
-    NSString* label = i < 3 ? kRowLabels[i] : @"Game folder";
+    CGFloat y = h - 130 - i * 50;
+    NSString* label = i < 3 ? [NSString stringWithFormat:@"%d. %@", i + 1, kRowLabels[i]] : @"Game folder";
     NSString* hint = i < 3 ? kRowHints[i] : @"where the game data and the built game go (17 GB)";
     NSTextField* l = [self label:[NSString stringWithFormat:@"%@ - %@", label, hint]
                            frame:NSMakeRect(16, y + 22, w - 32, 18)];
     l.textColor = NSColor.secondaryLabelColor;
     NSTextField* f = [[NSTextField alloc] initWithFrame:NSMakeRect(16, y - 4, w - 140, 24)];
-    f.stringValue = i < 3 ? [NSString stringWithUTF8String:saved[i].c_str()] : NS(g_home);
+    f.stringValue = i < 3 ? ([NSString stringWithUTF8String:saved[i].c_str()] ?: @"") : NS(g_home);
     f.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [_window.contentView addSubview:f];
     if (i < 3)
@@ -256,14 +263,14 @@ class WindowUi : public InstallUi {
     _browse[i].tag = i;
   }
 
-  _stage = [self label:@"" frame:NSMakeRect(16, h - 340, w - 32, 20)];
-  _progress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(16, h - 366, w - 32, 20)];
+  _stage = [self label:@"" frame:NSMakeRect(16, h - 344, w - 32, 32)];
+  _progress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(16, h - 362, w - 32, 18)];
   _progress.indeterminate = NO;
   _progress.minValue = 0;
   _progress.maxValue = 1;
   [_window.contentView addSubview:_progress];
 
-  NSScrollView* sv = [[NSScrollView alloc] initWithFrame:NSMakeRect(16, 56, w - 32, h - 432)];
+  NSScrollView* sv = [[NSScrollView alloc] initWithFrame:NSMakeRect(16, 98, w - 32, h - 471)];
   sv.hasVerticalScroller = YES;
   sv.borderType = NSBezelBorder;
   _log = [[NSTextView alloc] initWithFrame:sv.contentView.bounds];
@@ -273,14 +280,15 @@ class WindowUi : public InstallUi {
   sv.documentView = _log;
   [_window.contentView addSubview:sv];
 
-  _iphone = [self button:@"Build for iPhone" frame:NSMakeRect(16, 14, 150, 32) action:@selector(iphone:)];
-  _android = [self button:@"Build for Android" frame:NSMakeRect(172, 14, 160, 32) action:@selector(android:)];
-  _install = [self button:@"Install" frame:NSMakeRect(w - 236, 14, 104, 32) action:@selector(install:)];
-  _play = [self button:@"Play" frame:NSMakeRect(w - 120, 14, 104, 32) action:@selector(play:)];
+  _install = [self button:@"Install & build" frame:NSMakeRect(16, 55, 140, 32) action:@selector(install:)];
+  _rebuild = [self button:@"Recompile" frame:NSMakeRect(162, 55, 116, 32) action:@selector(recompile:)];
+  _cancel = [self button:@"Cancel" frame:NSMakeRect(284, 55, 100, 32) action:@selector(cancel:)];
+  _play = [self button:@"Play" frame:NSMakeRect(w - 120, 55, 104, 32) action:@selector(play:)];
   _play.keyEquivalent = @"\r";
+  _update = [self button:@"Check for updates" frame:NSMakeRect(16, 14, 160, 32) action:@selector(update:)];
+  _iphone = [self button:@"Build for iPhone" frame:NSMakeRect(w - 332, 14, 150, 32) action:@selector(iphone:)];
+  _android = [self button:@"Build for Android" frame:NSMakeRect(w - 176, 14, 160, 32) action:@selector(android:)];
   [self setBusy:false];
-  _stage.stringValue = IsInstalled(g_home) ? @"Installed. Press Play, or Install to redo setup."
-                                            : @"Pick the three inputs, then press Install.";
   [_window center];
   [_window makeKeyAndOrderFront:nil];
   [NSApp activateIgnoringOtherApps:YES];
@@ -291,10 +299,57 @@ class WindowUi : public InstallUi {
   for (int i = 0; i < 4; ++i) _browse[i].enabled = !busy;
   for (int i = 0; i < 3; ++i) _paths[i].editable = !busy;
   _home.editable = !busy;
-  _install.title = busy ? @"Cancel" : @"Install";
-  _iphone.enabled = !busy && IsInstalled(g_home);
-  _android.enabled = !busy && IsInstalled(g_home);
-  _play.enabled = !busy && IsInstalled(g_home);
+  const auto status = busy ? InstallStatus::NeedsSources : GetInstallStatus(g_root, g_home);
+  const bool ready = status == InstallStatus::Ready;
+  _install.enabled = !busy;
+  _rebuild.enabled = !busy && status != InstallStatus::NeedsSources;
+  _cancel.enabled = busy;
+  _play.enabled = !busy && ready;
+  _iphone.enabled = !busy && ready;
+  _android.enabled = !busy && ready;
+  _update.enabled = !busy;
+  if (!busy) _stage.stringValue = NS(std::wstring(InstallStatusText(status)));
+}
+
+- (bool)endTask {
+  [self setBusy:false];
+  if (!_quit_when_stopped) return false;
+  [NSApp terminate:nil];
+  return true;
+}
+
+- (void)cancel:(id)sender {
+  g_cancelled = true;
+  _stage.stringValue = @"Stopping the current task...";
+}
+
+- (void)update:(id)sender {
+  if (_busy) return;
+  g_cancelled = false;
+  [self setBusy:true];
+  [self stage:@"Checking GitHub for project updates..."];
+  std::thread([self] {
+    auto result = CheckForUpdate();
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if ([self endTask] || g_cancelled) return;
+      NSString* message = [NSString stringWithUTF8String:result.message.c_str()];
+      [self appendLog:message];
+      NSAlert* alert = [[NSAlert alloc] init];
+      alert.messageText = @"Project updates";
+      alert.informativeText = message;
+      if (result.url.empty() && result.status != UpdateStatus::Error) {
+        [alert runModal];
+        return;
+      }
+      [alert addButtonWithTitle:@"Close"];
+      [alert addButtonWithTitle:@"Open GitHub Releases"];
+      if ([alert runModal] != NSAlertSecondButtonReturn) return;
+      const auto url = result.url.empty() ? std::string(kReleasePage) : result.url;
+      NSString* link = [NSString stringWithUTF8String:url.c_str()];
+      if (![NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:link]])
+        ShowError([@"Could not open your browser. Visit: " stringByAppendingString:link]);
+    });
+  }).detach();
 }
 
 - (void)choose:(NSButton*)sender {
@@ -313,12 +368,15 @@ class WindowUi : public InstallUi {
 // A game folder that already holds an install can be played right away.
 - (void)homeChanged {
   fs::path home = _home.stringValue.UTF8String;
-  if (home.empty() || !home.is_absolute()) return;
+  if (_busy || !home.is_absolute()) return;
+  const bool changed = g_home != home;
   g_home = home;
   [NSUserDefaults.standardUserDefaults setObject:_home.stringValue forKey:@"GameFolder"];
-  _play.enabled = !_busy && IsInstalled(g_home);
-  _stage.stringValue = IsInstalled(g_home) ? @"Installed. Press Play, or Install to redo setup."
-                                            : @"Pick the three inputs, then press Install.";
+  if (changed) {
+    const auto saved = LoadInputs();
+    for (int i = 0; i < 3; ++i) _paths[i].stringValue = [NSString stringWithUTF8String:saved[i].c_str()] ?: @"";
+  }
+  [self setBusy:false];
 }
 
 - (void)controlTextDidEndEditing:(NSNotification*)n {
@@ -352,6 +410,10 @@ class WindowUi : public InstallUi {
 }
 
 - (void)play:(id)sender {
+  if (_busy || GetInstallStatus(g_root, g_home) != InstallStatus::Ready) {
+    if (!_busy) [self setBusy:false];
+    return;
+  }
   std::wstring error;
   if (StartGame(&error)) {
     [NSApp terminate:nil];
@@ -362,19 +424,23 @@ class WindowUi : public InstallUi {
 
 - (BOOL)windowShouldClose:(NSWindow*)w {
   if (!_busy) return YES;
-  if (![self ask:@"Setup is running. Stop it and close? Running setup again continues where it stopped."])
-    return NO;
-  g_cancelled = true;
-  _quit_when_stopped = true;
-  return NO;  // quits when the install thread has stopped (finished:)
+  if (!_quit_when_stopped && [self ask:@"Stop the current task and close when it finishes?"]) {
+    if (!_busy) return YES;
+    [self cancel:nil];
+    _quit_when_stopped = true;
+  }
+  return NO;
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)app {
+  return [self windowShouldClose:_window] ? NSTerminateNow : NSTerminateCancel;
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)app {
   return YES;
 }
 
-// Phone builds (install.h RunIphoneBuild / RunAndroidBuild) from the installed game folder;
-// Install's button cancels.
+// Phone builds (install.h RunIphoneBuild / RunAndroidBuild) from the installed game folder.
 - (void)iphone:(id)sender {
   [self phone:false];
 }
@@ -386,13 +452,14 @@ class WindowUi : public InstallUi {
   _ui = std::make_unique<WindowUi>(self);
   g_cancelled = false;
   [self setBusy:true];
+  _progress.doubleValue = 0;
   WindowUi* ui = _ui.get();
   std::thread([self, ui, android] {
     std::wstring err;
     bool ok = android ? RunAndroidBuild(g_root, g_home, *ui, &err) : RunIphoneBuild(g_root, g_home, *ui, &err);
     NSString* e = NS(err);
     dispatch_async(dispatch_get_main_queue(), ^{
-      [self setBusy:false];
+      if ([self endTask]) return;
       if (ok) {
         [self stage:android ? @"Android build finished: copy gtav-android-pack.zip and your disc files to the phone."
                             : @"iPhone build finished: install GTAV.ipa with Sideloadly or AltStore."];
@@ -410,55 +477,66 @@ class WindowUi : public InstallUi {
 }
 
 - (void)install:(id)sender {
-  if (_busy) {
-    g_cancelled = true;
-    _stage.stringValue = @"Cancelling...";
-    return;
-  }
-  std::vector<std::string> paths(3);
-  for (int i = 0; i < 3; ++i) {
-    paths[i] = _paths[i].stringValue.UTF8String;
-    std::error_code ec;
-    if (paths[i].empty() || !fs::exists(paths[i], ec)) {
-      ShowError([NSString stringWithFormat:@"%@: pick the image, file or folder.", kRowLabels[i]]);
-      return;
-    }
-  }
+  [self buildGame:false];
+}
+
+- (void)recompile:(id)sender {
+  [self buildGame:true];
+}
+
+- (void)buildGame:(bool)rebuild {
+  if (_busy) return;
   fs::path home = _home.stringValue.UTF8String;
-  std::wstring error;
-  if (home.empty() || !home.is_absolute() || !CheckGameFolder(home, &error)) {
-    ShowError(error.empty() ? @"Pick a game folder." : NS(error));
+  if (!home.is_absolute()) {
+    ShowError(@"Pick an absolute path for the game folder.");
     return;
   }
   g_home = home;
   [NSUserDefaults.standardUserDefaults setObject:_home.stringValue forKey:@"GameFolder"];
-  SaveInputs(paths);
+  InstallInputs in;
+  if (!rebuild) {
+    std::vector<std::string> paths(3);
+    for (int i = 0; i < 3; ++i) {
+      paths[i] = _paths[i].stringValue.UTF8String;
+      std::error_code ec;
+      auto path = fs::absolute(paths[i], ec);
+      if (paths[i].empty() || ec || (!fs::is_regular_file(path, ec) && !fs::is_directory(path, ec))) {
+        ShowError([NSString stringWithFormat:@"%@: choose an existing file or folder.", kRowLabels[i]]);
+        return;
+      }
+      paths[i] = path.string();
+    }
+    SaveInputs(paths);
+    in = {Widen(paths[0]), Widen(paths[1]), Widen(paths[2])};
+  }
 
   _ui = std::make_unique<WindowUi>(self);
   g_cancelled = false;
+  _log.string = @"";
   [self setBusy:true];
-  InstallInputs in{Widen(paths[0]), Widen(paths[1]), Widen(paths[2])};
   WindowUi* ui = _ui.get();
-  std::thread([self, in, ui] {
-    std::wstring err;
-    bool ok = RunInstall(g_root, g_home, in, *ui, &err);
-    NSString* e = NS(err);
-    dispatch_async(dispatch_get_main_queue(), ^{ [self finished:ok error:e]; });
+  std::thread([self, in, ui, rebuild] {
+    @autoreleasepool {
+      std::wstring err;
+      bool ok = rebuild ? RunRebuild(g_root, g_home, *ui, &err) : RunInstall(g_root, g_home, in, *ui, &err);
+      NSString* e = NS(err);
+      dispatch_async(dispatch_get_main_queue(), ^{ [self finished:ok error:e rebuild:rebuild]; });
+    }
   }).detach();
 }
 
-- (void)finished:(bool)ok error:(NSString*)error {
-  [self setBusy:false];
+- (void)finished:(bool)ok error:(NSString*)error rebuild:(bool)rebuild {
+  if ([self endTask]) return;
   if (ok) {
-    _stage.stringValue = @"Setup finished. Press Play.";
+    _stage.stringValue = @"Game build ready. Press Play.";
     return;
   }
-  _stage.stringValue = g_cancelled ? @"Cancelled. Install again to continue where it stopped."
-                                   : @"Setup stopped.";
   if (g_cancelled) {
-    if (_quit_when_stopped) [NSApp terminate:nil];
+    _stage.stringValue = rebuild ? @"Recompile cancelled." :
+        @"Cancelled. Retry setup to resume copying, or recompile if all files are present.";
     return;
   }
+  _stage.stringValue = @"Setup stopped. See the log below.";
   ShowError(error);
 }
 
@@ -469,6 +547,7 @@ int main(int argc, char** argv) {
     g_root = fs::path(NSBundle.mainBundle.resourcePath.UTF8String) / "gtav";
     g_home = DefaultHome();
     bool unattended = false, setup = false, iphone = false, android = false;
+    bool rebuild = false, update = false;
     for (int i = 1; i < argc; ++i) {
       std::string a = argv[i];
       if (a == "--") {
@@ -483,6 +562,13 @@ int main(int argc, char** argv) {
         android = true;
       } else if (a == "--setup") {
         setup = true;
+      } else if (a == "--rebuild") {
+        rebuild = true;
+      } else if (a == "--check-updates") {
+        update = true;
+      } else if (a == "--version") {
+        puts(kLauncherVersion);
+        return 0;
       } else if (a == "--home" && i + 1 < argc) {
         g_home = fs::absolute(argv[++i]);
       } else if (a == "--root" && i + 1 < argc) {
@@ -490,7 +576,14 @@ int main(int argc, char** argv) {
       }
       // Anything else (e.g. -psn_* from old Finder launches) is ignored.
     }
-    if (unattended) return Unattended();
+    if (update) {
+      const auto result = CheckForUpdate();
+      puts(result.message.c_str());
+      if (!result.url.empty()) puts(result.url.c_str());
+      else if (result.status == UpdateStatus::Error) printf("Releases: %s\n", kReleasePage.data());
+      return result.status == UpdateStatus::Error ? 1 : 0;
+    }
+    if (rebuild || unattended) return Unattended(rebuild);
     if (iphone || android) return PhoneUnattended(android);
 
     [NSApplication sharedApplication];
@@ -498,15 +591,11 @@ int main(int argc, char** argv) {
     bool option = (NSEvent.modifierFlags & NSEventModifierFlagOption) != 0;
     std::wstring error;
     // The common case: installed, start the game and get out of the way.
-    if (!setup && !option && IsInstalled(g_home)) {
+    if (!setup && !option && GetInstallStatus(g_root, g_home) == InstallStatus::Ready) {
       if (StartGame(&error)) return 0;
       ShowError(NS(error));
     }
-    if (!Preflight(g_root, &error)) {
-      ShowError(NS(error));
-      return 1;
-    }
-    SetupController* c = [[SetupController alloc] init];
+    SetupController* __attribute__((objc_precise_lifetime)) c = [[SetupController alloc] init];
     NSApp.delegate = c;
     [NSApp run];
   }

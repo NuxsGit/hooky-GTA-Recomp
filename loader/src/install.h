@@ -43,12 +43,18 @@ bool RunIphoneBuild(const std::filesystem::path& root, const std::filesystem::pa
 bool RunAndroidBuild(const std::filesystem::path& root, const std::filesystem::path& home, InstallUi& ui,
                      std::wstring* error);
 
-// root = the folder holding the launcher, gtav_fast.exe and tools\ (Linux: gtav_fast, tools/).
-bool IsInstalled(const std::filesystem::path& root);
+// root is the release's runtime and tools; home is the player's data/ and game library.
+// On Windows/Linux they are the same folder. GetInstallStatus just checks the file inventory and
+// the local build stamp. RunRebuild checks the data again and builds from it without the discs.
+enum class InstallStatus { NeedsSources, NeedsRebuild, Ready };
+InstallStatus GetInstallStatus(const std::filesystem::path& root, const std::filesystem::path& home);
+const wchar_t* InstallStatusText(InstallStatus status);
+bool RunRebuild(const std::filesystem::path& root, const std::filesystem::path& home,
+                InstallUi& ui, std::wstring* error);
 bool RunInstall(const std::filesystem::path& root, const InstallInputs& in, InstallUi& ui,
                 std::wstring* error);
 // macOS: root is the read-only package inside the app, home the game folder everything made goes
-// to (gtav_game.dylib, data/). IsInstalled and LaunchGame then take home.
+// to (gtav_game.dylib, data/). LaunchGame then takes home.
 bool RunInstall(const std::filesystem::path& root, const std::filesystem::path& home,
                 const InstallInputs& in, InstallUi& ui, std::wstring* error);
 // extra: more game arguments (Linux: everything after "--" on the launcher's command line). On

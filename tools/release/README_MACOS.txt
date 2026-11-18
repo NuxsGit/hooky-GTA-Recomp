@@ -35,7 +35,7 @@ First run
      - Open it once, then System Settings > Privacy & Security > "GTAV was blocked..." > Open Anyway
      - or, in Terminal:  xattr -dr com.apple.quarantine /Applications/GTAV.app
 3. Open GTAV.app. Pick Disc 1, Disc 2 and the title update with the "Choose..." buttons, and the
-   game folder (default: ~/Library/Application Support/GTAV Recomp). Press Install.
+   game folder (default: ~/Library/Application Support/GTAV Recomp). Press Install & build.
 4. Setup checks every file against known-good hashes, copies them into the game folder, generates
    C++ from your game executable, compiles it into gtav_game.dylib with the bundled clang and
    removes the build files. This takes about 15-40 minutes. Cancel (or closing the window) stops
@@ -46,6 +46,19 @@ First run
 Later runs: opening GTAV.app starts the game directly. Hold Option while opening it to get the
 setup window again (for example after moving your discs, or to repair the install).
 Logs: <game folder>/data/logs (gtav.log for the game, install.log for setup).
+
+Recompile and update
+--------------------
+Choose Recompile (or run the launcher with --rebuild) to check the existing game data and build
+the game library without recopying the discs. Use Install & build when the data is missing or
+damaged. Recompile leaves your game data, saves and settings in place.
+
+Choose Check for updates (or --check-updates) to look for a newer stable release of this fork.
+When offered, open the GitHub release and download the named archive. No update is applied by
+the launcher. https://github.com/NuxsGit/hooky-GTA-Recomp/releases
+Quit the game and replace the whole GTAV.app. Do not modify its signed contents. Keep your
+existing game folder (data/, game library and settings); back up that folder before updating.
+Recompile if the new launcher asks; compatible runtime-only updates can play immediately.
 
 Controls
 --------
@@ -117,7 +130,7 @@ and android/gtav-android-pack.zip). Do not share any of it: it contains Rockstar
 work. (GTAV.apk as downloaded holds no game and is fine to share.) To uninstall, delete GTAV.app and the game folder.
 
 This project is free software under the GNU GPL, version 3 or later (LICENSES/gtav-recomp-GPL-3.0.txt).
-Source code: https://github.com/andrewnakas/gtav-recomp. The complete source of every program in
+Source code: https://github.com/NuxsGit/hooky-GTA-Recomp. The complete source of every program in
 this package that is under the GPL or LGPL (this project, the ReXGlue SDK runtime with the FFmpeg
 it links statically, XenosRecomp, plume) is in gtav-recomp-src-<version>.tar.xz on the same
 release page.

@@ -4,7 +4,7 @@ console ships: no XEX/XEXP, disc or title-update files, no generated C++, no com
 shaders, no dumps.
 
 usage: make_release_linux.py OUT_DIR --llvm DIR --expected FILE --licenses DIR [--compat] [--tar]
-  OUT_DIR     a new or empty folder (refuses a folder that holds anything but a previous release)
+  OUT_DIR     a new or empty staging folder (never a live installation)
   --llvm      the unpacked official LLVM 19.1.5 Linux release (LLVM-19.1.5-Linux-X64): bin/clang-19,
               bin/lld, lib/clang/19/include
   --expected  tools/release/expected.txt (make_expected.py data + gen, concatenated)
@@ -26,8 +26,10 @@ import tarfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from make_release import (FFMPEG_NOTICE, FORBIDDEN_EXT, MARKER, SDK_THIRDPARTY, XR_THIRDPARTY,  # noqa: E402
+from make_release import (FFMPEG_NOTICE, FORBIDDEN_EXT, SDK_THIRDPARTY, XR_THIRDPARTY,  # noqa: E402
                           find_license, header_notice)
+
+from release_metadata import launcher_version, prepare_output, write_metadata
 
 REPO = Path(__file__).resolve().parents[2]
 COMPAT = "--compat" in sys.argv
@@ -153,13 +155,8 @@ def main():
     ap.add_argument("--tar", action="store_true")
     a = ap.parse_args()
 
-    out = Path(a.out).resolve()
-    # Only ever clear a folder this script made.
-    if out.exists() and any(out.iterdir()):
-        if not (out / MARKER).is_file() or len(out.parts) < 3:
-            sys.exit(f"refusing to clear {out}: not an earlier release folder")
-        shutil.rmtree(out)
-    out.mkdir(parents=True, exist_ok=True)
+    version = launcher_version(LAUNCHER)
+    out = prepare_output(a.out)
 
     for src, rel, exe in FILES:
         copy(src, out / rel, exe)
@@ -222,7 +219,7 @@ def main():
     bad = [p for p in out.rglob("*") if p.is_file() and p.suffix.lower() in FORBIDDEN_EXT]
     if bad:
         sys.exit("forbidden files in release:\n" + "\n".join(str(p) for p in bad))
-    (out / MARKER).write_text("gtav-recomp release folder (made by tools/release/make_release_linux.py)\n")
+    write_metadata(out, out, "linux-x64", version)
 
     total = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
     count = sum(1 for p in out.rglob("*") if p.is_file())

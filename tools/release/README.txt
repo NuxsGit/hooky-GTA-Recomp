@@ -28,15 +28,29 @@ What you need
 First run
 ---------
 1. Unzip this folder somewhere with enough space and run gtav_launcher.exe.
-2. Pick Disc 1, Disc 2 and the title update, then press Install.
+2. Pick Disc 1, Disc 2 and the title update, then press Install & build.
 3. The launcher checks every file against known-good hashes, copies them into data\, generates
    C++ from your game executable, compiles it into gtav_game.dll and removes the build files.
    This takes 15-30 minutes depending on your CPU.
-4. The game starts. The first minutes of play translate shaders in the background; some objects
+4. Press Play. The first minutes of play translate shaders in the background; some objects
    can be missing until their shader is ready. They are kept in data\spirv for later runs.
 
 Later runs start the game directly. Hold Shift while starting the launcher (or pass --setup) to
-open setup again, for example after moving your discs.
+open setup and updates. The build log is data\logs\install.log.
+
+Recompile and update
+--------------------
+Choose Recompile (or run the launcher with --rebuild) to check the existing game data and build
+the game library without recopying the discs. Use Install & build when the data is missing or
+damaged. Recompile leaves your game data, saves and settings in place.
+
+Choose Check for updates (or --check-updates) to look for a newer stable release of this fork.
+When offered, open the GitHub release and download the named archive. No update is applied by
+the launcher. https://github.com/NuxsGit/hooky-GTA-Recomp/releases
+Quit the game and launcher. Unpack the new archive in a new folder and keep the old folder
+as a backup. Copy data/, gtav_game.dll, gtav.toml, gamecontrollerdb.txt and args.txt if present.
+Use the new folder's launcher and tools; don't copy the old runtime or tools over them.
+Recompile if the new launcher asks; compatible runtime-only updates can play immediately.
 
 Controls
 --------
@@ -93,7 +107,7 @@ Everything made from your files stays in this folder (data\ and gtav_game.dll). 
 it contains Rockstar Games' copyrighted work.
 
 This project is free software under the GNU GPL, version 3 or later (LICENSES\gtav-recomp-GPL-3.0.txt).
-Source code: https://github.com/andrewnakas/gtav-recomp. The complete source of every program in
+Source code: https://github.com/NuxsGit/hooky-GTA-Recomp. The complete source of every program in
 this package that is under the GPL or LGPL (this project, the ReXGlue SDK runtime with the FFmpeg
 it links statically, XenosRecomp, plume) is in gtav-recomp-src-<version>.tar.xz on the same
 release page.

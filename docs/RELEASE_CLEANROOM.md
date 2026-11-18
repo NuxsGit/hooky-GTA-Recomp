@@ -19,12 +19,56 @@ were built from), XenosRecomp (MIT, `xenosrecomp-gtav.patch`), dxc (NCSA), LLVM 
 codegen partition seed (addresses), the hook list, and `tools/release/expected.txt` (file sizes and
 SHA-256 hashes only).
 
+## Publishing updates for this fork
+
+The launcher checks `NuxsGit/hooky-GTA-Recomp`'s latest **stable** GitHub release, on request only.
+The browser handles the download; the player replaces the runtime as described in
+[Recompiling and updating](../README.md#recompiling-and-updating). There is no updater service,
+installer process, automatic download or in-place patch. The original project's releases are not
+part of this feed.
+
+1. Set `loader/VERSION` to the intended `MAJOR.MINOR.PATCH` **before building all launchers**.
+   This drives the displayed version and the macOS bundle version. Each packager checks the
+   launcher's build sidecar before staging. Start with a new or empty staging directory, not an
+   extracted package or an installed game folder.
+2. Use a consistent release commit and the tag `vMAJOR.MINOR.PATCH`. Build and scan each desktop
+   archive using the platform procedure below, plus the complete corresponding source archive.
+   Upload the archives with these exact names before publishing the draft as the latest stable
+   release. The launcher offers an update only when the asset for that platform is uploaded.
+
+   | Platform | Asset name |
+   | --- | --- |
+   | Windows x64 | `gtav-recomp-windows-x64.zip` |
+   | Linux x64 | `gtav-recomp-linux-x64.tar.gz` |
+   | macOS arm64 | `gtav-recomp-macos-arm64.zip` |
+
+3. Stage and validate upgrades with an existing local install before publishing. **Do not archive
+   the test install.** The packagers write `tools/game_dll/build-id.txt` using the platform, the
+   staged game-build inputs and `loader/GAME_ABI`. `data/installed.txt` records that ID after
+   a successful local link. Increment `loader/GAME_ABI` when changing compiler/linker flags or
+   the runtime/codegen ABI in a way that requires a new game library and isn't covered by the
+   staged inputs. Don't bump it for launcher/renderer-only updates that preserve compatibility.
+   On Mac the package stamp is written before signing `GTAV.app`.
+
+Asset-free launcher tests (no SDK, game, network or real compiler tool bundle needed for the
+fixtures):
+
+```sh
+cmake -S loader -B build/launcher-test -DGTAV_LAUNCHER_TESTS=ON
+cmake --build build/launcher-test
+ctest --test-dir build/launcher-test --output-on-failure
+```
+
+The release-policy test runs on any desktop build. The full fake-data install/rebuild fixture
+runs on Linux x64 (AVX2, Python 3 and at least 3 GB free in the temporary directory).
+
 ## How the Windows release works
 
 Player side (`loader/`, `gtav_launcher.exe`):
 1. Preflight: AVX2, VC++ runtime DLLs present, bundled tools present.
 2. Inputs: Disc 1 and Disc 2 as ISO or folder (XDVDFS reader in `loader/src/sources.cpp`), TU27 as
-   the STFS file `tu00000009_00000000` or a folder (prefers `disc002/`). Disc swap is detected.
+   the STFS file `tu00000009_00000000` or a folder (prefers `disc002/`). Disc swaps, missing files,
+   and a wrong executable or TU27 patch are caught before copying.
 3. Copy with hashing: Disc 2 files (minus `$SystemUpdate`) to `data/game`, TU `default.xexp` to
    `data/game/default.xexp`, `update.rpf` to `data/update`, the four Disc 1 install packages
    (STFS) unpacked to `data/user/0000000000000000/545408A7/00000002/545408A70000000N/`.

@@ -3,7 +3,7 @@ player's machine, and licenses. Nothing from the game or the console ships: no X
 title-update files, no generated C++, no compiled game code, no shaders, no dumps.
 
 usage: make_release.py OUT_DIR --llvm DIR --expected FILE [--zip]
-  OUT_DIR     a new or empty folder (refuses a folder that holds anything but a previous release)
+  OUT_DIR     a new or empty staging folder (never a live installation)
   --llvm      folder with bin/clang.exe, bin/lld-link.exe, lib/clang/19/include, LICENSE.TXT
   --expected  tools/game_dll/expected.txt (make_expected.py data + gen, concatenated)
   --licenses  folder with extra license texts (dxc-LICENSE.TXT)
@@ -16,12 +16,13 @@ import sys
 import zipfile
 from pathlib import Path
 
+from release_metadata import launcher_version, prepare_output, write_metadata
+
 REPO = Path(__file__).resolve().parents[2]  # E:\gtav-native
 BUILD = REPO / "build-dll"
 SDK = Path(r"E:\gtav-rex\rexglue-sdk")
 SDK_BIN = SDK / "out" / "install" / "win-amd64" / "bin"
 XR = REPO / "thirdparty" / "XenosRecomp"
-MARKER = "gtav_release.txt"
 
 # (source, destination below OUT_DIR)
 FILES = [
@@ -134,13 +135,8 @@ def main():
                     "%%VCToolsRedistDir%%\\x64\\Microsoft.VC14x.CRT from a VS developer prompt)")
     a = ap.parse_args()
 
-    out = Path(a.out).resolve()
-    # Only ever clear a folder this script made.
-    if out.exists() and any(out.iterdir()):
-        if not (out / MARKER).is_file() or len(out.parts) < 3:
-            sys.exit(f"refusing to clear {out}: not an earlier release folder")
-        shutil.rmtree(out)
-    out.mkdir(parents=True, exist_ok=True)
+    version = launcher_version(REPO / "build-launcher")
+    out = prepare_output(a.out)
 
     for src, rel in FILES:
         copy(src, out / rel)
@@ -206,7 +202,7 @@ def main():
     bad = [p for p in out.rglob("*") if p.is_file() and p.suffix.lower() in FORBIDDEN_EXT]
     if bad:
         sys.exit("forbidden files in release:\n" + "\n".join(str(p) for p in bad))
-    (out / MARKER).write_text("gtav-recomp release folder (made by tools/release/make_release.py)\n")
+    write_metadata(out, out, "windows-x64", version)
 
     total = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
     count = sum(1 for p in out.rglob("*") if p.is_file())

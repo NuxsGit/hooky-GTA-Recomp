@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -61,5 +62,9 @@ bool LooksLikeStfs(Blob& blob);
 
 std::wstring Widen(const std::string& s);
 std::string Narrow(const std::wstring& s);
+// std::filesystem's wide conversions on POSIX depend on the C locale (often ASCII).
+std::filesystem::path PathFromWide(const std::wstring& s);
+std::filesystem::path PathFromUtf8(const std::string& s);
+std::wstring PathWide(const std::filesystem::path& p);
 
 }  // namespace loader

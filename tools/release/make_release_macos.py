@@ -36,8 +36,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from make_release import (FFMPEG_NOTICE, FORBIDDEN_EXT, MARKER, SDK_THIRDPARTY, XR_THIRDPARTY,  # noqa: E402
+from make_release import (FFMPEG_NOTICE, FORBIDDEN_EXT, SDK_THIRDPARTY, XR_THIRDPARTY,  # noqa: E402
                           find_license, header_notice)
+
+from release_metadata import launcher_version, prepare_output, write_metadata
 
 REPO = Path(__file__).resolve().parents[2]
 BUILD = REPO / "build" / "release-mac" / "gtav-fast"
@@ -158,17 +160,8 @@ def main():
     a = ap.parse_args()
     sdk_install = Path(a.sdk)
 
-    out = Path(a.out).resolve()
-    if out.exists() and any(p.name != ".DS_Store" for p in out.iterdir()):
-        if not (out / MARKER).is_file() or len(out.parts) < 3:
-            sys.exit(f"refusing to clear {out}: not an earlier release folder")
-        # Empty it in place: Finder writes .DS_Store into an open folder while it is removed.
-        for p in out.iterdir():
-            if p.is_dir() and not p.is_symlink():
-                shutil.rmtree(p)
-            else:
-                p.unlink(missing_ok=True)
-    out.mkdir(parents=True, exist_ok=True)
+    version = launcher_version(LAUNCHER.parent)
+    out = prepare_output(a.out, allow_ds_store=True)
 
     app = out / "GTAV.app"
     shutil.copytree(LAUNCHER, app, symlinks=True)
@@ -264,6 +257,11 @@ def main():
     if bad:
         sys.exit("forbidden files in release:\n" + "\n".join(str(p) for p in bad))
 
+    with open(app / "Contents" / "Info.plist", "rb") as f:
+        if plistlib.load(f).get("CFBundleShortVersionString") != version:
+            sys.exit("GTAV.app has the wrong version; rebuild the launcher before packaging")
+    write_metadata(out, pkg, "macos-arm64", version)
+
     # Ad-hoc signature, inside out (no --deep: it skips files outside the code locations).
     machos = [p for p in app.rglob("*") if p.is_file() and not p.is_symlink() and is_macho(p)
               and p != app / "Contents" / "MacOS" / "GTAV"]
@@ -271,10 +269,6 @@ def main():
         subprocess.run(["codesign", "--force", "--sign", "-", str(p)], check=True, capture_output=True)
     subprocess.run(["codesign", "--force", "--sign", "-", str(app)], check=True)
     subprocess.run(["codesign", "--verify", "--strict", str(app)], check=True)
-
-    with open(app / "Contents" / "Info.plist", "rb") as f:
-        version = plistlib.load(f).get("CFBundleShortVersionString", "?")
-    (out / MARKER).write_text(f"gtav-recomp release folder {version} (made by tools/release/make_release_macos.py)\n")
 
     total = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
     count = sum(1 for p in out.rglob("*") if p.is_file())
