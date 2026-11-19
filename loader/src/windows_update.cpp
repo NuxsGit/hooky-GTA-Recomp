@@ -3,6 +3,7 @@
 #include "windows_update.h"
 
 #include "win_process.h"
+#include "windows_package_layout.h"
 #include "sources.h"
 
 #include <algorithm>
@@ -18,16 +19,10 @@ bool HashUpdateArchive(const fs::path& path, std::string* digest, uint64_t* size
 
 namespace {
 
-constexpr wchar_t kWork[] = L".gtav-update", kLauncher[] = L"gtav_launcher.exe", kHelper[] = L"apply.exe";
-constexpr wchar_t kJournal[] = L"pending.txt";
-// This list is the standard Windows desktop ZIP. In particular, no local game DLL, configuration,
-// shader caches or optional phone trees. New package layouts need explicit support in the updater.
-constexpr std::array<const wchar_t*, 17> kOwned = {
-    L"tools", L"LICENSES", L"gtav_fast.exe", L"rexruntimerd.dll", L"rexgpu-xenosrd.dll",
-    L"TracyClientrd.dll", L"SDL3rd.dll", L"rexgluerd.exe", L"msvcp140.dll", L"msvcp140_1.dll",
-    L"msvcp140_2.dll", L"msvcp140_atomic_wait.dll", L"vcruntime140.dll", L"vcruntime140_1.dll",
-    L"README.txt", L"gtav_release.txt", kLauncher,  // launcher is atomically replaced last
-};
+constexpr wchar_t kWork[] = L".gtav-update", kHelper[] = L"apply.exe", kJournal[] = L"pending.txt";
+using windows_package::IsFolder;
+using windows_package::kLauncher;
+using windows_package::kOwned;
 
 fs::path StagedPackage(const fs::path& work) { return work / L"stage" / PathFromUtf8(std::string(kWindowsPackageStem)); }
 
@@ -45,8 +40,6 @@ PathKind Kind(const fs::path& path) {
   if (flags & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)) return PathKind::Unsafe;
   return flags & FILE_ATTRIBUTE_DIRECTORY ? PathKind::Folder : PathKind::File;
 }
-
-bool IsFolder(std::wstring_view name) { return name == L"tools" || name == L"LICENSES"; }
 
 bool IsHex(std::string_view value) {
   return value.size() == 64 && value.find_first_not_of("0123456789abcdef") == value.npos;
@@ -463,7 +456,7 @@ int FinishWindowsUpdate(const fs::path& helper, uintptr_t parent, uintptr_t lock
   }
   const auto launcher = root / kLauncher;
   if (updated || restored) {
-    if (win::Spawn(launcher, Quote(launcher) + (updated ? L" --updated" : L" --setup --no-auto-update"), root, 0)) return 0;
+    if (win::Spawn(launcher, Quote(launcher) + (updated ? L" --updated --portable" : L" --setup --no-auto-update --portable"), root, 0)) return 0;
     MessageBoxW(nullptr, L"Open gtav_launcher.exe to continue.", L"GTA V Recomp | Update", MB_ICONINFORMATION);
   }
   return 1;

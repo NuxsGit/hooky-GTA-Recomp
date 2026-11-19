@@ -68,27 +68,36 @@ def create_fixture(root, inputs):
                  "gtav_recomp.1.cpp": '// second unit\n', "gtav_funcs.1.h": '// second unit header\n'}
     for name, text in generated.items():
         record("gen", name, text.encode())
-    put(root / "fixture-gen.json", json.dumps(generated).encode())
     game_tools = root / "tools/game_dll"
+    put(game_tools / "fixture-gen.json", json.dumps(generated).encode())
+    for file in ("libTracyClient.so", "LICENSES/synthetic.txt", "README.txt"):
+        put(root / file, b"synthetic package\n")
     put(game_tools / "expected.txt", "".join(reference).encode())
     for f in ("gtav_manifest.toml", "codegen.partition.json", "fs/gtav_pch.h", "fs/layout_check.h",
               "fs/game_dll.cpp", "fs/fs_crt.cpp", "interface/gtav_hooks.h", "interface/gtav_game.exports"):
         put(game_tools / f, b"fixture build input\n")
     put(root / "librexruntime.so", b"")
     put(root / "librexgpu-xenos.so", b"")
-    executable(root / "gtav_fast", """import sys
+    executable(root / "gtav_fast", """import os, sys, time
+from pathlib import Path
+root = Path(__file__).resolve().parent
+assert Path.cwd() == root
+assert f'--user_data_root={root}/data/user' in sys.argv
 assert '--fixture-game-arg' in sys.argv
 modes = [arg for arg in sys.argv if arg.startswith('--gtav_mode=')]
 assert len(modes) == 1, sys.argv
 assert '--headless=true' in sys.argv
 print('fake game started:', modes[0])
+if os.getenv('FIXTURE_BLOCK_GAME'):
+    (root / 'data/logs/fixture-playing').touch()
+    time.sleep(60)
 """)
     executable(root / "rexglue", """import json, os
 from pathlib import Path
 root = Path(__file__).resolve().parent
 with (root / 'calls').open('a') as log:
     log.write('codegen\\n')
-for name, text in json.loads((root / 'fixture-gen.json').read_text()).items():
+for name, text in json.loads((root / 'tools/game_dll/fixture-gen.json').read_text()).items():
     Path('generated/default', name).write_text(text)
 if os.getenv('FIXTURE_BAD_GEN'):
     Path('generated/default/gtav_init.cpp').write_text('bad generated code')
@@ -126,6 +135,7 @@ def exercise(launcher, library_dir):
         inputs = folder / "Données originales"
         sources = create_fixture(root, inputs)
         root_exe = root / "gtav_launcher"
+        incoming = root
         shutil.copy2(launcher, root_exe)
         fake_bin = folder / "fake-bin"
         executable(fake_bin / "curl", """import os, sys
@@ -139,7 +149,7 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
         env = dict(os.environ, HOME=str(folder / "home"), XDG_DATA_HOME=str(folder / "xdg"),
                    LD_LIBRARY_PATH=str(library_dir), PATH=str(fake_bin) + os.pathsep + os.environ["PATH"])
         for key in ("FIXTURE_BLOCK_LINK", "FIXTURE_BLOCK_COMPILE", "FIXTURE_BAD_GEN", "FIXTURE_FAIL_LINK",
-                    "FIXTURE_OVERSIZE", "FIXTURE_HTTP", "FIXTURE_BODY", "CPATH", "CPLUS_INCLUDE_PATH",
+                    "FIXTURE_OVERSIZE", "FIXTURE_HTTP", "FIXTURE_BODY", "FIXTURE_BLOCK_GAME", "CPATH", "CPLUS_INCLUDE_PATH",
                     "C_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "SDKROOT"):
             env.pop(key, None)
 
@@ -182,9 +192,16 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
         run("--check-updates", expect=1, contains="need curl", PATH=str(folder / "no-curl"))
         assert sorted(root.iterdir()) == empty and not (root / "data").exists()
 
-        # Wrong roles and a wrong TU of the right size fail before copying anything.
+        # The extracted launcher seeds Games then delegates. Even a setup that fails validation
+        # created no second data tree next to the archive. Version checks above wrote nothing.
         disc1, disc2, tu = sources
+        home = Path(env["HOME"]) / "Games/GTAV Recomp"
+        assert not home.exists()
         run("--setup", disc2, disc1, tu, expect=1, contains="Swap the two discs")
+        assert (home / "gtav_launcher").is_file() and not (incoming / "data").exists()
+        root = home
+        calls = home / "calls"
+        build_id = home / "tools/game_dll/build-id.txt"
         patch = tu / "disc002/default.xexp"
         correct_patch = patch.read_bytes()
         patch.write_bytes(b"X" * len(correct_patch))
@@ -213,7 +230,29 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
         assert not (root / "data/install_state.txt").exists()
         current_marker = marker.read_bytes()
         assert current_marker.splitlines()[1] == first_id.strip()
-        run("--", "--fixture-game-arg", contains="fake game started")
+        # Reopen from the archive or the installed directory. Neither route moves local saves.
+        run("--play", "--", "--fixture-game-arg", contains="fake game started: --gtav_mode=menu")
+        run("--play", "--", "--fixture-game-arg", "--gtav_mode=campaign", contains="fake game started: --gtav_mode=campaign")
+        entry = Path(env["XDG_DATA_HOME"]) / "applications/gtav-recomp.desktop"
+        assert f'Exec="{home / "gtav_launcher"}"' in entry.read_text()
+        assert not (incoming / "data").exists() and not (incoming / "gtav_game.so").exists()
+        root_exe = home / "gtav_launcher"
+        shutil.rmtree(incoming)  # deleting the unpacked ZIP/tarball folder does not break Play
+        run("--play", "--", "--fixture-game-arg", contains="fake game started")
+
+        running = home / "data/logs/fixture-playing"
+        game = subprocess.Popen([root_exe, "--play", "--", "--fixture-game-arg"],
+                                env=dict(env, FIXTURE_BLOCK_GAME="1"), stdout=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 8
+            while not running.exists() and game.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert running.exists() and game.poll() is None
+            run("--rebuild", expect=1, contains="Close the game or other setup")
+            run("--play", "--cli", "--", "--fixture-game-arg", expect=1, contains="being used by another game")
+        finally:
+            game.terminate()
+            game.wait(timeout=4)
 
         # A runtime-only release retains the same ID; a changed build input and an unproven old
         # install marker both send the player back to setup instead of starting the wrong library.
@@ -241,7 +280,7 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
         invokes("game_dll.cpp", "link")
 
         def change_generated(name, text):
-            fixture = root / "fixture-gen.json"
+            fixture = root / "tools/game_dll/fixture-gen.json"
             values = json.loads(fixture.read_text())
             values[name] = text
             fixture.write_text(json.dumps(values))

@@ -226,16 +226,24 @@ void VerifyHostSelector(const fs::path& root) {
     CHECK(win::Spawn(host, command, root, 0, &process.handle));
     const auto pid = GetProcessId(process.handle.Get());
     CHECK(pid);
-    auto modes = WaitWindow({L"GTA V Recomp | Play", L"#32770", pid, {}}, process.handle.Get());
+    auto modes = WaitWindow({L"GTA V Recomp | Play", nullptr, pid, {}}, process.handle.Get());
     if (!modes) error = Widen(Text(root / "data/logs/host-smoke.log"));
     CHECK(modes);
-    const auto solo = HasLabel(modes, L"Sandbox solo");
-    CHECK(solo && HasLabel(modes, L"Private multiplayer") && HasLabel(modes, L"Campaign") && HasLabel(modes, L"Quit"));
-    DWORD_PTR def = 0;
-    CHECK(SendMessageTimeoutW(modes, DM_GETDEFID, 0, 0, SMTO_ABORTIFHUNG, 1000, &def));
-    CHECK(HIWORD(def) == DC_HASDEFID && LOWORD(def) == GetDlgCtrlID(solo));
-    CHECK(PostMessageW(modes, WM_COMMAND, enter ? IDOK : IDCANCEL, 0));
+    wchar_t class_name[64]{};
+    CHECK(GetClassNameW(modes, class_name, 64) && std::wstring_view(class_name) != L"#32770");  // not the fallback
+    if (!enter) CHECK(PostMessageW(modes, WM_CLOSE, 0, 0));
     if (enter) {
+      auto key = [&](WPARAM vk) {
+        CHECK(PostMessageW(modes, WM_KEYDOWN, vk, 0));  // virtual-key input, no hardware required
+        CHECK(PostMessageW(modes, WM_KEYUP, vk, 0));
+      };
+      CHECK(PostMessageW(modes, WM_SETFOCUS, 0, 0));
+      key(VK_LEFT);
+      key(VK_DOWN);
+      key(VK_RETURN);  // campaign co-op is locked, Enter must not leave the hub
+      key(VK_RIGHT);
+      key(VK_UP);
+      key(VK_RETURN);  // Sandbox solo routes through Workshop's original validation
       auto missing = WaitWindow({L"GTA V Recomp | Workshop", L"#32770", pid, {}}, process.handle.Get());
       CHECK(missing && HasLabel(missing, L"Installed TU27 game data is missing. Install the game with the launcher first."));
       CHECK(PostMessageW(missing, WM_COMMAND, IDCANCEL, 0));
@@ -243,7 +251,7 @@ void VerifyHostSelector(const fs::path& root) {
     WaitExit(process.handle.Get(), 10'000);
     CHECK(!fs::exists(root / "data/user/sandbox"));
   }
-  std::cout << "Packaged host reached the mode selector and exited cleanly without a retail installation\n";
+  std::cout << "Packaged host rendered the mode hub, blocked campaign co-op and routed Sandbox without running the title\n";
 }
 }  // namespace
 

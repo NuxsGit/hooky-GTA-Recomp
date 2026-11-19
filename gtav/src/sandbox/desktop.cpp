@@ -1,6 +1,7 @@
 #include "desktop.h"
 
 #include "courses.h"
+#include "../frontend/play_hub.h"
 #include "../native/menu.h"
 
 #include <SDL3/SDL.h>
@@ -192,25 +193,19 @@ Session& Party() { static Session session; return session; }
 
 bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_root) {
   const auto requested = REXCVAR_GET(gtav_mode);
+  const bool workshop_enabled = rex::cvar::GetFlagByName("gtav_native") == "on";
   Mode chosen = Mode::Campaign;
   if (requested == "menu") {
-    const SDL_MessageBoxButtonData choices[] = {
-        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Sandbox solo"},
-        {0, 2, "Private multiplayer"}, {0, 3, "Campaign"}, {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Quit"}};
-    const SDL_MessageBoxData menu{SDL_MESSAGEBOX_INFORMATION | SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT, SDL_GetKeyboardFocus(), "GTA V Recomp | Play",
-        "Choose how to play.\n\nSandbox modes use a separate local profile. Multiplayer lets you host or join a friend's PC.\n"
-        "Campaign opens your existing story saves.", int(std::size(choices)), choices, nullptr};
-    int id = -1;
-    if (!SDL_ShowMessageBox(&menu, &id)) return Error("Could not open the game mode selector. Use --gtav_mode explicitly.");
-    if (id == 1) chosen = Mode::Solo;
-    else if (id == 2) chosen = Mode::Multiplayer;
-    else if (id != 3) return false;
+    const auto selected = frontend::ChooseMode(workshop_enabled);
+    if (!selected) return false;
+    chosen = *selected;
   } else if (requested == "solo") chosen = Mode::Solo;
   else if (requested == "multiplayer") chosen = Mode::Multiplayer;
+  else if (requested == "campaign-coop") return Error("Campaign co-op is unavailable: story missions are not synchronized.");
   else if (requested != "campaign") return Error("Unknown mode. Use menu, solo, multiplayer or campaign.");
 
   if (chosen == Mode::Campaign) return true;
-  if (rex::cvar::GetFlagByName("gtav_native") != "on") return Error("Workshop modes need the native renderer (--gtav_native=on).");
+  if (!workshop_enabled) return Error("Workshop modes need the native renderer (--gtav_native=on).");
   WorkspaceError error{};
   const auto workspace = PrepareWorkspace(paths.user_data_root, error);
   if (!workspace) {

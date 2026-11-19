@@ -27,21 +27,25 @@ What you need
 
 First run
 ---------
-1. Unzip this folder somewhere with enough space and run gtav_launcher.exe.
+1. Unzip the package and run gtav_launcher.exe. New installs open the installed launcher in
+   %USERPROFILE%\Games\GTAV Recomp. An existing portable install keeps using its own folder.
 2. Open Installation, pick Disc 1, Disc 2 and the title update, then press Installer et compiler.
 3. The launcher checks every file against known-good hashes, copies them into data\, generates
    C++ from your game executable, compiles it into gtav_game.dll, and keeps a local compilation cache in data\build.
    This takes 15-30 minutes depending on your CPU.
-4. Press Jouer. The first minutes of play translate shaders in the background; some objects
+4. Press Choisir le mode. The first minutes of play translate shaders in the background; some objects
    can be missing until their shader is ready. They are kept in data\spirv for later runs.
 
 Later runs open Accueil. Use the sidebar for Installation, Mises à jour or Journaux.
-Use --play in a shortcut if you prefer to start the game directly.
+Open GTA V Recomp from the Start menu, or use --play in your own shortcut, to open the mode hub.
+You can remove the extracted download after installation. Choose --home with an absolute path to
+install elsewhere, or --portable to keep the release separate.
 
 Desktop Workshop (experimental)
 --------------------------------
-Jouer opens a mode selector before the game starts: Sandbox solo (default), Private multiplayer,
-or Campaign. Sandbox uses a separate profile: data\user\sandbox\profile. On the first sandbox
+The illustrated play hub opens before the game starts: Campaign solo, Sandbox solo (default) and
+Private session (Sandbox multiplayer). Campaign co-op is visible but unavailable (no story sync).
+Arrow keys or D-pad select, Enter/A plays and Esc/B closes. Sandbox uses a separate profile: data\user\sandbox\profile. On the first sandbox
 run, complete the original game’s first-run screens and prologue before using free-roam tools.
 Press F6 in free roam: build and save layouts with props, set up checkpoint races or hunts,
 and spawn a test vehicle. In Private multiplayer, Host here opens a TCP listener (default 30127);
@@ -67,9 +71,13 @@ reused and only affected C++ files are compiled. The first rebuild from an older
 have no cache to reuse. Logs: data\logs\install.log and data\logs\update.log.
 https://github.com/NuxsGit/hooky-GTA-Recomp/releases
 
-For offline, older or differently laid-out packages: unpack to a new folder and keep a backup.
-Copy data/, gtav_game.dll and your settings (gtav.toml, gtav_settings.ini, gamecontrollerdb.txt,
-args.txt) if present, but not the old runtime or tools. Recompile if asked.
+For offline or draft packages: quit the game and launcher, then copy only the trusted package's
+contents into the existing folder. Do not delete data/ or the locally built game, caches and settings.
+If moving a portable install to Games, close everything and move the whole old folder to the empty
+Games/GTAV Recomp path before updating. Or run the newly unpacked launcher with --migrate-from
+"D:\path to old game" before creating the destination. That makes a one-time copy of your data
+and settings, leaves the original intact, and refuses to overwrite a non-empty folder.
+More: https://github.com/NuxsGit/hooky-GTA-Recomp/blob/main/docs/DESKTOP_INSTALL.md
 
 Controls
 --------

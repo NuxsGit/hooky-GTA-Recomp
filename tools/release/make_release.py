@@ -52,6 +52,7 @@ FILES = [
 
 LICENSES = [
     (REPO / "LICENSE", "gtav-recomp-GPL-3.0.txt"),
+    (REPO / "gtav/src/frontend/assets/OFL-Barlow.txt", "third_party/Barlow-OFL.txt"),
     (REPO / "gtav/src/native/shaders/fsr1/LICENSE.txt", "third_party/AMD-FidelityFX-FSR1.txt"),
     (XR / "LICENSE.md", "XenosRecomp.txt"),
     (PLUME / "LICENSE", "Plume.txt"),

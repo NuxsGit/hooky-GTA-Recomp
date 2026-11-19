@@ -1,0 +1,32 @@
+name: Linux and macOS launcher checks
+
+on:
+  push:
+    branches: ['main', 'arena/**']
+    paths:
+      - 'loader/**'
+      - 'gtav/src/frontend/modes.h'
+      - '.github/workflows/desktop-launcher.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  launcher:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Build the launcher and local fixtures
+        run: |
+          cmake -S loader -B build/desktop-launcher -DCMAKE_BUILD_TYPE=Release -DGTAV_LAUNCHER_TESTS=ON
+          cmake --build build/desktop-launcher --parallel 4
+      - name: Run storage, update policy and Workshop checks without retail data
+        run: ctest --test-dir build/desktop-launcher --output-on-failure

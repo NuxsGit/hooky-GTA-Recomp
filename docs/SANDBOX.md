@@ -1,9 +1,9 @@
 # Desktop Workshop preview
 
-The desktop launcher’s **Jouer** (Windows) / **Play** button starts the game and opens the mode selector **before** the
-TU27 guest boots. **Sandbox solo** is the default (Enter); **Private multiplayer** and **Campaign**
-are the other choices. Escape closes the selector without booting the game. This is a feature of the
-new runtime + launcher, not of previously released ZIPs. Phone builds still use their existing startup.
+The desktop launcher opens the illustrated mode hub **before** the TU27 guest boots. Select
+with the mouse, arrows or D-pad, confirm with Enter/A, or close with Esc/B. **Sandbox solo** is
+the default. **Campaign co-op** is shown as unavailable; the title's missions and story progress
+are not synchronized. Phone builds still use their existing startup.
 
 - **Campaign** uses the existing story profile. It does not start the Workshop or open a listener.
 - **Sandbox solo** runs the Workshop without a network connection.

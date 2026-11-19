@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <shellapi.h>
 
@@ -24,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "desktop_home.h"
 #include "install.h"
 #include "sources.h"
 #include "update.h"
@@ -272,10 +274,13 @@ void SetBusy(bool busy) {
     SetWindowTextW(g_install_text, ready ? L"Campagne, bac à sable ou multijoueur privé. Tes données restent sur ce PC."
                        : needs_build ? L"Tes fichiers sont prêts. Recompile cette version sans réimporter tes disques."
                        : L"Importe tes deux disques Xbox 360 et la mise à jour TU27. Le jeu sera compilé sur ce PC.");
-    SetWindowTextW(g_play, playing ? L"Jeu en cours" : ready ? L"Jouer" : needs_build ? L"Compiler le jeu" : L"Configurer le jeu");
+    SetWindowTextW(g_play, playing ? L"Jeu en cours" : ready ? L"Choisir le mode" : needs_build ? L"Compiler le jeu" : L"Configurer le jeu");
   }
   RefreshUpdateControls();
 }
+
+void AddStartMenuShortcut(const fs::path& launcher);
+fs::path ExePath();
 
 void StartInstall(bool rebuild) {
   if (g_busy || g_game) return;
@@ -564,7 +569,7 @@ void CreateControls() {
 
   Label(Overview, L"01  /  INSTALLATION LOCALE", 256, 414, 317, 20, &g_small, kMuted);
   g_badge = Label(Overview, L"", 254, 445, 317, 27, &g_heading, kMint);
-  Label(Overview, L"Disques et sauvegardes sur ton PC", 256, 482, 317, 20, &g_small, kMuted);
+  Label(Overview, g_root.c_str(), 256, 482, 317, 20, &g_small, kMuted, SS_PATHELLIPSIS);
   Label(Overview, L"02  /  DISTRIBUTION", 631, 414, 330, 20, &g_small, kMuted);
   g_auto_card = Label(Overview, L"", 629, 441, 341, 23, &g_font, kText, SS_ENDELLIPSIS);
   Button(Overview, L"Gérer les mises à jour", 629, 475, 201, 31, kIdGoToUpdates);
@@ -938,6 +943,7 @@ LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         ShellExecuteW(hw, nullptr, L"explorer.exe", arg.c_str(), nullptr, SW_SHOWNORMAL);
       } else if (wp) {
         SetWindowTextW(g_stage, L"Le jeu est prêt. Tu peux jouer.");
+        AddStartMenuShortcut(ExePath());
         ShowPage(Page::Overview);
         SetFocus(g_play);
       } else {
@@ -1052,6 +1058,32 @@ fs::path ExePath() {
   return length && length < buf.size() ? fs::path(buf.substr(0, length)) : fs::path();
 }
 
+void AddStartMenuShortcut(const fs::path& launcher) {
+  // Only the default install owns this shortcut. A portable test build must not hijack it.
+  if (!SameFolder(launcher.parent_path(), DefaultGameHome())) return;
+  wchar_t programs[MAX_PATH] = {};
+  if (FAILED(SHGetFolderPathW(nullptr, CSIDL_PROGRAMS, nullptr, SHGFP_TYPE_CURRENT, programs))) return;
+  const auto link_path = fs::path(programs) / L"GTA V Recomp.lnk";
+  std::error_code ec;
+  if (fs::exists(link_path, ec) || ec) return;
+  const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  if (FAILED(com)) return;
+  IShellLinkW* link = nullptr;
+  if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link)))) {
+    link->SetPath(launcher.c_str());
+    link->SetWorkingDirectory(launcher.parent_path().c_str());
+    link->SetArguments(L"--play");
+    link->SetDescription(L"Choisir un mode de jeu GTA V Recomp");
+    IPersistFile* file = nullptr;
+    if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
+      file->Save(link_path.c_str(), TRUE);
+      file->Release();
+    }
+    link->Release();
+  }
+  CoUninitialize();
+}
+
 uintptr_t HandleArg(const wchar_t* text) {
   if (!*text || std::wstring_view(text).find_first_not_of(L"0123456789") != std::wstring_view::npos) return 0;
   return static_cast<uintptr_t>(std::wcstoull(text, nullptr, 10));
@@ -1081,14 +1113,58 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
   const bool iphone = has(L"--iphone"), android = has(L"--android"), update = has(L"--check-updates");
   const bool play = has(L"--play"), updated = has(L"--updated");
   g_no_background = has(L"--no-auto-update");
-  std::vector<std::wstring> game_args;
+  std::vector<std::wstring> game_args, forwarded{L""};
+  DesktopPaths folders;
+  std::wstring path_error;
   for (int i = 1; i < count; ++i) {
-    if (std::wstring_view(args[i]) == L"--") {
-      for (++i; i < count; ++i) game_args.emplace_back(args[i]);
+    const std::wstring_view option(args[i]);
+    if (option == L"--") {
+      forwarded.emplace_back(option);
+      for (++i; i < count; ++i) {
+        game_args.emplace_back(args[i]);
+        forwarded.emplace_back(args[i]);
+      }
       break;
+    }
+    if (option == L"--portable") {
+      folders.portable = true;
+    } else if (option == L"--home" || option == L"--migrate-from") {
+      if (++i == count || !fs::path(args[i]).is_absolute()) {
+        path_error = L"Indique un chemin absolu après --home ou --migrate-from.";
+        break;
+      }
+      auto& path = option == L"--home" ? folders.home : folders.migrate_from;
+      path = fs::path(args[i]).lexically_normal();
+      if (path.filename().empty() && path.has_relative_path()) path = path.parent_path();
+    } else {
+      forwarded.emplace_back(option);
     }
   }
   LocalFree(args);
+  auto location_error = [&](const std::wstring& message) {
+    if (unattended || rebuild || iphone || android) OutputDebugStringW(message.c_str());
+    else MessageBoxW(nullptr, message.c_str(), L"GTA V Recomp | Dossier du jeu", MB_ICONERROR);
+    return 1;
+  };
+  if (!path_error.empty()) return location_error(path_error);
+  // An update query never creates or copies an install. A pending transaction always stays in
+  // its original folder, even if someone starts the launcher from a custom home.
+  if (!update && !HasPendingWindowsUpdate(g_root)) {
+    fs::path home;
+    if (!OpenDesktopHome(g_root, folders, &home, &path_error)) return location_error(path_error);
+    if (!SameFolder(g_root, home)) {
+      const auto launcher = home / kDesktopLauncher;
+      forwarded.front() = launcher.wstring();
+      forwarded.insert(forwarded.begin() + 1, L"--portable");  // already selected the game folder
+      win::Handle child;
+      if (!win::Spawn(launcher, win::CommandLine(forwarded), home, 0, &child))
+        return location_error(L"Impossible d’ouvrir le launcher installé dans " + PathWide(home));
+      if (!(unattended || rebuild || iphone || android)) return 0;
+      DWORD status = 1;
+      if (WaitForSingleObject(child.Get(), INFINITE) == WAIT_OBJECT_0) GetExitCodeProcess(child.Get(), &status);
+      return int(status);
+    }
+  }
   if (HasPendingWindowsUpdate(g_root)) {
     std::wstring error;
     if (StartWindowsUpdateRecovery(g_root, &error)) return 0;
@@ -1105,6 +1181,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
   }
   if (rebuild || unattended) return Unattended(rebuild);
   if (iphone || android) return PhoneUnattended(android);
+  if (GetInstallStatus(g_root, g_root) == InstallStatus::Ready) AddStartMenuShortcut(exe);
   if (play && !setup) {
     std::wstring error;
     if (LaunchGame(g_root, &error, game_args)) return 0;

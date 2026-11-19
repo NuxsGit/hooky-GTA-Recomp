@@ -86,23 +86,24 @@ from them.
 
 1. Download `gtav-recomp-windows-x64.zip`, unzip it somewhere with enough space, and run
    `gtav_launcher.exe`.
-2. Pick **Disc 1**, **Disc 2** and the **title update** (File... or Folder...), then press
-   **Installer et compiler**.
-3. When setup finishes, press **Jouer**.
+2. The launcher opens the installed copy in `%USERPROFILE%\Games\GTAV Recomp`. Pick **Disc 1**,
+   **Disc 2** and the **title update**, then press **Installer et compiler**.
+3. When setup finishes, press **Choisir le mode**.
 
-Later: `gtav_launcher.exe` opens **Accueil**, with game status and **Jouer**. The sidebar keeps
+Later: `gtav_launcher.exe` opens **Accueil**, with game status and **Choisir le mode**. The sidebar keeps
 **Installation**, **Mises à jour** and **Journaux** separate. `gtav_launcher.exe --play` is still a
-shortcut to launch the game directly.
+shortcut to open the mode hub directly. Setup adds a Start menu entry.
 
 ## Linux
 
 1. Download `gtav-recomp-linux-x64.tar.gz` and unpack it: `tar xf gtav-recomp-linux-x64.tar.gz`.
-2. Open `gtav_launcher` (double-click it, or run `./gtav_launcher`). The setup window opens: choose
-   Disc 1, Disc 2 and the title update, then press **Install & build**. Without a desktop, run
+2. Open `gtav_launcher` (double-click it, or run `./gtav_launcher`). It installs in
+   `~/Games/GTAV Recomp`. In setup choose the two discs and title update, then press
+   **Install & build**. Without a desktop, run
    `./gtav_launcher --setup "Disc 1.iso" "Disc 2.iso" tu00000009_00000000` in the terminal.
 3. Press **Play**. Setup also adds "GTA V recomp" to your applications menu.
 
-Later: the menu entry or `./gtav_launcher` starts the game. `./gtav_launcher --setup` (or the menu
+Later: the menu entry or `./gtav_launcher` opens the mode hub. `./gtav_launcher --setup` (or the menu
 entry's "Setup and updates" action) opens the setup window. Logs: `data/logs`.
 
 ## macOS
@@ -111,10 +112,14 @@ entry's "Setup and updates" action) opens the setup window. Logs: `data/logs`.
 2. The app is not notarized, so open it once, then go to System Settings > Privacy & Security >
    **Open Anyway** (or run `xattr -dr com.apple.quarantine /Applications/GTAV.app`).
 3. Choose Disc 1, Disc 2, the title update and a game folder (default
-   `~/Library/Application Support/GTAV Recomp`), then press **Install & build**, then **Play**.
+   `~/Games/GTAV Recomp` for new installs), then press **Install & build**, then **Play**.
 
-Later: opening `GTAV.app` starts the game if the local build is compatible. Hold **Option** while
+Later: opening `GTAV.app` opens the mode hub if the local build is compatible. Hold **Option** while
 opening it (or pass `--setup`) to manage the install and updates.
+
+Player files stay in that game folder across updates. Existing portable installs and previously
+chosen macOS folders still work. See [desktop installation and migration](docs/DESKTOP_INSTALL.md)
+for custom folders, moving an older install and recovering local profiles without overwriting them.
 
 ## Recompiling and updating
 
@@ -135,15 +140,13 @@ mappings or settings. If the build ID changed it starts an incremental rebuild. 
 next launch. Returning to Stable never automatically installs an older base version; use a separate
 folder if Stable is behind Nightly. See [release channels](docs/RELEASE_CLEANROOM.md#publishing-updates-for-this-fork).
 
-For a legacy Windows launcher (or a draft, offline or differently laid-out ZIP), use the manual
-method: extract to a **new folder** and copy `data/`, `gtav_game.dll` and your local settings
-(`gtav.toml`, `gtav_settings.ini`, `gamecontrollerdb.txt`, `args.txt`) if present. Do not copy the old
-runtime or `tools/`. Keep the old folder as a backup.
+For a draft, offline or differently laid-out Windows ZIP, quit the game and launcher and replace
+only package files in the existing folder. Do not delete `data/` or the locally built library.
 
-**Linux:** **Check for updates** (also `--check-updates`) uses `curl`. Extract the new package in a
-new folder. Copy `data/`, your local `gtav_game.so` and the settings listed above. Start the launcher
-in the new folder. **macOS:** Quit and replace the **whole `GTAV.app`**, keeping the same game folder.
-Don't copy files into the signed bundle. Locally built phone exports can stay in the old folder.
+**Linux:** **Check for updates** (also `--check-updates`) uses `curl`. Quit the game and launcher,
+then extract the trusted update's package files into the existing game folder.
+**macOS:** Quit and replace the **whole `GTAV.app`**, keeping the same game folder.
+See [in-place update instructions](docs/DESKTOP_INSTALL.md#updating-without-losing-progress).
 
 **Recompiler** / **Recompile** (or `--rebuild`) uses the existing game files, without the original discs. It verifies
 XEX/XEXP and generated sources, keeps `data/build/` as a local cache, and compiles only changed units
@@ -155,11 +158,13 @@ or your local game library. Use **Install & build** with your originals if data 
 
 ## Desktop Workshop (experimental)
 
-**Jouer** (Windows) / **Play** opens a game-startup choice: **Sandbox solo** (default), **Private multiplayer**, or
-**Campaign**. The two sandbox modes have a separate local profile. Press **F6** in free roam to
-build and save layouts with props and checkpoints, run a race or checkpoint hunt, and test a local
-vehicle. In a private room (IPv4, TCP port, invite code), friends see nearby ghost actors. This is
-not GTA Online or full world synchronization.
+The desktop **Play** hub has illustrated cards for **Campaign solo**, **Sandbox solo** and
+**Private session** (Sandbox multiplayer). **Campaign co-op** is visible but unavailable:
+story missions and progress are not synchronized. Select a mode with mouse, keyboard or D-pad;
+Enter/A confirms and Esc/B closes. The two sandbox modes have a separate local profile. Press
+**F6** in free roam to build and save layouts, run minigames, or host/join a private session.
+In a private room (IPv4, TCP port, invite code), friends see nearby ghost actors. This is not
+GTA Online or full world synchronization.
 See [Workshop setup, limitations, and testing](docs/SANDBOX.md).
 
 ## Controls

@@ -45,7 +45,7 @@ if(WIN32)
         src/sources.cpp
         src/launcher.manifest)  # visual styles, DPI awareness, long paths
     target_compile_definitions(gtav_launcher PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(gtav_launcher PRIVATE comctl32 ole32 shell32 bcrypt winhttp dwmapi)
+    target_link_libraries(gtav_launcher PRIVATE comctl32 gdi32 ole32 shell32 uuid bcrypt winhttp dwmapi)
     if(MSVC)
         target_compile_options(gtav_launcher PRIVATE /utf-8)
     endif()
@@ -89,7 +89,7 @@ else()
     endif()
 endif()
 
-target_sources(gtav_launcher PRIVATE src/update.cpp src/update_http.cpp)
+target_sources(gtav_launcher PRIVATE src/update.cpp src/update_http.cpp src/desktop_home.cpp)
 gtav_update_definitions(gtav_launcher)
 # Release staging checks this sidecar to catch packaging a launcher built for another version.
 file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/launcher-build-version.in" CONTENT "${GTAV_BUILD_VERSION}\n" @ONLY)
@@ -128,6 +128,16 @@ if(GTAV_LAUNCHER_TESTS)
     add_executable(gtav_runtime_policy_tests tests/runtime_policy_tests.cpp)
     target_include_directories(gtav_runtime_policy_tests PRIVATE ../gtav/src)
     add_test(NAME runtime_policy COMMAND gtav_runtime_policy_tests)
+    add_executable(gtav_desktop_home_tests tests/desktop_home_tests.cpp src/desktop_home.cpp src/sources.cpp)
+    target_include_directories(gtav_desktop_home_tests PRIVATE src ../gtav/src)
+    if(WIN32)
+        target_compile_definitions(gtav_desktop_home_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_link_libraries(gtav_desktop_home_tests PRIVATE shell32)
+        if(MSVC)
+            target_compile_options(gtav_desktop_home_tests PRIVATE /utf-8)
+        endif()
+    endif()
+    add_test(NAME desktop_home COMMAND gtav_desktop_home_tests)
     find_package(Threads REQUIRED)
     set(_workshop ../gtav/src/sandbox)
     add_executable(gtav_sandbox_tests tests/sandbox_tests.cpp
@@ -153,12 +163,12 @@ if(GTAV_LAUNCHER_TESTS)
         # An older launcher for the exact-package test. Only the HTTP transport is replaced;
         # the dashboard timer, policy, installer, lock and restart helper are production code.
         add_executable(gtav_launcher_update_fixture WIN32 src/main.cpp src/windows_update.cpp
-            src/update.cpp tests/update_transport_stub.cpp src/install.cpp src/sources.cpp
+            src/update.cpp tests/update_transport_stub.cpp src/install.cpp src/sources.cpp src/desktop_home.cpp
             src/launcher.manifest ../gtav/src/native/adreno_shader_fix.cpp)
         target_include_directories(gtav_launcher_update_fixture PRIVATE src)
         target_compile_definitions(gtav_launcher_update_fixture PRIVATE
             UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN GTAV_LAUNCHER_VERSION="0.0.0")
-        target_link_libraries(gtav_launcher_update_fixture PRIVATE comctl32 ole32 shell32 bcrypt dwmapi)
+        target_link_libraries(gtav_launcher_update_fixture PRIVATE comctl32 gdi32 ole32 shell32 uuid bcrypt dwmapi)
         if(MSVC)
             target_compile_options(gtav_launcher_update_fixture PRIVATE /utf-8)
         endif()

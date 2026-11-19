@@ -3,7 +3,7 @@
 ## Testing the launcher and updates
 
 - Open `gtav_launcher.exe` at normal and high DPI. Tab through **Accueil**, **Installation**,
-  **Mises à jour** and **Journaux**. Check the game/log folder buttons, **Jouer**, file/folder pickers,
+  **Mises à jour** and **Journaux**. Check the game/log folder buttons, **Choisir le mode**, file/folder pickers,
   setup/cancel/resume, recompilation, and `--play`, `--setup`, `--unattended`, `--rebuild`.
 - With published releases, test Stable and Nightly independently. A Stable launcher never offers
   a prerelease unless Nightly is selected and confirmed. Channel and **Automatique** survive a
@@ -16,7 +16,7 @@
   accepts the exact ZIP for the selected feed and rejects a modified one. Use `--no-auto-update`
   to suppress the automatic check during testing. Windows CI drives the real automatic update flow
   against a local test feed with the exact ZIP. It checks waiting for the game/setup lock, applying
-  the ZIP, restarting, preserving data and switching preferences. It also smokes the mode selector.
+  the ZIP, restarting, preserving data and switching preferences. It also boots the managed Games layout and smokes the illustrated mode hub without a retail DLL.
   The shipped launcher uses WinHTTP; the test-only executable is never packaged.
 - Saves, Workshop layouts, `gtav.toml`, `gtav_settings.ini`, `args.txt`, custom pad mappings, local game
   DLL, shader caches and `data/build/` survive. A compatible build ID needs no recompilation. For a
@@ -80,6 +80,6 @@ probe or these examples don't replace a real play-test of vector results, physic
 
 Asset-free checks: configure `loader` with `-DGTAV_LAUNCHER_TESTS=ON`, build, then run `ctest`.
 Fixtures cover update discovery/digest policy, Windows staging and rollback, pacing and request
-state, and Linux cold/incremental/corrupted/cancelled builds. The native Windows candidate also
+state, managed home selection, conflicting/failed migration, and Linux cold/incremental/corrupted/cancelled builds. The native Windows candidate also
 feeds its exact ZIP through the updater's SHA-256 and system `tar.exe` staging path. These tests do
 not run retail TU27 or validate controllers over physical USB/Bluetooth.

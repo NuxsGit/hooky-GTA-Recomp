@@ -8,8 +8,8 @@
 //   GTAV --iphone [--home D]      iPhone build from the installed game folder, no window
 //   GTAV --android [--home D]     Android pack (D/android/gtav-android-pack.zip), no window
 //                                 (data/logs/iphone_unattended.txt; out: D/iphone, see install.h)
-//   GTAV --home D                 use D as the game folder (default: ~/Library/Application
-//                                 Support/GTAV Recomp, or the one picked in the window)
+//   GTAV --home D                 use D as the game folder (new installs: ~/Games/GTAV Recomp)
+//   GTAV --migrate-from D         import an existing home into a new Games folder
 //   GTAV ... -- ARGS              pass ARGS to the game
 //
 // Setup is the same as on Windows and Linux (install.cpp): the player's own Disc 1, Disc 2 and
@@ -28,6 +28,7 @@
 #include <thread>
 #include <vector>
 
+#include "desktop_home.h"
 #include "install.h"
 #include "sources.h"
 #include "update.h"
@@ -52,11 +53,14 @@ NSString* NS(const fs::path& p) { return [NSString stringWithUTF8String:p.c_str(
 
 fs::path DefaultHome() {
   NSString* saved = [NSUserDefaults.standardUserDefaults stringForKey:@"GameFolder"];
-  if (saved.length) return fs::path(saved.UTF8String);
+  if (saved.length && fs::path(saved.UTF8String).is_absolute()) return fs::path(saved.UTF8String);
+  const auto games = fs::path(NSHomeDirectory().UTF8String) / "Games/GTAV Recomp";
+  if (HasLocalState(games)) return games;
   NSURL* support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory
                                                         inDomains:NSUserDomainMask]
                        .firstObject;
-  return fs::path(support.path.UTF8String) / "GTAV Recomp";
+  const auto legacy = fs::path(support.path.UTF8String) / "GTAV Recomp";
+  return legacy.is_absolute() && HasLocalState(legacy) ? legacy : games;
 }
 
 fs::path SettingsPath() { return g_home / "data" / "launcher.ini"; }
@@ -84,7 +88,7 @@ void ShowError(NSString* text) {
 }
 
 bool StartGame(std::wstring* error) {
-  return SyncRuntime(g_root, g_home, error) && LaunchGame(g_home, error, g_game_args);
+  return LaunchMacGame(g_root, g_home, error, g_game_args);
 }
 
 // "--unattended": no window; installs from the three paths in <home>/data/launcher.ini (one per
@@ -131,7 +135,7 @@ int Unattended(bool rebuild) {
     return 1;
   }
   InstallInputs in{Widen(v[0]), Widen(v[1]), Widen(v[2])};
-  bool ok = RunInstall(g_root, g_home, in, ui, &error) && SyncRuntime(g_root, g_home, &error);
+  bool ok = RunInstall(g_root, g_home, in, ui, &error);
   ui.Log(ok ? L"done" : L"error: " + error);
   return ok ? 0 : 1;
 }
@@ -546,6 +550,8 @@ int main(int argc, char** argv) {
   @autoreleasepool {
     g_root = fs::path(NSBundle.mainBundle.resourcePath.UTF8String) / "gtav";
     g_home = DefaultHome();
+    fs::path import_from;
+    bool explicit_home = false;
     bool unattended = false, setup = false, iphone = false, android = false;
     bool rebuild = false, update = false;
     for (int i = 1; i < argc; ++i) {
@@ -569,8 +575,17 @@ int main(int argc, char** argv) {
       } else if (a == "--version") {
         puts(kLauncherVersion);
         return 0;
-      } else if (a == "--home" && i + 1 < argc) {
-        g_home = fs::absolute(argv[++i]);
+      } else if (a == "--home" || a == "--migrate-from") {
+        std::error_code ec;
+        if (++i == argc || !argv[i][0]) {
+          fprintf(stderr, "%s requires a path.\n", a.c_str());
+          return 2;
+        }
+        auto path = fs::absolute(argv[i], ec).lexically_normal();
+        if (ec) return 2;
+        if (path.filename().empty() && path.has_relative_path()) path = path.parent_path();
+        if (a == "--home") { g_home = std::move(path); explicit_home = true; }
+        else import_from = std::move(path);
       } else if (a == "--root" && i + 1 < argc) {
         g_root = fs::absolute(argv[++i]);  // a package folder outside an app bundle (testing)
       }
@@ -582,6 +597,16 @@ int main(int argc, char** argv) {
       if (!result.url.empty()) puts(result.url.c_str());
       else if (result.status == UpdateStatus::Error) printf("Releases: %s\n", kReleasePage.data());
       return result.status == UpdateStatus::Error ? 1 : 0;
+    }
+    if (!import_from.empty()) {
+      if (!explicit_home) g_home = fs::path(NSHomeDirectory().UTF8String) / "Games/GTAV Recomp";
+      std::wstring error;
+      // Keep the old home selected if the import fails or is interrupted.
+      if (!ImportMacHome(import_from, g_home, &error)) {
+        fprintf(stderr, "%s\n", Narrow(error).c_str());
+        return 1;
+      }
+      [NSUserDefaults.standardUserDefaults setObject:NS(g_home) forKey:@"GameFolder"];
     }
     if (rebuild || unattended) return Unattended(rebuild);
     if (iphone || android) return PhoneUnattended(android);

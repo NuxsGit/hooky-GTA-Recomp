@@ -29,8 +29,33 @@ class Handle {
 
 inline HANDLE OpenSetupLock(const std::filesystem::path& file, bool inherit = false) {
   SECURITY_ATTRIBUTES attrs = {sizeof(attrs), nullptr, TRUE};
-  return CreateFileW(file.c_str(), GENERIC_WRITE, 0, inherit ? &attrs : nullptr, OPEN_ALWAYS,
-                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  const HANDLE lock = CreateFileW(file.c_str(), GENERIC_WRITE | FILE_READ_ATTRIBUTES, 0, inherit ? &attrs : nullptr, OPEN_ALWAYS,
+                                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (lock == INVALID_HANDLE_VALUE) return lock;
+  BY_HANDLE_FILE_INFORMATION info{};
+  if (GetFileInformationByHandle(lock, &info) && !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return lock;
+  CloseHandle(lock);
+  SetLastError(ERROR_ACCESS_DENIED);
+  return INVALID_HANDLE_VALUE;
+}
+
+// Quote argv for CommandLineToArgvW, including paths ending in a backslash and empty values.
+inline std::wstring CommandLine(std::span<const std::wstring> args) {
+  std::wstring command;
+  for (const auto& arg : args) {
+    if (!command.empty()) command += L' ';
+    command += L'"';
+    size_t slashes = 0;
+    for (const wchar_t c : arg) {
+      if (c == L'\\') { ++slashes; continue; }
+      command.append(c == L'"' ? slashes * 2 + 1 : slashes, L'\\');
+      slashes = 0;
+      command += c;
+    }
+    command.append(slashes * 2, L'\\');
+    command += L'"';
+  }
+  return command;
 }
 
 // The child inherits only the nominated handles, not CRT file handles in another worker.

@@ -147,12 +147,18 @@ def smoke_package(archive, version):
             ("tools/llvm/bin/lld-link.exe", ("/?",)),
         ):
             run(host / exe, *args, capture=True, cwd=host, timeout=30)
-        # The unpacked launcher should reach setup and reject the missing config headlessly.
-        result = subprocess.run([host / "gtav_launcher.exe", "--unattended"], cwd=host, timeout=30)
-        log = host / "data/logs/unattended.txt"
-        if result.returncode != 1 or not log.is_file() or "launcher.ini needs three lines" not in log.read_text():
-            raise SystemExit(f"Unpacked launcher did not report missing launcher.ini (exit {result.returncode})")
-        selector_fixture(host, Path(tmp))
+        # Bootstrap the exact ZIP, then run the real launcher in the permanent folder. Headless
+        # mode checks that the re-exec returns the installed launcher's status, without real discs.
+        managed = Path(tmp) / "Joueur é" / "Games" / "GTAV Recomp"
+        for exe, flags in ((host / "gtav_launcher.exe", ("--home", managed)),
+                           (managed / "gtav_launcher.exe", ("--portable",))):
+            result = subprocess.run([exe, *flags, "--unattended"], cwd=host, timeout=70)
+            log = managed / "data/logs/unattended.txt"
+            if result.returncode != 1 or not log.is_file() or "launcher.ini needs three lines" not in log.read_text():
+                raise SystemExit(f"Managed launcher did not report missing launcher.ini (exit {result.returncode})")
+        if (host / "data").exists() or (managed / "gtav_game.dll").exists():
+            raise SystemExit("The managed setup touched the source package or imported game code")
+        selector_fixture(managed, Path(tmp))
 
 
 def main():

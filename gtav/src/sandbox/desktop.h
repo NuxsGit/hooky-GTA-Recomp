@@ -1,6 +1,7 @@
 #pragma once
 
 #ifdef GTAV_DESKTOP_WORKSHOP
+#include "../frontend/modes.h"
 #include "paths.h"
 #include "session.h"
 #include "scene.h"
@@ -8,7 +9,7 @@
 namespace rex { struct PathConfig; }
 
 namespace gtav::sandbox {
-enum class Mode { Campaign, Solo, Multiplayer };
+using frontend::Mode;
 Mode CurrentMode();
 bool Active();
 // Runs on the main UI thread before the retail module opens any saves.

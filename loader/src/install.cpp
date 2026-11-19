@@ -17,6 +17,7 @@
 // signed); everything made here goes to the game folder (home): gtav_game.dylib, data/, plus a copy
 // of the runtime (gtav_fast, dylibs, shader tools) so gtav_fast finds gtav_game.dylib next to it.
 #include "install.h"
+#include "setup_lock.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -99,6 +100,10 @@ constexpr wchar_t kObjExt[] = L".o";
 constexpr char kInstallVersion[] = "gtav-recomp install 1";
 constexpr char kTitleId[] = "545408A7";
 constexpr char kInstallPackageDir[] = "content/0000000000000000/545408A7/00000002/";
+
+#ifdef __APPLE__
+bool SyncRuntime(const fs::path& root, const fs::path& home, std::wstring* error);
+#endif
 
 //-----------------------------------------------------------------------------
 // Small helpers
@@ -483,35 +488,6 @@ std::string InstalledBuildId(const fs::path& home) {
   if (!std::getline(f, version) || version != kInstallVersion || !std::getline(f, id)) return {};
   return id;
 }
-
-// One desktop job at a time per game folder (two launcher instances share scratch and logs).
-// The OS releases the lock even on crash; leave the empty file in place to keep its identity.
-class BuildLock {
- public:
-  bool Acquire(const fs::path& file) {
-#ifdef _WIN32
-    handle_ = win::OpenSetupLock(file);
-    return handle_ != INVALID_HANDLE_VALUE;
-#else
-    fd_ = open(file.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
-    return fd_ != -1 && flock(fd_, LOCK_EX | LOCK_NB) == 0;
-#endif
-  }
-  ~BuildLock() {
-#ifdef _WIN32
-    if (handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
-#else
-    if (fd_ != -1) close(fd_);
-#endif
-  }
-
- private:
-#ifdef _WIN32
-  HANDLE handle_ = INVALID_HANDLE_VALUE;
-#else
-  int fd_ = -1;
-#endif
-};
 
 //-----------------------------------------------------------------------------
 // Child processes
@@ -2185,7 +2161,7 @@ class Installer {
   std::wstring* error_ = nullptr;
   std::ofstream log_;
   ExpectedSet expected_;
-  BuildLock lock_;
+  SetupLock lock_;
   std::string build_id_;
   std::unique_ptr<Source> disc1_, disc2_, tu_;
   std::vector<std::pair<std::string, std::unique_ptr<Source>>> parts_;
@@ -2283,6 +2259,8 @@ bool CheckGameFolder(const fs::path& home, std::wstring* error) {
 
 // The runtime files gtav_fast needs next to it in the game folder: gtav_fast must find the
 // gtav_game.dylib made there (@rpath = its own folder), and the app bundle itself stays read-only.
+namespace {
+
 bool SyncRuntime(const fs::path& root, const fs::path& home, std::wstring* error) {
   std::vector<fs::path> files;
   std::error_code ec;
@@ -2316,6 +2294,8 @@ bool SyncRuntime(const fs::path& root, const fs::path& home, std::wstring* error
   }
   return true;
 }
+
+}  // namespace
 #elif !defined(_WIN32) && !defined(__ANDROID__)
 bool Preflight(const fs::path& root, std::wstring* error) {
   // gtav_fast and the game code are built for x86-64-v3 (AVX2, BMI2, FMA, MOVBE).
@@ -2417,14 +2397,16 @@ bool RunAndroidBuild(const fs::path& root, const fs::path& home, InstallUi& ui, 
 #ifdef _WIN32
 bool LaunchWindowsGame(const fs::path& root, std::wstring* error, const std::vector<std::wstring>& extra,
                        win::Handle* process) {
+#elif defined(__APPLE__)
+bool LaunchMacGame(const fs::path& package, const fs::path& root, std::wstring* error,
+                   const std::vector<std::wstring>& extra) {
 #else
 bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std::wstring>& extra) {
 #endif
   fs::path data = root / L"data";
   std::error_code ec;
-  fs::create_directories(data / L"spirv", ec);
-  fs::create_directories(data / L"logs", ec);
-  fs::create_directories(data / L"user", ec);
+  fs::create_directories(data, ec);
+  if (ec) { *error = L"Could not create the game data folder: " + Widen(ec.message()); return false; }
 #ifdef _WIN32
   // Keep setup/update out of this installation until the game exits, even if this launcher closes.
   win::Handle lock(win::OpenSetupLock(data / "setup.lock", true));
@@ -2433,7 +2415,25 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
     *error = L"The installation is not ready or is being used by another game, update or setup.";
     return false;
   }
+#else
+  SetupLock lock;
+#ifdef __APPLE__
+  const auto& package_root = package;
+#else
+  const auto& package_root = root;
 #endif
+  if (ec || !lock.Acquire(data / "setup.lock") || GetInstallStatus(package_root, root) != InstallStatus::Ready) {
+    *error = L"The installation is not ready or is being used by another game, update or setup.";
+    return false;
+  }
+#ifdef __APPLE__
+  if (!SyncRuntime(package, root, error)) return false;
+#endif
+#endif
+  for (const auto* dir : {"spirv", "logs", "user"}) {
+    fs::create_directories(data / dir, ec);
+    if (ec) { *error = L"Could not prepare the game data folder: " + Widen(ec.message()); return false; }
+  }
   // Read the exe and DLLs once so they are in the file cache: slow first page-ins during boot
   // were seen to hang it (see play.ps1).
   std::vector<uint8_t> buf(8u << 20);
@@ -2470,6 +2470,12 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
         return opt == L"--gtav_mode" || opt.starts_with(L"--gtav_mode=");
       })) args.push_back(L"--gtav_mode=menu");
   args.insert(args.end(), extra.begin(), extra.end());
+#ifndef _WIN32
+  if (!lock.KeepInChild()) {
+    *error = L"Could not pass the game folder lock to the runtime.";
+    return false;
+  }
+#endif
 #ifdef __APPLE__
   // The launcher app quits; the game runs on in its own session, its output in data/logs.
   std::vector<std::string> narrow = NarrowArgs(args);
@@ -2507,7 +2513,7 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
   return false;
 #else
   HANDLE inherit[] = {lock.Get()};
-  if (!win::Spawn(root / kGameExe, CommandLine(args), root, 0, process, inherit)) {
+  if (!win::Spawn(root / kGameExe, win::CommandLine(args), root, 0, process, inherit)) {
     *error = L"Could not start gtav_fast.exe";
     return false;
   }

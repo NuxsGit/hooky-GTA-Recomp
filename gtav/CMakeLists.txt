@@ -108,6 +108,19 @@ endif()
 
 if(NOT ANDROID AND NOT GTAV_IOS)
     find_package(Threads REQUIRED)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(_hub_dir ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend)
+    set(_hub_assets ${CMAKE_CURRENT_BINARY_DIR}/play_hub_assets.inc)
+    file(GLOB _hub_inputs CONFIGURE_DEPENDS ${_hub_dir}/assets/*.png ${_hub_dir}/assets/*.ttf)
+    add_custom_command(OUTPUT ${_hub_assets}
+        COMMAND ${Python3_EXECUTABLE} ${_hub_dir}/embed_assets.py ${_hub_assets}
+        DEPENDS ${_hub_dir}/embed_assets.py ${_hub_inputs}
+        VERBATIM)
+    target_sources(gtav PRIVATE ${_hub_dir}/play_hub.cpp ${_hub_assets})
+    target_include_directories(gtav PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    if(MSVC)
+        set_source_files_properties(${_hub_dir}/play_hub.cpp PROPERTIES COMPILE_OPTIONS /utf-8)
+    endif()
     target_link_libraries(gtav PRIVATE Threads::Threads)
     target_compile_definitions(gtav PRIVATE GTAV_DESKTOP_WORKSHOP=1)
     target_sources(gtav PRIVATE src/sandbox/desktop.cpp src/sandbox/world.cpp

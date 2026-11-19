@@ -38,20 +38,22 @@ First run
      tar xf gtav-recomp-linux-x64.tar.gz
      cd gtav-recomp-linux-x64
 2. Open gtav_launcher: double-click it in your file manager (GNOME Files: right-click it, "Run as
-   a Program"), or run ./gtav_launcher in a terminal. The setup window opens: choose Disc 1,
+   a Program"), or run ./gtav_launcher in a terminal. New installs use ~/Games/GTAV Recomp.
+   In the setup window choose Disc 1,
    Disc 2 and the title update (each an image/file or an extracted folder), then press Install & build.
    Without a desktop (or with --cli) the same setup runs in the terminal instead, and
      ./gtav_launcher --setup "/path/Disc 1.iso" "/path/Disc 2.iso" /path/tu00000009_00000000
    runs it with the paths given.
 3. The launcher checks every file against known-good hashes, copies them into data/, generates C++
-   from your game executable, compiles it into gtav_game.so with the bundled clang and removes the
-   build files. This takes 15-30 minutes depending on your CPU. Cancel (or Ctrl+C in the terminal)
+   from your game executable, compiles it into gtav_game.so with the bundled clang and keeps incremental build objects. This takes 15-30 minutes depending on your CPU. Cancel (or Ctrl+C in the terminal)
    stops it; running setup again continues where it stopped.
 4. Press Play. The first minutes of play translate shaders in the background; some objects can be
    missing until their shader is ready. They are kept in data/spirv for later runs. Setup also adds
    "GTA V recomp" to your applications menu.
 
-Later runs: the menu entry or ./gtav_launcher starts the game directly. ./gtav_launcher --setup
+Later runs: the applications menu entry or the installed launcher opens the illustrated mode hub.
+Campaign solo uses your story saves. Sandbox solo and Private session use a separate profile;
+Campaign co-op is unavailable. The extracted download is not needed after installation. ./gtav_launcher --setup
 (or the menu entry's "Setup and updates") opens the setup window again, for example after moving
 your discs.
 
@@ -68,10 +70,13 @@ damaged. Recompile leaves your game data, saves and settings in place.
 Choose Check for updates (or --check-updates) to look for a newer stable release of this fork. On Linux this check needs curl.
 When offered, open the GitHub release and download the named archive. No update is applied by
 the launcher. https://github.com/NuxsGit/hooky-GTA-Recomp/releases
-Quit the game and launcher. Unpack the new archive in a new folder and keep the old folder
-as a backup. Copy data/, gtav_game.so, gtav.toml, gamecontrollerdb.txt and args.txt if present.
-Use the new folder's launcher and tools; don't copy the old runtime or tools over them.
+Quit the game and launcher. Extract only package files from the new trusted tarball into the
+installed folder (no copying of data, saves, the local library or settings):
+  tar -xf gtav-recomp-linux-x64.tar.gz --strip-components=1 -C "$HOME/Games/GTAV Recomp"
 Recompile if the new launcher asks; compatible runtime-only updates can play immediately.
+Use --portable for a separate extraction. To place an old install in Games, move its whole folder
+while closed, or run the new extracted launcher with --migrate-from /absolute/path/to/old-folder
+before installing to the destination (one-time copy; refuses to overwrite existing files).
 
 Controls
 --------
