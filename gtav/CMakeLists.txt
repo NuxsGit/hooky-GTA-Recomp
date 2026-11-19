@@ -51,6 +51,7 @@ set(GTAV_SOURCES
     src/crash_handler.cpp
     src/cutscene_audio_fix.cpp
     src/frame_limit.cpp
+    src/debug_tools.cpp
     src/wait_profile.cpp
     src/gpu_fence_wait.cpp
     src/native/stats.cpp

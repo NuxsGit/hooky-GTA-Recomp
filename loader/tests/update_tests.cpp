@@ -41,6 +41,22 @@ int main() {
   const auto available = Check(Release("v0.3.10"));
   Expect(available.status == UpdateStatus::Available, "numeric patch ordering");
   Expect(available.message.find(kWindows) != std::string::npos, "correct Windows artifact");
+  Expect(!available.asset, "a download link alone cannot authorize installing a ZIP");
+  auto tagged = Release("v0.4.0");
+  tagged.insert(tagged.find("\"state\""), "\"size\":12345, \"digest\":\"sha256:" + std::string(64, 'a') + "\", ");
+  const auto verified = Check(tagged);
+  Expect(verified.asset && verified.asset.version == "0.4.0" && verified.asset.sha256 == std::string(64, 'a') &&
+         verified.asset.size == 12345, "verified Windows artifact metadata");
+  Expect(!Check(tagged, "0.4.0").asset, "never authorize reinstall/downgrade");
+  auto malformed_digest = tagged;
+  malformed_digest[malformed_digest.find("sha256:") + 7] = 'z';
+  Expect(!Check(malformed_digest).asset, "malformed digest is not installable");
+  auto huge_zip = tagged;
+  huge_zip.replace(huge_zip.find("12345"), 5, "1000000000");
+  Expect(!Check(huge_zip).asset, "oversized ZIP is not installable");
+  auto duplicate_digest = tagged;
+  duplicate_digest.insert(duplicate_digest.find("\"digest\""), "\"digest\":null,");
+  Expect(Check(duplicate_digest).status == UpdateStatus::Error, "duplicate digest rejected");
   Expect(available.url == std::string(kReleasePage) + "/tag/v0.3.10", "only trusted release URL");
   Expect(Check(Release("v0.4.0", kLinux), "0.3.99", kLinux).status == UpdateStatus::Available, "Linux artifact");
   Expect(Check(Release("v1.0.0", kMac), "0.99.99", kMac).status == UpdateStatus::Available, "Mac artifact");

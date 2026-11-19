@@ -1,5 +1,7 @@
 #include "input.h"
 
+#include "../debug_tools.h"
+
 #include "menu.h"
 #include "paths.h"
 
@@ -74,10 +76,32 @@ void ClearMotion() {
 }
 
 void Focus(bool value) {
-  std::lock_guard lock(state_mutex);
-  focused = value;
-  state = {};
-  state.reset_motion = true;
+  {
+    std::lock_guard lock(state_mutex);
+    focused = value;
+    state = {};
+    state.reset_motion = true;
+  }
+  if (!value && debug::PanelControls().Open()) debug::PanelControls().Reset();
+}
+
+void DebugKey(VirtualKey key, bool down) {
+  if (!debug::PanelControls().Open()) return;
+  using K = debug::Key;
+  using V = VirtualKey;
+  switch (key) {
+    case V::kW: debug::PanelControls().SetKey(K::Forward, down); break;
+    case V::kA: debug::PanelControls().SetKey(K::Left, down); break;
+    case V::kS: debug::PanelControls().SetKey(K::Back, down); break;
+    case V::kD: debug::PanelControls().SetKey(K::Right, down); break;
+    case V::kQ: debug::PanelControls().SetKey(K::Down, down); break;
+    case V::kE: debug::PanelControls().SetKey(K::Up, down); break;
+    case V::kI: debug::PanelControls().SetKey(K::LookUp, down); break;
+    case V::kJ: debug::PanelControls().SetKey(K::LookLeft, down); break;
+    case V::kK: debug::PanelControls().SetKey(K::LookDown, down); break;
+    case V::kL: debug::PanelControls().SetKey(K::LookRight, down); break;
+    default: break;
+  }
 }
 
 void Key(VirtualKey key, bool down) {
@@ -249,11 +273,15 @@ float MenuPixelDensity(SDL_WindowID id) {
 }
 
 void Keyboard(SDL_Scancode scan, bool down, bool repeat) {
-  if (scan == SDL_SCANCODE_F1 || scan == SDL_SCANCODE_AC_BACK) {
-    if (down && !repeat) menu::Toggle();
+  if (scan == SDL_SCANCODE_F1 || scan == SDL_SCANCODE_AC_BACK || (kDesktop && scan == SDL_SCANCODE_F2)) {
+    if (down && !repeat) {
+      if (scan == SDL_SCANCODE_F2) menu::ToggleDebug();
+      else menu::Toggle();
+    }
     return;
   }
   if (menu::IsOpen()) {
+    if (kDesktop && !repeat) DebugKey(rex::ui::TranslateSDLScancode(scan), down);
     switch (scan) {
       case SDL_SCANCODE_ESCAPE: if (down && !repeat) menu::Close(); break;
       case SDL_SCANCODE_UP: menu::OnKey(menu::Key::kUp, down); break;
@@ -474,7 +502,10 @@ bool HandleMessage(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
     case WM_KEYUP: case WM_SYSKEYUP:
       if (const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
-          !down || !(lp & (1L << 30))) Key(PhysicalKey(wp, lp), down);
+          !down || !(lp & (1L << 30))) {
+        if (menu::IsOpen()) DebugKey(PhysicalKey(wp, lp), down);
+        else Key(PhysicalKey(wp, lp), down);
+      }
       break;
     case WM_LBUTTONDOWN: case WM_LBUTTONUP:
       Key(VirtualKey::kLButton, message == WM_LBUTTONDOWN);

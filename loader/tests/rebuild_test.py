@@ -63,7 +63,12 @@ def create_fixture(root, inputs):
         data = f"fixture update {name}".encode()
         record("tu", name, data)
         put(tu / "disc002" / name, data)
-    record("gen", "gtav_init.cpp", b"// fixture\n")
+    generated = {"gtav_init.cpp": '// fixture\n', "gtav_init.h": '// init\n', "gtav_funcs.h": '// init funcs\n',
+                 "gtav_recomp.0.cpp": '// first unit\n', "gtav_funcs.0.h": '// first unit header\n',
+                 "gtav_recomp.1.cpp": '// second unit\n', "gtav_funcs.1.h": '// second unit header\n'}
+    for name, text in generated.items():
+        record("gen", name, text.encode())
+    put(root / "fixture-gen.json", json.dumps(generated).encode())
     game_tools = root / "tools/game_dll"
     put(game_tools / "expected.txt", "".join(reference).encode())
     for f in ("gtav_manifest.toml", "codegen.partition.json", "fs/gtav_pch.h", "fs/layout_check.h",
@@ -72,14 +77,32 @@ def create_fixture(root, inputs):
     put(root / "librexruntime.so", b"")
     put(root / "librexgpu-xenos.so", b"")
     executable(root / "gtav_fast", "import sys\nassert '--fixture-game-arg' in sys.argv\nprint('fake game started')\n")
-    executable(root / "rexglue", "from pathlib import Path\nPath('generated/default/gtav_init.cpp').write_bytes(b'// fixture\\n')\n")
-    executable(root / "tools/llvm/bin/clang++", """import sys
+    executable(root / "rexglue", """import json, os
 from pathlib import Path
-assert Path(sys.argv[sys.argv.index('-c') + 1]).is_file()
-Path(sys.argv[sys.argv.index('-o') + 1]).write_bytes(b'fixture object')
+root = Path(__file__).resolve().parent
+with (root / 'calls').open('a') as log:
+    log.write('codegen\\n')
+for name, text in json.loads((root / 'fixture-gen.json').read_text()).items():
+    Path('generated/default', name).write_text(text)
+if os.getenv('FIXTURE_BAD_GEN'):
+    Path('generated/default/gtav_init.cpp').write_text('bad generated code')
+""")
+    executable(root / "tools/llvm/bin/clang++", """import os, sys, time
+from pathlib import Path
+root = Path(__file__).resolve().parents[3]
+source = Path(sys.argv[sys.argv.index('-c') + 1])
+assert source.is_file()
+with (root / 'calls').open('a') as log:
+    log.write(source.name + '\\n')
+Path(sys.argv[sys.argv.index('-o') + 1]).write_bytes(b'fixture object for ' + source.read_bytes())
+if os.getenv('FIXTURE_BLOCK_COMPILE'):
+    time.sleep(60)
 """)
     executable(root / "tools/llvm/bin/ld.lld", """import os, sys, time
 from pathlib import Path
+root = Path(__file__).resolve().parents[3]
+with (root / 'calls').open('a') as log:
+    log.write('link\\n')
 out = Path(sys.argv[sys.argv.index('-o') + 1])
 out.write_bytes(b'fixture library')
 if os.getenv('FIXTURE_BLOCK_LINK'):
@@ -109,7 +132,9 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
 """)
         env = dict(os.environ, HOME=str(folder / "home"), XDG_DATA_HOME=str(folder / "xdg"),
                    LD_LIBRARY_PATH=str(library_dir), PATH=str(fake_bin) + os.pathsep + os.environ["PATH"])
-        for key in ("FIXTURE_BLOCK_LINK", "FIXTURE_FAIL_LINK", "FIXTURE_OVERSIZE", "FIXTURE_HTTP", "FIXTURE_BODY"):
+        for key in ("FIXTURE_BLOCK_LINK", "FIXTURE_BLOCK_COMPILE", "FIXTURE_BAD_GEN", "FIXTURE_FAIL_LINK",
+                    "FIXTURE_OVERSIZE", "FIXTURE_HTTP", "FIXTURE_BODY", "CPATH", "CPLUS_INCLUDE_PATH",
+                    "C_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "SDKROOT"):
             env.pop(key, None)
 
         def run(*args, expect=0, contains=None, **vars):
@@ -121,6 +146,17 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
                 assert contains in output, output
             return result.stdout.strip()
 
+        calls = root / "calls"
+
+        def take_calls():
+            result = calls.read_text().splitlines() if calls.exists() else []
+            calls.unlink(missing_ok=True)
+            return sorted(result)
+
+        def invokes(*expected):
+            assert take_calls() == sorted(expected), f"expected tools: {expected}"
+
+        all_units = ("gtav_init.cpp", "gtav_recomp.0.cpp", "gtav_recomp.1.cpp", "game_dll.cpp", "fs_crt.cpp")
         version = run("--version")
         assert launcher_version(launcher.parent) == version
         write_metadata(root, root, "linux-x64", version)
@@ -154,6 +190,7 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
         run("--setup", *sources, expect=1, contains="fixture link failure", FIXTURE_FAIL_LINK="1")
         assert not marker.exists() and not library.exists()
         assert (root / "data/install_state.txt").is_file()
+        invokes("codegen", *all_units, "link")
         shutil.rmtree(inputs)  # A cancelled/failed compile can be retried without the sources.
 
         save = root / "data/user/local-save"
@@ -163,8 +200,11 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
         protected = [save, config, root / "data/game/default.xex", root / "data/game/default.xexp",
                      root / "data/update/update.rpf", root / "data/launcher.ini"]
         before = {p: p.read_bytes() for p in protected}
-        run("--rebuild", contains="Game build ready")
-        assert not (root / "data/build").exists() and not (root / "data/install_state.txt").exists()
+        run("--rebuild", contains="5 reused, 0 to compile")
+        invokes("link")
+        build = root / "data/build"
+        assert build.is_dir() and not (build / "assets").exists()
+        assert not (root / "data/install_state.txt").exists()
         current_marker = marker.read_bytes()
         assert current_marker.splitlines()[1] == first_id.strip()
         run("--", "--fixture-game-arg", contains="fake game started")
@@ -177,12 +217,81 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
         marker.write_bytes(b"gtav-recomp install 1\n")
         run("--cli", expect=1, contains="Existing game files found")
         marker.write_bytes(current_marker)
-        put(root / "tools/game_dll/fs/layout_check.h", b"changed input")
-        write_metadata(root, root, "linux-x64", next_version)
-        assert build_id.read_bytes() != first_id
+        invokes()  # a runtime-only update launches the existing library without running any tools
+
+        def change_build_input(path, content):
+            put(root / path, content)
+            previous = build_id.read_bytes()
+            write_metadata(root, root, "linux-x64", next_version)
+            assert build_id.read_bytes() != previous
+
+        # Link-only inputs are not part of the compile key.
+        change_build_input("tools/game_dll/interface/gtav_game.exports", b"fixture exports v2")
         run("--cli", expect=1, contains="Existing game files found")
-        run("--rebuild", contains="Game build ready")
+        run("--rebuild", contains="Game assets: 7 unchanged, 0 rehashed")
+        invokes("link")
+        change_build_input("tools/game_dll/fs/game_dll.cpp", b"one changed source")
+        run("--rebuild", contains="4 reused, 1 to compile")
+        invokes("game_dll.cpp", "link")
+
+        def change_generated(name, text):
+            fixture = root / "fixture-gen.json"
+            values = json.loads(fixture.read_text())
+            values[name] = text
+            fixture.write_text(json.dumps(values))
+            reference = root / "tools/game_dll/expected.txt"
+            replacement = f"gen {len(text)} {hashlib.sha256(text.encode()).hexdigest()} {name}"
+            lines = [replacement if line.endswith(" " + name) else line for line in reference.read_text().splitlines()]
+            change_build_input(reference.relative_to(root), ("\n".join(lines) + "\n").encode())
+
+        change_generated("gtav_recomp.0.cpp", "// revised partition\n")
+        run("--rebuild", contains="4 reused, 1 to compile")
+        invokes("codegen", "gtav_recomp.0.cpp", "link")
+        change_generated("gtav_funcs.1.h", "// revised partition header\n")
+        run("--rebuild", contains="4 reused, 1 to compile")
+        invokes("codegen", "gtav_recomp.1.cpp", "link")
+        change_generated("gtav_funcs.h", "// revised global declarations\n")
+        run("--rebuild", contains="4 reused, 1 to compile")
+        invokes("codegen", "gtav_init.cpp", "link")
+        gen = build / "generated/default/gtav_recomp.1.cpp"
+        put(gen, b"?" * gen.stat().st_size)
+        run("--rebuild", expect=1, contains="differ from the reference build", FIXTURE_BAD_GEN="1")
+        invokes("codegen")
+        run("--rebuild", contains="5 reused, 0 to compile")
+        invokes("codegen", "link")
+
+        obj = build / "obj/gtav_recomp.0.cpp.o"
+        original = obj.read_bytes()
+        put(obj, b"X" * len(original))  # Same-length object corruption must not be reused.
+        run("--rebuild", contains="4 reused, 1 to compile")
+        invokes("gtav_recomp.0.cpp", "link")
+        assert obj.read_bytes() == original
+
+        # Common headers or compiler contents invalidate all affected objects.
+        change_build_input("tools/game_dll/fs/layout_check.h", b"changed input")
+        run("--rebuild", contains="0 reused, 5 to compile")
+        invokes(*all_units, "link")
+        clang = root / "tools/llvm/bin/clang++"
+        change_build_input(clang.relative_to(root), clang.read_bytes() + b"\n# new compiler fixture\n")
+        run("--rebuild", contains="0 reused, 5 to compile")
+        invokes(*all_units, "link")
+        lld = root / "tools/llvm/bin/ld.lld"
+        change_build_input(lld.relative_to(root), lld.read_bytes() + b"\n# new linker fixture\n")
+        run("--rebuild", contains="5 reused, 0 to compile")
+        invokes("link")
         run("--", "--fixture-game-arg", contains="fake game started")
+
+        # A changed non-code asset is checked without disc re-import; matching receipt entries
+        # for large, untouched assets don't need a full rehash.
+        asset = root / "data/update/update.rpf"
+        good = asset.read_bytes()
+        put(asset, bytes(len(good)))
+        os.utime(asset, (time.time() + 3,) * 2)
+        run("--rebuild", expect=1, contains="differ from a known good dump")
+        invokes()
+        put(asset, good)
+        run("--rebuild", contains="6 unchanged, 1 rehashed")
+        invokes("link")
 
         old_library, old_stamp = library.read_bytes(), marker.read_bytes()
         local_patch = root / "data/game/default.xexp"
@@ -190,23 +299,32 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
         run("--rebuild", expect=1, contains="does not match")
         local_patch.write_bytes(correct_patch)
 
-        staged = library.with_suffix(".so.new")
-        proc = subprocess.Popen([root_exe, "--rebuild"], text=True, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, env=dict(env, FIXTURE_BLOCK_LINK="1"))
-        try:
-            deadline = time.monotonic() + 10
-            while not staged.is_file() and proc.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.02)
-            assert staged.is_file(), "did not reach link stage"
-            run("--rebuild", expect=1, contains="Could not lock the game folder")
-            proc.send_signal(signal.SIGINT)
-            stdout, stderr = proc.communicate(timeout=8)
-            assert proc.returncode == 1 and "Cancelled" in stderr, stdout + stderr
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.communicate()
-        assert not staged.exists()
+        def cancel_at(staged, **variables):
+            proc = subprocess.Popen([root_exe, "--rebuild"], text=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, env=dict(env, **variables))
+            try:
+                deadline = time.monotonic() + 10
+                while not staged.is_file() and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                assert staged.is_file(), f"did not stage {staged}"
+                run("--rebuild", expect=1, contains="Could not lock the game folder")
+                proc.send_signal(signal.SIGINT)
+                stdout, stderr = proc.communicate(timeout=8)
+                assert proc.returncode == 1 and "Cancelled" in stderr, stdout + stderr
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+            assert not staged.exists()
+
+        obj.unlink()
+        cancel_at(obj.with_suffix(".o.new"), FIXTURE_BLOCK_COMPILE="1")
+        invokes("gtav_recomp.0.cpp")
+        assert not obj.exists()
+        run("--rebuild", expect=1, contains="fixture link failure", FIXTURE_FAIL_LINK="1")
+        invokes("gtav_recomp.0.cpp", "link")
+        cancel_at(library.with_suffix(".so.new"), FIXTURE_BLOCK_LINK="1")
+        invokes("link")
         assert library.read_bytes() == old_library and marker.read_bytes() == old_stamp
         assert {p: p.read_bytes() for p in protected} == before
         try:

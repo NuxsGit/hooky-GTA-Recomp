@@ -33,10 +33,18 @@ def write_metadata(out, package, platform, version):
         raise SystemExit("loader/GAME_ABI must be a positive integer")
     inputs = package / "tools/game_dll"
     stamp = inputs / "build-id.txt"
-    digest = hashlib.sha256(f"gtav-game-build-v1\n{platform}\n{abi}\n".encode("ascii"))
-    for path in sorted(inputs.rglob("*"), key=lambda p: p.as_posix()):
-        if path.is_file() and path != stamp:
-            digest.update(path.relative_to(inputs).as_posix().encode("utf-8") + b"\0")
-            digest.update(hashlib.sha256(path.read_bytes()).digest())
+    digest = hashlib.sha256(f"gtav-game-build-v2\n{platform}\n{abi}\n".encode("ascii"))
+    # A compiler/LLD or builtin header change affects the local library even if generated
+    # C++ is the same. Runtime-only files deliberately do not take part in this stamp.
+    for folder in (inputs, package / "tools/llvm"):
+        for path in sorted(folder.rglob("*"), key=lambda p: p.as_posix()):
+            if not path.is_file() or path == stamp:
+                continue
+            digest.update(path.relative_to(package).as_posix().encode("utf-8") + b"\0")
+            content = hashlib.sha256()
+            with path.open("rb") as source:
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    content.update(block)
+            digest.update(content.digest())
     stamp.write_text(digest.hexdigest() + "\n", encoding="ascii")
     (out / "gtav_release.txt").write_text(f"gtav-recomp release folder {version} ({platform})\n", encoding="ascii")

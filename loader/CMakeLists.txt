@@ -19,6 +19,7 @@ if(WIN32)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     add_executable(gtav_launcher WIN32
         src/main.cpp
+        src/windows_update.cpp
         src/install.cpp
         src/sources.cpp
         src/launcher.manifest)  # visual styles, DPI awareness, long paths
@@ -99,6 +100,17 @@ if(GTAV_LAUNCHER_TESTS)
     target_include_directories(gtav_update_tests PRIVATE src)
     target_compile_definitions(gtav_update_tests PRIVATE GTAV_LAUNCHER_VERSION="${PROJECT_VERSION}")
     add_test(NAME update_policy COMMAND gtav_update_tests)
+    add_executable(gtav_runtime_policy_tests tests/runtime_policy_tests.cpp)
+    target_include_directories(gtav_runtime_policy_tests PRIVATE ../gtav/src)
+    add_test(NAME runtime_policy COMMAND gtav_runtime_policy_tests)
+    if(WIN32)
+        add_executable(gtav_windows_update_tests tests/windows_update_tests.cpp src/windows_update.cpp src/sources.cpp)
+        target_include_directories(gtav_windows_update_tests PRIVATE src)
+        target_compile_definitions(gtav_windows_update_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
+            GTAV_LAUNCHER_VERSION="${PROJECT_VERSION}")
+        target_link_libraries(gtav_windows_update_tests PRIVATE user32)
+        add_test(NAME windows_update_transaction COMMAND gtav_windows_update_tests)
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
         add_library(gtav_test_vulkan SHARED tests/vulkan_stub.cpp)

@@ -255,7 +255,7 @@ class Renderer {
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // F9 (dump the next frame to logs/native_dump) and F10 (screenshot to logs/shots) are polled
     // by the window thread's timer, so they work from the SDK's window too (shadow mode).
-    // F1 toggles the settings overlay; Esc closes it or pauses the game.
+    // F1 settings, F2 debug. Esc closes the active overlay or pauses the game.
     switch (msg) {
       case WM_MOUSEMOVE: menu::OnMouseMove(float(short(LOWORD(lp))), float(short(HIWORD(lp)))); break;
       case WM_LBUTTONDOWN: case WM_LBUTTONUP: menu::OnMouseButton(0, msg == WM_LBUTTONDOWN); break;
@@ -264,9 +264,10 @@ class Renderer {
       case WM_KEYDOWN:
       case WM_KEYUP: {
         bool down = msg == WM_KEYDOWN;
-        if (wp == VK_F1 || (wp == VK_ESCAPE && menu::IsOpen())) {
+        if (wp == VK_F1 || wp == VK_F2 || (wp == VK_ESCAPE && menu::IsOpen())) {
           if (down && !(lp & (1L << 30))) {
             if (wp == VK_F1) menu::Toggle();
+            else if (wp == VK_F2) menu::ToggleDebug();
             else menu::Close();
             input::UpdateMouseCapture(hwnd);
           }

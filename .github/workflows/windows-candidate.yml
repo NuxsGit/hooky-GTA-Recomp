@@ -12,6 +12,8 @@ on:
     paths:
       - '.github/workflows/windows-candidate.yml'
       - 'tools/release/**'
+      - 'loader/**'
+      - 'gtav/**'
       - 'rexglue-sdk-gtav-linux.patch'
       - 'xenosrecomp-gtav.patch'
       - 'plume-gtav.patch'

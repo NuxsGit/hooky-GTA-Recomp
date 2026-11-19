@@ -89,8 +89,9 @@ from them.
    **Install & build**.
 3. When setup finishes, press **Play**.
 
-Later: running `gtav_launcher.exe` starts the game directly. Hold **Shift** while starting it to
-open setup and updates. Logs: `data\logs`.
+Later: `gtav_launcher.exe` opens the **Overview**, with installation status, **Play**, updates and
+recent activity. Use **Source setup** for the discs, or **Activity log** to open the logs folder.
+A shortcut can start the game directly with `gtav_launcher.exe --play`.
 
 ## Linux
 
@@ -116,29 +117,31 @@ opening it (or pass `--setup`) to manage the install and updates.
 
 ## Recompiling and updating
 
-- **Recompile** checks the files already in `data/` and builds the game library again, without
-  needing the original discs or TU file. Use it after an interrupted compilation or when a new
-  runtime needs a new game library. If game files are missing or damaged, use **Install & build**
-  with your originals. Windows, Linux and macOS also support `--rebuild`; the build log is
-  `data/logs/install.log`. Recompiling does not replace your game data, saves or settings.
-- **Check for updates** queries the fork's latest stable GitHub release and looks for the package
-  for your platform. It runs only on request (`--check-updates` also works); on Linux the check
-  uses the system `curl`. It does not send any game files or download/install anything by itself.
-  When an update is available, you can open the release page and download the named archive.
+**Windows:** Close the game. In **Overview → Updates**, choose **Check** and **Get ZIP** to download
+from this fork's GitHub Releases. Then select that archive with **Install update ZIP…**. The launcher
+checks its SHA-256 against the latest published stable Windows asset, replaces the runtime and tools
+in place, and restarts. It keeps `data/`, your local `gtav_game.dll`, saves, controller mappings and
+settings. If the build ID is unchanged it can play immediately; otherwise it starts an incremental
+rebuild. **Activity log** opens `data/logs/`, including `update.log` and `install.log`. No automatic
+updates or background network checks. An interrupted swap is rolled back on the next launch.
 
-**Installing the update:** Close the game and launcher first. On Windows and Linux, extract the
-new package to a **new folder**, keeping the old one as a backup. Copy `data/` and, if present,
-your local `gtav_game.dll` (Windows) or `gtav_game.so` (Linux), `gtav.toml`, `gamecontrollerdb.txt`,
-and `args.txt` to the new folder. Don't copy old runtime binaries or `tools/` over the new package.
-Start the launcher in the new folder and point your shortcuts there. Locally built phone exports
-can stay in the old folder.
+For a legacy Windows launcher (or a draft, offline or differently laid-out ZIP), use the manual
+method: extract to a **new folder** and copy `data/`, `gtav_game.dll` and your local settings
+(`gtav.toml`, `gtav_settings.ini`, `gamecontrollerdb.txt`, `args.txt`) if present. Do not copy the old
+runtime or `tools/`. Keep the old folder as a backup.
 
-On macOS, replace **the whole `GTAV.app`** and keep the same game folder. Don't copy files into the
-signed bundle. Keep a backup of your game folder if you want to roll back.
+**Linux:** **Check for updates** (also `--check-updates`) uses `curl`. Extract the new package in a
+new folder. Copy `data/`, your local `gtav_game.so` and the settings listed above. Start the launcher
+in the new folder. **macOS:** Quit and replace the **whole `GTAV.app`**, keeping the same game folder.
+Don't copy files into the signed bundle. Locally built phone exports can stay in the old folder.
 
-If setup says the local game library needs to be rebuilt, choose **Recompile**. Builds from older
-launchers without a compatibility stamp need this once. A runtime/launcher-only update that
-keeps the same game build inputs and ABI can play without recompiling.
+**Recompile** (or `--rebuild`) uses the existing game files, without the original discs. It verifies
+XEX/XEXP and generated sources, keeps `data/build/` as a local cache, and compiles only changed units
+and units affected by shared headers, flags or the compiler. A link-only change uses the cached
+objects. First migration from a launcher that discarded its cache may need one full rebuild. You can
+delete `data/build/` to reclaim its space (at the cost of a full build next time), or remove
+`data/verified-assets.txt` before rebuilding to force a full asset check. Never distribute either cache
+or your local game library. Use **Install & build** with your originals if data is missing or damaged.
 
 ## Controls
 
@@ -173,6 +176,11 @@ AZERTY. The mouse steers the right stick, not the PC version's native camera.
 it when open; otherwise Esc pauses the game. On an SDL gamepad press **RB + Back** together;
 use the D-pad and A to navigate and B to close. Touch controls keep their Menu button.
 
+**Desktop debug overlay (native renderer).** Press **F2** (**Fn + F2** if required by your keyboard)
+for live logs and the experimental **Story tools** tab. In offline free roam, explicitly enable the
+actions to give a pistol with ammo, teleport a short distance, fly or use freecam. F2 or Esc closes
+the panel and releases its controls. Use a spare save. See [debug controls and validation](docs/DEBUG_AND_UPDATES.md).
+
 **Options.** Add settings to `gtav.toml` next to the game executable, or pass them to the game as
 `--name=value`. Example:
 
@@ -186,8 +194,8 @@ On Windows, `input_backend = "xinput"` switches to the XInput backend for compat
 isn't working for your setup (use F1 for the overlay in this mode). For a native DualSense on
 Windows, use `input_backend = "sdl"` (including in settings copied from an older install). See the
 [controller checks](tools/input_tests/README.md#windows-usb-and-bluetooth-before-release) for
-USB and Bluetooth troubleshooting. macOS and Linux launchers also forward flags after `--`,
-e.g. `./gtav_launcher -- --mnk_mouse=false` on Linux. On phones the
+USB and Bluetooth troubleshooting. Pass flags after `--`, e.g. `gtav_launcher.exe --play --
+--mnk_mouse=false` on Windows or `./gtav_launcher -- --mnk_mouse=false` on Linux. On phones the
 on-screen controls remain the default. To try an external keyboard and mouse, add `--mnk_mode=true`
 and `--mnk_mouse=true` to `args.txt` in the app's Documents (iPhone) or external files (Android)
 folder. External input on phones depends on what the OS forwards to SDL.
@@ -201,7 +209,7 @@ A free Apple ID works, but the app has to be re-signed every 7 days.
 
 1. **Install and play the game on your computer first, for a while.** The phone gets the shaders your
    computer has seen, so drive around and go inside some buildings.
-2. **Build for iPhone.** Open the setup window (Windows: hold Shift starting the launcher; macOS:
+2. **Build for iPhone.** Open the setup window (Windows: **Source setup**; macOS:
    hold Option opening the app; Linux: `./gtav_launcher --setup`) and press **Build for iPhone**
    (or run the launcher with `--iphone`). It takes about 15-25 minutes and shows you
    `iphone/GTAV.ipa` in your game folder.

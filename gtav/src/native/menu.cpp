@@ -1,5 +1,7 @@
 #include "menu.h"
 
+#include "../debug_tools.h"
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -33,7 +35,8 @@ struct Input {
 
 std::mutex g_input_mutex;
 std::vector<Input> g_input;
-std::atomic<bool> g_open{false};
+using debug::Panel;
+std::atomic<Panel> g_panel{Panel::Closed};
 bool g_clear_imgui_input = false;
 
 ImGuiContext* g_context = nullptr;
@@ -125,9 +128,9 @@ void EnsureContext(uint32_t h) {
 }
 
 void Push(const Input& in) {
-  if (!g_open) return;
+  if (!IsOpen()) return;
   std::lock_guard lock(g_input_mutex);
-  if (g_open && g_input.size() < 1024) g_input.push_back(in);
+  if (IsOpen() && g_input.size() < 1024) g_input.push_back(in);
 }
 
 ImGuiKey ToImGui(Key key) {
@@ -143,7 +146,7 @@ ImGuiKey ToImGui(Key key) {
   return ImGuiKey_None;
 }
 
-void Build(uint32_t fps, double frame_ms) {
+void BuildSettings(uint32_t fps, double frame_ms) {
 #if defined(__APPLE__) && TARGET_OS_IPHONE
   // Centred: the screen's sides are under the rounded corners and the notch.
   const ImVec2 display = ImGui::GetIO().DisplaySize;
@@ -155,6 +158,7 @@ void Build(uint32_t fps, double frame_ms) {
   bool open = true;
   if (!ImGui::Begin("Settings (F1 / Esc / B to close)", &open, ImGuiWindowFlags_NoCollapse)) {
     ImGui::End();
+    if (!open && g_panel == Panel::Settings) Close();
     return;
   }
   ImGui::Text("%u fps  (%.1f ms per frame)", fps, frame_ms);
@@ -225,26 +229,37 @@ void Build(uint32_t fps, double frame_ms) {
   ImGui::TextDisabled("Controller: RB + Back opens/closes this menu; D-pad + A to change, B to close.");
   if (changed) SaveSettings();
   ImGui::End();
-  if (!open) Close();
+  if (!open && g_panel == Panel::Settings) Close();
+}
+
+void BuildDebug(uint32_t fps, double frame_ms) {
+  const auto display = ImGui::GetIO().DisplaySize;
+  ImGui::SetNextWindowSize(ImVec2(std::min(820.f * g_scale, display.x - 20),
+                                std::min(520.f * g_scale, display.y - 20)), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowPos(ImVec2(display.x * .5f, display.y * .5f), ImGuiCond_Appearing, ImVec2(.5f, .5f));
+  bool open = true;
+  if (ImGui::Begin("GTA V Recomp | Debug (F2 / Esc)", &open, ImGuiWindowFlags_NoCollapse))
+    debug::DrawPanel(fps, frame_ms, g_scale);
+  ImGui::End();
+  if (!open && g_panel == Panel::Debug) Close();
+}
+
+void SwitchPanel(Panel wanted) {
+  std::lock_guard lock(g_input_mutex);
+  const auto next = debug::TogglePanel(g_panel.load(), wanted);
+  g_panel = next;
+  g_input.clear();
+  g_clear_imgui_input = true;
+  debug::PanelControls().SetOpen(next == Panel::Debug);
+  input::Reset();
 }
 
 }  // namespace
 
-void Toggle() {
-  std::lock_guard lock(g_input_mutex);
-  g_open = !g_open.load();
-  g_input.clear();
-  g_clear_imgui_input = true;
-  input::Reset();
-}
-void Close() {
-  std::lock_guard lock(g_input_mutex);
-  g_open = false;
-  g_input.clear();
-  g_clear_imgui_input = true;
-  input::Reset();
-}
-bool IsOpen() { return g_open.load(); }
+void Toggle() { SwitchPanel(Panel::Settings); }
+void ToggleDebug() { SwitchPanel(Panel::Debug); }
+void Close() { SwitchPanel(Panel::Closed); }
+bool IsOpen() { return g_panel.load() != Panel::Closed; }
 void OnMouseMove(float x, float y) { Push({Input::kMove, x, y}); }
 void OnMouseButton(int button, bool down) { Push({Input::kButton, 0, 0, button, down}); }
 void OnMouseWheel(float dy) { Push({Input::kWheel, 0, dy}); }
@@ -278,7 +293,7 @@ void LoadSettings() {
 
 ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms) {
   const bool touch_overlay = touch::Visible();
-  if (!g_open && !touch_overlay) return nullptr;
+  if (!IsOpen() && !touch_overlay) return nullptr;
   EnsureContext(h);
   ImGuiContext* previous = ImGui::GetCurrentContext();
   ImGui::SetCurrentContext(g_context);
@@ -309,7 +324,11 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms) {
     io.Fonts->GetTexDataAsRGBA32(&pixels, &fw, &fh);
   }
   ImGui::NewFrame();
-  if (g_open) Build(fps, frame_ms);
+  switch (g_panel.load()) {
+    case Panel::Settings: BuildSettings(fps, frame_ms); break;
+    case Panel::Debug: BuildDebug(fps, frame_ms); break;
+    case Panel::Closed: break;
+  }
   if (touch_overlay) touch::Draw(ImGui::GetForegroundDrawList(), float(w), float(h));
   ImGui::Render();
   ImDrawData* data = ImGui::GetDrawData();

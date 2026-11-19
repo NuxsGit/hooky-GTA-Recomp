@@ -21,6 +21,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#include "win_process.h"
 #else
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -57,9 +58,11 @@ extern char** environ;
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -123,24 +126,24 @@ std::wstring Gb(uint64_t bytes) {
 class Sha256 {
  public:
   Sha256() {
-    BCryptOpenAlgorithmProvider(&alg_, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
-    BCryptCreateHash(alg_, &hash_, nullptr, 0, nullptr, 0, 0);
+    ok_ = BCryptOpenAlgorithmProvider(&alg_, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0 &&
+          BCryptCreateHash(alg_, &hash_, nullptr, 0, nullptr, 0, 0) >= 0;
   }
   ~Sha256() {
     if (hash_) BCryptDestroyHash(hash_);
     if (alg_) BCryptCloseAlgorithmProvider(alg_, 0);
   }
   void Update(const uint8_t* data, size_t size) {
-    while (size) {
+    while (size && ok_) {
       ULONG n = ULONG(std::min<size_t>(size, 1u << 30));
-      BCryptHashData(hash_, const_cast<PUCHAR>(data), n, 0);
+      ok_ = BCryptHashData(hash_, const_cast<PUCHAR>(data), n, 0) >= 0;
       data += n;
       size -= n;
     }
   }
   std::string Hex() {
     uint8_t digest[32];
-    BCryptFinishHash(hash_, digest, 32, 0);
+    if (!ok_ || BCryptFinishHash(hash_, digest, 32, 0) < 0) return {};
     static const char* k = "0123456789abcdef";
     std::string s;
     for (uint8_t b : digest) {
@@ -153,6 +156,7 @@ class Sha256 {
  private:
   BCRYPT_ALG_HANDLE alg_ = nullptr;
   BCRYPT_HASH_HANDLE hash_ = nullptr;
+  bool ok_ = false;
 };
 #else
 // FIPS 180-4 SHA-256 (no crypto library on the player's machine is assumed).
@@ -238,8 +242,8 @@ bool HashFile(const fs::path& p, std::string* hex, uint64_t* size, InstallUi* ui
   auto blob = OpenFileBlob(PathWide(p), &err);
   if (!blob) return false;
   Sha256 h;
-  std::vector<uint8_t> buf(4u << 20);
   uint64_t off = 0, total = blob->size();
+  std::vector<uint8_t> buf(static_cast<size_t>(std::min<uint64_t>(total, 4u << 20)));
   while (off < total) {
     if (ui && ui->Cancelled()) return false;
     size_t n = size_t(std::min<uint64_t>(buf.size(), total - off));
@@ -248,6 +252,7 @@ bool HashFile(const fs::path& p, std::string* hex, uint64_t* size, InstallUi* ui
     off += n;
   }
   *hex = h.Hex();
+  if (hex->empty()) return false;
   if (size) *size = total;
   return true;
 }
@@ -343,6 +348,55 @@ class OutFile {
 };
 #endif
 
+bool WriteText(const fs::path& path, const std::string& text) {
+  std::wstring error;
+  OutFile file;
+  return file.Open(path, &error) &&
+         file.Write(reinterpret_cast<const uint8_t*>(text.data()), text.size()) && file.Commit();
+}
+
+bool ReplaceFile(const fs::path& from, const fs::path& to) {
+#ifdef _WIN32
+  return MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+  std::error_code ec;
+  fs::rename(from, to, ec);
+  return !ec;
+#endif
+}
+
+// NUL-separated fields, never file times, for compiler/codegen keys.
+void KeyField(Sha256& hash, std::string_view value) {
+  if (!value.empty()) hash.Update(reinterpret_cast<const uint8_t*>(value.data()), value.size());
+  const uint8_t end = 0;
+  hash.Update(&end, 1);
+}
+
+bool KeyFile(Sha256& key, const fs::path& file, InstallUi& ui) {
+  std::string digest;
+  if (!HashFile(file, &digest, nullptr, &ui)) return false;
+  KeyField(key, digest);
+  return true;
+}
+
+bool KeyTree(Sha256& key, const fs::path& folder, InstallUi& ui) {
+  std::error_code ec;
+  if (!fs::exists(folder, ec)) return !ec;  // a dev package can omit unused include trees
+  std::vector<fs::path> files;
+  for (auto it = fs::recursive_directory_iterator(folder, ec); !ec && it != fs::recursive_directory_iterator();
+       it.increment(ec)) {
+    if (it->is_regular_file(ec)) files.push_back(it->path());
+    if (ec || ui.Cancelled()) return false;
+  }
+  if (ec) return false;
+  std::sort(files.begin(), files.end());
+  for (const auto& file : files) {
+    KeyField(key, NarrowGeneric(file.lexically_relative(folder)));
+    if (!KeyFile(key, file, ui)) return false;
+  }
+  return true;
+}
+
 //-----------------------------------------------------------------------------
 // Expected files (tools\game_dll\expected.txt, written by tools/game_dll/make_expected.py)
 //   <kind> <size> <sha256> <path>
@@ -436,7 +490,7 @@ class BuildLock {
  public:
   bool Acquire(const fs::path& file) {
 #ifdef _WIN32
-    handle_ = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    handle_ = win::OpenSetupLock(file);
     return handle_ != INVALID_HANDLE_VALUE;
 #else
     fd_ = open(file.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
@@ -735,8 +789,10 @@ class Installer {
     LoadDone();
 
     copy_total_ = expected_.TotalBytes();
+    LoadVerifiedData();
     if (!CopyDisc2() || !CopyTitleUpdate() || !CopyInstallPartitions() || !VerifyCodeOnDisk() ||
         !ReviewMismatches()) return Fail();
+    SaveVerifiedData();
     // Once the copy has been checked, the compile only needs the local files.
     parts_.clear();
     tu_files_.clear();
@@ -824,13 +880,13 @@ class Installer {
     error_ = error;
     ui_.Progress(0);
     ui_.Stage(L"Checking the release and game folder...");
-    if (ui_.Cancelled() || !Preflight(root_, error) || !CheckBundledBuildInputs()) return false;
+    if (ui_.Cancelled()) return false;
 #ifdef __APPLE__
     if (!CheckGameFolder(home_, error)) return false;
 #endif
+    if (!LockBuild() || !Preflight(root_, error) || !CheckBundledBuildInputs()) return false;
     if (!ReadPackageBuildId(root_, &build_id_))
       return SetError(L"The release's game build ID is invalid. Extract a fresh copy of the release.");
-    if (!LockBuild()) return false;
     log_.open(data_ / "logs/install.log", std::ios::app);
     if (!log_) return SetError(L"Could not open data/logs/install.log for writing.");
     Log(L"---- " + action + L" started");
@@ -842,14 +898,20 @@ class Installer {
     fs::create_directories(data_ / "logs", ec);
     if (ec) return SetError(L"Could not create the log folder: " + Widen(ec.message()));
     if (!lock_.Acquire(data_ / "setup.lock"))
-      return SetError(L"Could not lock the game folder. Close any other setup and check write permissions.");
+      return SetError(L"Could not lock the game folder. Close the game or other setup and check write permissions.");
+#ifdef _WIN32
+    if (fs::exists(root_ / ".gtav-update/pending.txt", ec) || ec)
+      return SetError(L"An update needs recovery. Open the launcher normally first.");
+#endif
     return true;
   }
 
+  fs::path BuildDir() const { return data_ / (ios_ ? "build-iphone" : android_ ? "build-android" : "build"); }
+  bool IsDesktop() const { return !ios_ && !android_; }
+
   bool BuildDesktop() {
-    if (!Codegen() || !CheckGenerated() || !Compile() || !Link()) return Fail();
+    if (!PrepareGenerated() || !Compile() || !Link()) return Fail();
     std::error_code ec;
-    fs::remove_all(data_ / "build", ec);
     fs::remove(data_ / "install_state.txt", ec);
     ui_.Progress(1.0);
     ui_.Stage(L"Game build ready. Press Play.");
@@ -981,6 +1043,47 @@ class Installer {
     done_[Narrow(PathWide(dest))] = {size, sha};
   }
 
+  // Only non-code assets use the fast path. An old import without this receipt is checked once;
+  // missing, changed, or previously accepted non-reference assets are always checked again.
+  struct VerifiedData {
+    std::string digest;
+    uint64_t size;
+    int64_t mtime;
+    bool operator==(const VerifiedData&) const = default;
+  };
+
+  fs::path VerifiedPath() const { return data_ / "verified-assets.txt"; }
+
+  static bool IsCodeInput(const fs::path& path) {
+    return path.filename() == "default.xex" || path.filename() == "default.xexp";
+  }
+
+  static std::optional<VerifiedData> Observe(const fs::path& path, const Expected& exp) {
+    std::error_code ec;
+    const auto size = fs::file_size(path, ec);
+    if (ec || size != exp.size) return std::nullopt;
+    const auto time = fs::last_write_time(path, ec);
+    if (ec) return std::nullopt;
+    return VerifiedData{exp.sha256, size, static_cast<int64_t>(time.time_since_epoch().count())};
+  }
+
+  void LoadVerifiedData() {
+    std::ifstream file(VerifiedPath());
+    std::string line, path;
+    if (!std::getline(file, line) || line != "gtav-recomp verified assets 1") return;
+    VerifiedData entry;
+    while (file >> entry.digest >> entry.size >> entry.mtime && std::getline(file >> std::ws, path))
+      verified_data_.emplace(path, entry);
+  }
+
+  void SaveVerifiedData() {
+    std::ostringstream out;
+    out << "gtav-recomp verified assets 1\n";
+    for (const auto& [path, entry] : verified_data_)
+      out << entry.digest << ' ' << entry.size << ' ' << entry.mtime << ' ' << path << '\n';
+    if (!WriteText(VerifiedPath(), out.str())) Log(L"Could not save the asset verification receipt.");
+  }
+
   // Copies one entry to dest, hashing on the way. Records a mismatch against `exp`.
   bool CopyEntry(Source& src, const Entry& e, const fs::path& dest, const Expected* exp,
                  const std::wstring& what) {
@@ -1020,8 +1123,12 @@ class Installer {
     std::string sha = h.Hex();
     MarkDone(dest, e.size, sha);
     if (exp && (sha != exp->sha256 || e.size != exp->size)) {
+      verified_data_.erase(NarrowGeneric(dest.lexically_relative(data_)));
       mismatches_.push_back(what);
       Log(L"differs from the known dump: " + what);
+    } else if (exp && !data_only_ && !IsCodeInput(dest)) {
+      if (auto verified = Observe(dest, *exp))
+        verified_data_.insert_or_assign(NarrowGeneric(dest.lexically_relative(data_)), *verified);
     }
     return true;
   }
@@ -1088,25 +1195,41 @@ class Installer {
   bool VerifyLocalFiles() {
     ui_.Stage(L"Checking existing game files (no discs needed)...");
     if (!VerifyCodeOnDisk()) return false;
+    LoadVerifiedData();
+    size_t reused = 0, checked = 0;
     copy_total_ = expected_.TotalBytes();
     if (!VisitLocalFiles(expected_, data_, [&](const fs::path& path, const Expected& exp) {
           if (ui_.Cancelled()) return false;
           std::error_code ec;
           if (!fs::is_regular_file(path, ec))
             return SetError(L"Missing game file: " + PathWide(path) + L". Run Install & build with your originals.");
-          if (path.filename() != "default.xex" && path.filename() != "default.xexp") {
-            std::string sha;
-            uint64_t size;
-            ui_.Stage(L"Checking " + PathWide(path.filename()) + L" (" + Gb(exp.size) + L")...");
-            if (!HashFile(path, &sha, &size, &ui_))
-              return ui_.Cancelled() ? false : SetError(L"Could not read the local file " + PathWide(path));
-            if (size != exp.size || sha != exp.sha256) mismatches_.push_back(PathWide(path.filename()));
+          if (!IsCodeInput(path)) {
+            const auto name = NarrowGeneric(path.lexically_relative(data_));
+            const auto before = Observe(path, exp);
+            const auto it = verified_data_.find(name);
+            if (before && it != verified_data_.end() && it->second == *before) {
+              ++reused;
+            } else {
+              verified_data_.erase(name);
+              std::string sha;
+              uint64_t size;
+              ui_.Stage(L"Checking " + PathWide(path.filename()) + L" (" + Gb(exp.size) + L")...");
+              if (!HashFile(path, &sha, &size, &ui_))
+                return ui_.Cancelled() ? false : SetError(L"Could not read the local file " + PathWide(path));
+              ++checked;
+              if (size != exp.size || sha != exp.sha256) mismatches_.push_back(PathWide(path.filename()));
+              else if (before && Observe(path, exp) == before) verified_data_.emplace(name, *before);
+            }
           }
           copied_ += exp.size;
           Report();
           return true;
         })) return false;
-    return ReviewMismatches();
+    Log(L"Game assets: " + Num(reused) + L" unchanged, " + Num(checked) +
+        L" rehashed. XEX and XEXP always rehashed.");
+    if (!ReviewMismatches()) return false;
+    SaveVerifiedData();
+    return true;
   }
 
   bool ReviewMismatches() {
@@ -1124,15 +1247,63 @@ class Installer {
 
   //--- codegen ---------------------------------------------------------------
 
+  bool PrepareGenerated() {
+    const auto tools = root_ / "tools/game_dll";
+    Sha256 key;
+    KeyField(key, "gtav-codegen-cache-1");
+    // The local pair has just passed strict hash verification. With the same recipe we can
+    // reuse codegen only if *every* reference source/header still matches by content.
+    KeyField(key, expected_.disc2.at("default.xex").sha256);
+    KeyField(key, expected_.tu.at("default.xexp").sha256);
+    if (!KeyFile(key, root_ / kCodegenExe, ui_) ||
+        !KeyFile(key, tools / "gtav_manifest.toml", ui_) ||
+        !KeyFile(key, tools / "codegen.partition.json", ui_))
+      return ui_.Cancelled() ? false : SetError(L"Could not read the code generation inputs.");
+    const std::string recipe = key.Hex();
+    if (recipe.empty()) return SetError(L"Could not fingerprint the code generation inputs.");
+    const auto stamp = BuildDir() / "codegen-cache.txt";
+    std::string previous;
+    std::ifstream(stamp) >> previous;
+    const bool reuse = previous == recipe && CheckGenerated(false);
+    if (ui_.Cancelled()) return false;
+    if (reuse) {
+      Log(L"Codegen: reused verified sources.");
+    } else {
+      if (!Codegen() || !CheckGenerated()) return false;
+      if (!WriteText(stamp, recipe + "\n")) Log(L"Could not save the codegen cache key.");
+    }
+    // The code generator emits several auxiliary files. A cached include directory must not
+    // pick up extra headers left over by another release or supplied by a damaged cache.
+    const auto gen = BuildDir() / "generated/default";
+    std::error_code ec;
+    for (auto it = fs::directory_iterator(gen, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+      if (!expected_.gen.contains(NarrowGeneric(it->path().filename()))) {
+        if (fs::is_directory(it->symlink_status(ec)))
+          return SetError(L"Unexpected directory in generated code: " + PathWide(it->path()));
+        if (!ec) fs::remove(it->path(), ec);
+        if (ec) break;
+      }
+    }
+    if (ec) return SetError(L"Could not clean the generated include directory.");
+    return true;
+  }
+
   bool Codegen() {
     if (ui_.Cancelled()) return false;
-    fs::path build = data_ / L"build";
+    fs::path build = BuildDir();
     fs::path gen = build / L"generated" / L"default";
     fs::path tools = root_ / L"tools" / L"game_dll";
     std::error_code ec;
     fs::remove_all(build / L"generated", ec);
+    if (ec) return SetError(L"Could not clear the old generated code: " + Widen(ec.message()));
     fs::create_directories(gen, ec);
-    fs::create_directories(build / L"assets", ec);
+    if (ec) return SetError(L"Could not prepare the generated code directory: " + Widen(ec.message()));
+    struct StagedAssets {
+      fs::path directory;
+      ~StagedAssets() { std::error_code ignored; fs::remove_all(directory, ignored); }
+    } assets{build / L"assets"};
+    fs::create_directories(assets.directory, ec);
+    if (ec) return SetError(L"Could not stage the codegen inputs: " + Widen(ec.message()));
     fs::copy_file(tools / L"gtav_manifest.toml", build / L"gtav_manifest.toml",
                   fs::copy_options::overwrite_existing, ec);
     if (ec) return SetError(L"Could not stage the manifest: " + Widen(ec.message()));
@@ -1177,17 +1348,20 @@ class Installer {
     return true;
   }
 
-  bool CheckGenerated() {
-    ui_.Stage(L"Checking the generated code...");
-    fs::path gen = data_ / L"build" / L"generated" / L"default";
+  bool CheckGenerated(bool report_error = true) {
+    ui_.Stage(report_error ? L"Checking the generated code..." : L"Checking the cached generated code...");
+    fs::path gen = BuildDir() / L"generated" / L"default";
     size_t n = 0, bad = 0;
     std::wstring first_bad;
     for (auto& [name, exp] : expected_.gen) {
       if (ui_.Cancelled()) return false;
       std::string sha;
       uint64_t size = 0;
-      if (!HashFile(gen / PathFromUtf8(name), &sha, &size, &ui_) || size != exp.size || sha != exp.sha256) {
-        if (ui_.Cancelled()) return false;
+      const auto file = gen / PathFromUtf8(name);
+      std::error_code ec;
+      if (!fs::is_regular_file(fs::symlink_status(file, ec)) || fs::file_size(file, ec) != exp.size || ec ||
+          !HashFile(file, &sha, &size, &ui_) || size != exp.size || sha != exp.sha256) {
+        if (ui_.Cancelled() || !report_error) return false;
         if (!bad++) first_bad = Widen(name);
       }
       if (++n % 50 == 0)
@@ -1251,15 +1425,15 @@ class Installer {
   }
 
   bool Compile() {
-    fs::path gen = data_ / L"build" / L"generated" / L"default";
-    fs::path obj = data_ / L"build" / (ios_ ? L"obj_ios" : android_ ? L"obj_android" : L"obj");
+    fs::path gen = BuildDir() / L"generated" / L"default";
+    fs::path obj = BuildDir() / L"obj";
     fs::path fsdir = root_ / L"tools" / L"game_dll" / L"fs";
     // iPhone / Android: the phone shell's own hook header (package ios/ or android/ interface).
     fs::path iface = ios_       ? root_ / L"ios" / L"interface"
                      : android_ ? root_ / L"android" / L"interface"
                                 : root_ / L"tools" / L"game_dll" / L"interface";
     std::error_code ec;
-    fs::remove_all(obj, ec);
+    if (!IsDesktop()) fs::remove_all(obj, ec);
     if (!ec) fs::create_directories(obj, ec);
     if (ec) return SetError(L"Could not prepare the compiler work folder: " + Widen(ec.message()));
     for (auto [src, name] : {std::pair{fsdir, L"gtav_pch.h"}, {fsdir, L"layout_check.h"},
@@ -1317,60 +1491,153 @@ class Installer {
     }
     flags.insert(flags.end(), {L"-isystem", PathWide(fsdir / L"include"), L"-I", PathWide(gen)});
 
-    int jobs = JobCount();
-    Log(L"Compiling " + Num(sources.size()) + L" files with " + Num(jobs) + L" parallel jobs");
-    ui_.Stage(L"Compiling the game code (" + Num(sources.size()) + L" files, " + Num(jobs) +
-              L" at a time)...");
-    struct Running {
-      std::unique_ptr<Child> child;
-      fs::path log, src;
+    // Codegen emits <partition>.cpp + its own declaration header. Only gtav_init.cpp uses
+    // gtav_init.h/gtav_funcs.h (global list). Compile keys include the relevant partition,
+    // and all compiler, include and common-header inputs which can change emitted objects.
+    struct Unit {
+      fs::path source, object, record, staged, log;
+      std::string key;
     };
+    std::vector<Unit> pending;
+    bool cache = IsDesktop();
+    // These variables can add include paths outside the packaged, hashed trees. Do not produce
+    // or reuse persistent objects with a non-hermetic compiler environment.
+    for (const char* name : {"CPATH", "CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "SDKROOT"})
+      if (const char* value = std::getenv(name); value && *value) cache = false;
+    flags.push_back(L"--no-default-config");
+    std::string common_key;
+    if (cache) {
+      ui_.Stage(L"Checking the toolchain and cached objects...");
+      Sha256 key;
+      KeyField(key, "gtav-compile-cache-1");
+      for (const auto& flag : flags) KeyField(key, Narrow(flag));
+      if (!KeyFile(key, clang, ui_) || !KeyTree(key, root_ / "tools/llvm/lib", ui_) ||
+          !KeyTree(key, fsdir / "include", ui_))
+        return ui_.Cancelled() ? false : SetError(L"Could not read the compiler or its headers.");
+      for (const auto* header : {"gtav_pch.h", "layout_check.h", "gtav_hooks.h"})
+        if (!KeyFile(key, gen / header, ui_))
+          return ui_.Cancelled() ? false : SetError(L"Could not read the staged compiler headers.");
+      common_key = key.Hex();
+      if (common_key.empty()) return SetError(L"Could not fingerprint the compiler inputs.");
+    }
+
+    auto has_object = [&](const Unit& unit) {
+      std::string key, digest, actual;
+      uint64_t size = 0, actual_size = 0;
+      std::ifstream record(unit.record);
+      std::error_code ec;
+      return fs::is_regular_file(fs::symlink_status(unit.object, ec)) &&
+          record >> key >> digest >> size && key == unit.key && size != 0 &&
+          fs::file_size(unit.object, ec) == size && !ec &&
+          HashFile(unit.object, &actual, &actual_size, &ui_) && actual == digest && actual_size == size;
+    };
+    std::set<fs::path> outputs;
+    for (const auto& src : sources) {
+      if (ui_.Cancelled()) return false;
+      const auto stem = PathWide(src.filename());
+      const auto object = obj / (stem + kObjExt);
+      Unit unit{src, object, obj / (stem + L".key"), obj / (stem + kObjExt + L".new"),
+                obj / (stem + L".log"), {}};
+      objects_.push_back(object);
+      outputs.insert({unit.object, unit.record, unit.log});
+      if (cache) {
+        Sha256 key;
+        KeyField(key, common_key);
+        const auto name = NarrowGeneric(src.filename());
+        KeyField(key, name);
+        auto generated = [&](const std::string& path) {
+          if (const auto it = expected_.gen.find(path); it != expected_.gen.end()) {
+            KeyField(key, path);
+            KeyField(key, it->second.sha256);
+          }
+        };
+        if (src.parent_path() == gen) {
+          generated(name);
+          if (name == "gtav_init.cpp") {
+            generated("gtav_init.h");
+            generated("gtav_funcs.h");
+          } else {
+            generated("gtav_funcs." + name.substr(12, name.size() - 16) + ".h");
+          }
+        } else if (!KeyFile(key, src, ui_)) {
+          return ui_.Cancelled() ? false : SetError(L"Could not read " + PathWide(src));
+        }
+        unit.key = key.Hex();
+        if (unit.key.empty()) return SetError(L"Could not fingerprint a source file.");
+        if (has_object(unit)) continue;
+      }
+      pending.push_back(std::move(unit));
+    }
+    // Drop obsolete partitions and any partial compiler output from a previous interruption.
+    for (auto it = fs::directory_iterator(obj, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+      if (!outputs.contains(it->path()) && !fs::is_directory(it->symlink_status(ec))) {
+        if (!ec) fs::remove(it->path(), ec);
+        if (ec) break;
+      }
+    }
+    if (ec) return SetError(L"Could not clean the compiler work folder: " + Widen(ec.message()));
+    const size_t reused = sources.size() - pending.size();
+    Log(L"C++: " + Num(reused) + L" reused, " + Num(pending.size()) + L" to compile.");
+    if (pending.empty()) {
+      ui_.Progress(kCompileEnd);
+      return !ui_.Cancelled();
+    }
+    const int jobs = JobCount();
+    ui_.Stage(L"Compiling " + Num(pending.size()) + L" changed C++ files (" + Num(jobs) + L" jobs)...");
+    struct Running {
+      const Unit* unit;
+      std::unique_ptr<Child> child;
+    };
+    struct Cleanup {
+      const std::vector<Unit>& units;
+      ~Cleanup() {
+        for (const auto& unit : units) { std::error_code ignored; fs::remove(unit.staged, ignored); }
+      }
+    } cleanup{pending};
     std::vector<Running> running;
     size_t next = 0, finished = 0;
-    auto t0 = std::chrono::steady_clock::now();
-    while (finished < sources.size()) {
-      if (ui_.Cancelled()) {
-        for (auto& r : running) r.child->Kill();
-        return false;
-      }
+    while (finished < pending.size()) {
+      if (ui_.Cancelled()) return false;  // Child destructors stop the tools before Cleanup runs.
       const size_t before = finished;
-      while (running.size() < size_t(jobs) && next < sources.size()) {
-        const fs::path& src = sources[next++];
-        fs::path o = obj / (PathWide(src.filename()) + kObjExt);
-        objects_.push_back(o);
-        Running r{std::make_unique<Child>(), obj / (PathWide(src.filename()) + L".log"), src};
-        Args cmd = {PathWide(clang)};
+      while (!ui_.Cancelled() && running.size() < size_t(jobs) && next < pending.size()) {
+        const auto& unit = pending[next++];
+        Running r{&unit, std::make_unique<Child>()};
+        Args cmd{PathWide(clang)};
         cmd.insert(cmd.end(), flags.begin(), flags.end());
-        cmd.insert(cmd.end(), {L"-c", PathWide(src), L"-o", PathWide(o)});
-        if (!r.child->Start(cmd, gen, r.log)) return SetError(L"Could not start " + std::wstring(kClang));
+        cmd.insert(cmd.end(), {L"-c", PathWide(unit.source), L"-o", PathWide(unit.staged)});
+        if (!r.child->Start(cmd, gen, unit.log)) return SetError(L"Could not start " + std::wstring(kClang));
         running.push_back(std::move(r));
       }
-      for (size_t i = 0; i < running.size();) {
-        int code = running[i].child->Poll(i == 0 ? 200 : 0);
-        if (code < 0) {
-          ++i;
-          continue;
+      for (size_t i = 0; i < running.size() && !ui_.Cancelled();) {
+        const int code = running[i].child->Poll(i == 0 ? 150 : 0);
+        if (code < 0) { ++i; continue; }
+        const auto& unit = *running[i].unit;
+        if (code != 0)
+          return SetError(L"Compiling " + PathWide(unit.source.filename()) + L" failed:\n" +
+                          Widen(Tail(unit.log, 1500)));
+        std::string digest;
+        uint64_t size = 0;
+        if (cache) {
+          if (!HashFile(unit.staged, &digest, &size, &ui_) || size == 0)
+            return ui_.Cancelled() ? false : SetError(L"The compiler did not produce a valid object file.");
+        } else {
+          size = fs::file_size(unit.staged, ec);
+          if (ec || !size) return SetError(L"The compiler did not produce an object file.");
         }
-        if (code != 0) {
-          for (auto& r : running) r.child->Kill();
-          return SetError(L"Compiling " + PathWide(running[i].src.filename()) + L" failed:\n" +
-                          Widen(Tail(running[i].log, 1500)));
-        }
-        fs::remove(running[i].log, ec);
+        if (!cache) fs::remove(unit.record, ec);  // never attest a non-hermetic object
+        if (ec || !ReplaceFile(unit.staged, unit.object))
+          return SetError(L"Could not save " + PathWide(unit.object));
+        if (cache && !WriteText(unit.record, unit.key + " " + digest + " " + std::to_string(size) + "\n"))
+          Log(L"Could not save the cache record for " + PathWide(unit.object.filename()));
+        fs::remove(unit.log, ec);
+        ec.clear();
         running.erase(running.begin() + i);
         ++finished;
       }
-      if (ui_.Cancelled()) {
-        for (auto& r : running) r.child->Kill();
-        return false;
-      }
       if (finished != before)
-        ui_.Stage(L"Compiling C++: " + Num(finished) + L" / " + Num(sources.size()) + L" files");
-      double f = double(finished) / double(sources.size());
-      ui_.Progress(kCheckEnd + f * (kCompileEnd - kCheckEnd));
+        ui_.Stage(L"Compiling C++: " + Num(finished) + L" / " + Num(pending.size()) + L" files");
+      ui_.Progress(kCheckEnd + double(reused + finished) / double(sources.size()) * (kCompileEnd - kCheckEnd));
     }
-    auto secs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - t0);
-    Log(L"Compiled in " + Num(uint64_t(secs.count())) + L" s");
     return true;
   }
 
@@ -1434,7 +1701,7 @@ class Installer {
 
     ui_.Stage(L"Packing GTAV.ipa...");
     if (!WriteIpa(out / L"Payload", out / L"GTAV.ipa")) return SetError(L"Could not write " + PathWide(out / L"GTAV.ipa"));
-    fs::remove_all(data_ / L"build", ec);
+    fs::remove_all(BuildDir(), ec);
     Log(L"---- iPhone build finished: " + PathWide(out / L"GTAV.ipa"));
     ui_.Progress(1.0);
     ui_.Stage(L"Done: iphone/GTAV.ipa in the game folder. Install it with Sideloadly or AltStore.");
@@ -1517,7 +1784,7 @@ class Installer {
       fs::copy_file(apk, out / L"GTAV.apk", fs::copy_options::overwrite_existing, ec);
       if (ec) return SetError(L"Could not copy GTAV.apk next to the pack: " + Widen(ec.message()));
     }
-    fs::remove_all(data_ / L"build", ec);
+    fs::remove_all(BuildDir(), ec);
     Log(L"---- Android build finished: " + PathWide(zip));
     ui_.Progress(1.0);
     ui_.Stage(L"Done: android/gtav-android-pack.zip in the game folder. Copy it and your disc files to the "
@@ -1531,7 +1798,7 @@ class Installer {
   // the same dlopen'd tree. Every package's lld is one multi-format binary: -flavor gnu = ld.lld.
   bool LinkAndroid(const fs::path& out) {
     ui_.Stage(L"Linking libgtav_game.so for Android...");
-    fs::path build = data_ / L"build";
+    fs::path build = BuildDir();
     fs::path pkg = root_ / L"android";
     fs::path rsp = build / L"link_android.rsp";
     {
@@ -1569,7 +1836,7 @@ class Installer {
 
   bool LinkIphone(const fs::path& out) {
     ui_.Stage(L"Linking gtav_game.dylib for iPhone...");
-    fs::path build = data_ / L"build";
+    fs::path build = BuildDir();
     fs::path ios = root_ / L"ios";
     fs::path rsp = build / L"link_ios.rsp";
     {
@@ -1633,7 +1900,7 @@ class Installer {
 #else
     const wchar_t *kXr = L"XenosRecomp", *kDxc = L"dxc";
 #endif
-    const fs::path work = data_ / L"build" / (android ? L"spirv_android" : L"spirv_ios");
+    const fs::path work = BuildDir() / (android ? L"spirv_android" : L"spirv_ios");
     const fs::path phone_cache = home_ / (android ? L"android" : L"iphone") / L"shader_cache";
     std::error_code ec;
     fs::create_directories(spirv, ec);
@@ -1813,16 +2080,18 @@ class Installer {
     if (!stamp.Write(reinterpret_cast<const uint8_t*>(text.data()), text.size()))
       return SetError(L"Could not write the local game build stamp.");
     if (ui_.Cancelled()) return false;
+    const auto old_id = InstalledBuildId(home_);
     std::error_code ec;
-    if (InstalledBuildId(home_) != build_id_) fs::remove(marker, ec);
+    if (old_id != build_id_) fs::remove(marker, ec);
     if (ec) return SetError(L"Could not clear the old game build stamp: " + Widen(ec.message()));
-#ifdef _WIN32
-    const bool replaced = MoveFileExW(library.c_str(), (home_ / kGameLib).c_str(), MOVEFILE_REPLACE_EXISTING);
-#else
-    fs::rename(library, home_ / kGameLib, ec);
-    const bool replaced = !ec;
-#endif
-    if (!replaced) return SetError(L"Could not replace the game library. Close the game and check the folder permissions.");
+    if (!ReplaceFile(library, home_ / kGameLib)) {
+      auto original = marker;
+      original += ".restore";
+      if (!old_id.empty() && old_id != build_id_ &&
+          WriteText(original, std::string(kInstallVersion) + "\n" + old_id + "\n"))
+        ReplaceFile(original, marker);
+      return SetError(L"Could not replace the game library. Close the game and check the folder permissions.");
+    }
     if (!stamp.Commit()) return SetError(L"Could not save the local game build stamp.");
     return true;
   }
@@ -1830,7 +2099,7 @@ class Installer {
 #ifdef __APPLE__
   bool Link() {
     ui_.Stage(L"Linking gtav_game.dylib...");
-    fs::path build = data_ / L"build";
+    fs::path build = BuildDir();
     fs::path gd = root_ / L"tools" / L"game_dll";
     fs::path lld = root_ / L"tools" / L"llvm" / L"bin" / L"ld64.lld";
     fs::path rsp = build / L"link.rsp";
@@ -1856,7 +2125,7 @@ class Installer {
 #elif !defined(_WIN32)
   bool Link() {
     ui_.Stage(L"Linking gtav_game.so...");
-    fs::path build = data_ / L"build";
+    fs::path build = BuildDir();
     fs::path iface = root_ / L"tools" / L"game_dll" / L"interface";
     fs::path lld = root_ / L"tools" / L"llvm" / L"bin" / L"ld.lld";
     fs::path rsp = build / L"link.rsp";
@@ -1878,7 +2147,7 @@ class Installer {
 #else
   bool Link() {
     ui_.Stage(L"Linking gtav_game.dll...");
-    fs::path build = data_ / L"build";
+    fs::path build = BuildDir();
     fs::path iface = root_ / L"tools" / L"game_dll" / L"interface";
     fs::path lld = root_ / L"tools" / L"llvm" / L"bin" / L"lld-link.exe";
     std::vector<fs::path> libs;
@@ -1922,6 +2191,7 @@ class Installer {
   std::vector<std::pair<std::string, std::unique_ptr<Source>>> parts_;
   std::map<std::string, const Entry*> tu_files_;
   std::map<std::string, Expected> done_;
+  std::map<std::string, VerifiedData> verified_data_;
   std::vector<std::wstring> mismatches_;
   std::vector<fs::path> objects_;
   uint64_t copy_total_ = 0, copied_ = 0;
@@ -2150,6 +2420,15 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
   fs::create_directories(data / L"spirv", ec);
   fs::create_directories(data / L"logs", ec);
   fs::create_directories(data / L"user", ec);
+#ifdef _WIN32
+  // Keep setup/update out of this installation until the game exits, even if this launcher closes.
+  win::Handle lock(win::OpenSetupLock(data / "setup.lock", true));
+  if (!lock || fs::exists(root / ".gtav-update/pending.txt", ec) || ec ||
+      GetInstallStatus(root, root) != InstallStatus::Ready) {
+    *error = L"The installation is not ready or is being used by another game, update or setup.";
+    return false;
+  }
+#endif
   // Read the exe and DLLs once so they are in the file cache: slow first page-ins during boot
   // were seen to hang it (see play.ps1).
   std::vector<uint8_t> buf(8u << 20);
@@ -2179,7 +2458,7 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
                // looking at an empty black Space.
                L"--fullscreen=false",
 #endif
-               L"--gtav_native=on", L"--gtav_fps_limit=0", L"--gpu_skip_rendering=true",
+               L"--gtav_native=on", L"--gtav_fps_limit=30", L"--gpu_skip_rendering=true",
                L"--gpu_skip_rendering_lag_ms=4", L"--vsync=false", L"--gtav_native_vsync=false"};
   args.insert(args.end(), extra.begin(), extra.end());
 #ifdef __APPLE__
@@ -2218,18 +2497,19 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
   *error = L"Could not start " + args[0] + L": " + Widen(strerror(errno));
   return false;
 #else
-  std::wstring cmd = CommandLine(args);
-  STARTUPINFOW si = {sizeof(si)};
-  PROCESS_INFORMATION pi = {};
-  if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, root.c_str(), &si,
-                      &pi)) {
+  HANDLE inherit[] = {lock.Get()};
+  if (!win::Spawn(root / kGameExe, CommandLine(args), root, 0, nullptr, inherit)) {
     *error = L"Could not start gtav_fast.exe";
     return false;
   }
-  CloseHandle(pi.hThread);
-  CloseHandle(pi.hProcess);
   return true;
 #endif
 }
+
+#ifdef _WIN32
+bool HashUpdateArchive(const fs::path& path, std::string* digest, uint64_t* size, InstallUi& ui) {
+  return HashFile(path, digest, size, &ui);
+}
+#endif
 
 }  // namespace loader

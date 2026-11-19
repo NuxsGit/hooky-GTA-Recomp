@@ -7,6 +7,7 @@
 #include <rex/input/input_system.h>
 #include <rex/rex_app.h>
 
+#include "debug_tools.h"
 #include "native/input.h"
 #include "native/renderer.h"
 #include "native/touch_controls.h"
@@ -42,7 +43,7 @@ class GtavApp : public rex::ReXApp {
   }
 
   // Override virtual hooks for customization:
-  // void OnPostInitLogging() override {}
+  void OnPostInitLogging() override { gtav::debug::InstallLogCapture(); }
   void OnPreSetup(rex::RuntimeConfig& config) override {
     gtav::native::input::Configure();
     config.input_factory = [](bool tool_mode) -> std::unique_ptr<rex::system::IInputSystem> {

@@ -87,6 +87,21 @@ class Json {
     return true;
   }
 
+  bool OptionalDigest(std::string_view* value) {
+    Space();
+    return Word("null") || String(value);
+  }
+
+  bool Unsigned(uint64_t* value) {
+    Space();
+    if (rest_.empty() || rest_.front() < '0' || rest_.front() > '9') return false;
+    const char* begin = rest_.data();
+    auto [end, error] = std::from_chars(begin, begin + rest_.size(), *value);
+    if (error != std::errc{} || (end - begin > 1 && *begin == '0')) return false;
+    rest_.remove_prefix(end - begin);
+    return true;
+  }
+
   bool Skip(int depth = 0) {
     if (depth >= 32) return false;
     Space();
@@ -169,6 +184,9 @@ std::string UpdateInstructions() {
 #ifdef __APPLE__
   return "Quit the game, replace GTAV.app with the new one, and keep the same game folder. "
          "Recompile if prompted.";
+#elif defined(_WIN32)
+  return "Download the official ZIP, then choose Install update ZIP in the launcher. "
+         "The launcher keeps your existing installation and rebuilds only if needed.";
 #else
   return "Quit the game and extract the download to a new folder. Copy your data folder, "
          "locally built game library and settings into it (see README). Recompile if prompted.";
@@ -189,6 +207,8 @@ UpdateResult EvaluateRelease(int status, std::string_view body, std::string_view
   std::string_view tag;
   std::optional<bool> draft, prerelease;
   bool assets = false, compatible = false;
+  std::string_view asset_digest;
+  uint64_t asset_size = 0;
   const bool parsed = json.Object([&](std::string_view key) {
     if (key == "tag_name") return tag.empty() && json.String(&tag) && !tag.empty();
     if (key == "draft") return json.Boolean(&draft);
@@ -197,13 +217,22 @@ UpdateResult EvaluateRelease(int status, std::string_view body, std::string_view
     if (assets) return false;
     assets = true;
     return json.Array([&] {
-      std::string_view name, state;
+      std::string_view name, state, digest;
+      uint64_t size = 0;
+      bool has_digest = false, has_size = false;
       if (!json.Object([&](std::string_view asset_key) {
             if (asset_key == "name") return name.empty() && json.String(&name) && !name.empty();
             if (asset_key == "state") return state.empty() && json.String(&state) && !state.empty();
+            if (asset_key == "digest") return !std::exchange(has_digest, true) && json.OptionalDigest(&digest);
+            if (asset_key == "size") return !std::exchange(has_size, true) && json.Unsigned(&size);
             return json.Skip();
           })) return false;
-      compatible |= name == package && state == "uploaded";
+      if (name == package && state == "uploaded") {
+        if (compatible) return false;
+        compatible = true;
+        asset_digest = digest;
+        asset_size = size;
+      }
       return true;
     });
   });
@@ -220,9 +249,15 @@ UpdateResult EvaluateRelease(int status, std::string_view body, std::string_view
                                        std::string(tag) + ").", {}};
   if (!compatible)
     return {UpdateStatus::NoPackage, std::string(tag) + " is published, but the package for this system is not available.", {}};
+  UpdateAsset asset;
+  if (asset_digest.size() == 71 && asset_digest.starts_with("sha256:") &&
+      asset_digest.substr(7).find_first_not_of("0123456789abcdef") == asset_digest.npos &&
+      asset_size > 0 && asset_size <= kMaxUpdateArchiveBytes) {
+    asset = {std::string(tag.substr(1)), std::string(asset_digest.substr(7)), asset_size};
+  }
   return {UpdateStatus::Available, "Update available: " + std::string(tag) + " (installed: v" + std::string(current) +
                                       ").\nDownload " + std::string(package) + " from GitHub.\n\n" + UpdateInstructions(),
-          std::string(kReleasePage) + "/tag/" + std::string(tag)};
+          std::string(kReleasePage) + "/tag/" + std::string(tag), std::move(asset)};
 }
 
 UpdateResult CheckForUpdate() {

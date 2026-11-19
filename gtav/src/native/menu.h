@@ -11,7 +11,8 @@ struct ImDrawData;
 namespace gtav::native::menu {
 
 // Window thread. Coordinates are window pixels; buttons 0 left, 1 right, 2 middle.
-void Toggle();
+void Toggle();  // Settings (F1 / controller)
+void ToggleDebug();  // F2 (Fn + F2 on media-key keyboards)
 void Close();
 bool IsOpen();
 void OnMouseMove(float x, float y);
