@@ -10,6 +10,10 @@
 #include "menu.h"
 #include "paths.h"
 #include "shader_compiler.h"
+#ifdef GTAV_DESKTOP_WORKSHOP
+#include "../sandbox/CreativeRuntime.h"
+#include "../sandbox/desktop.h"
+#endif
 
 #include <plume_render_interface.h>
 
@@ -75,7 +79,7 @@ REXCVAR_DEFINE_INT32(gtav_native_flicker_min_blocks, 6, "GTAV",
                      "Native renderer: --gtav_native_flicker_catch saves (up to 40) only glitches covering at "
                      "least this many 32-px blocks; smaller ones (often thin poles while driving) are only logged");
 REXCVAR_DEFINE_BOOL(gtav_native_replay, false, "GTAV",
-                    "Native renderer: keep the last 90 presented frames; F8 writes them to logs/replay");
+                    "Native renderer: keep the last 90 presented frames; F8 (Shift+F8 in Workshop) writes them to logs/replay");
 REXCVAR_DEFINE_BOOL(gtav_native_fps, false, "GTAV", "Native renderer: on-screen frames-per-second counter");
 REXCVAR_DEFINE_BOOL(gtav_native_hidden, false, "GTAV",
                     "Native renderer: keep every game window hidden (unattended test runs)");
@@ -270,7 +274,7 @@ class Renderer {
       case WM_MOUSEWHEEL: menu::OnMouseWheel(float(GET_WHEEL_DELTA_WPARAM(wp)) / WHEEL_DELTA); break;
 #ifdef GTAV_DESKTOP_WORKSHOP
       case WM_CHAR:
-        if (menu::WorkshopOpen()) { menu::OnText(uint32_t(wp)); return 0; }
+        if (menu::TextPanel()) { menu::OnText16(uint32_t(wp)); return 0; }
         break;
 #endif
       case WM_KEYDOWN:
@@ -281,7 +285,16 @@ class Renderer {
           input::UpdateMouseCapture(hwnd);
           return 0;
         }
-        if (menu::WorkshopOpen()) {
+        const bool pressed = down && !(lp & (1L << 30));
+        if (pressed && wp == VK_F8 && !(GetKeyState(VK_SHIFT) & 0x8000) && menu::ToggleBuild()) {
+          input::UpdateMouseCapture(hwnd);
+          return 0;
+        }
+        if (pressed && (wp == 'P' || wp == VK_UP) && menu::OpenPhone()) {
+          input::UpdateMouseCapture(hwnd);
+          return 0;
+        }
+        if (menu::TextPanel()) {
           using K = menu::Key;
           switch (wp) {
             case VK_BACK: menu::OnKey(K::kBackspace, down); break;
@@ -294,6 +307,8 @@ class Renderer {
             case 'C': menu::OnKey(K::kC, down); break;
             case 'V': menu::OnKey(K::kV, down); break;
             case 'X': menu::OnKey(K::kX, down); break;
+            case 'Y': menu::OnKey(K::kY, down); break;
+            case 'Z': menu::OnKey(K::kZ, down); break;
           }
         }
 #endif
@@ -318,6 +333,9 @@ class Renderer {
     }
     if (input::HandleMessage(hwnd, msg, wp, lp)) return TRUE;
     if (msg == WM_CLOSE) {  // the native window is the game window: closing it quits
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (sandbox::Active()) workshop::Stop();  // flush pending JSON before the Win32 direct exit
+#endif
       REXLOG_INFO("[native] window closed, exiting");
       ExitProcess(0);
     }
@@ -423,7 +441,11 @@ class Renderer {
             bool ours = pid == GetCurrentProcessId();
             bool f9 = ours && (GetAsyncKeyState(VK_F9) & 0x8000), f10 = ours && (GetAsyncKeyState(VK_F10) & 0x8000);
             bool f11 = ours && (GetAsyncKeyState(VK_F11) & 0x8000), f8 = ours && (GetAsyncKeyState(VK_F8) & 0x8000);
-            if (f8 && !f8_down) key_replay_ = true;
+            if (f8 && !f8_down
+#ifdef GTAV_DESKTOP_WORKSHOP
+                && (!sandbox::Active() || (GetAsyncKeyState(VK_SHIFT) & 0x8000))
+#endif
+            ) key_replay_ = true;
             if (f9 && !f9_down) key_dump_ = true;
             if (f10 && !f10_down) key_shot_ = true;
             if (f11 && !f11_down) CycleDiagMode();
@@ -539,7 +561,11 @@ class Renderer {
           SDL_AddEventWatch(
               [](void*, SDL_Event* e) {
                 if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {
-                  if (e->key.scancode == SDL_SCANCODE_F8) key_replay_ = true;
+                  if (e->key.scancode == SDL_SCANCODE_F8
+#ifdef GTAV_DESKTOP_WORKSHOP
+                      && (!sandbox::Active() || (e->key.mod & SDL_KMOD_SHIFT))
+#endif
+                  ) key_replay_ = true;
                   if (e->key.scancode == SDL_SCANCODE_F9) key_dump_ = true;
                   if (e->key.scancode == SDL_SCANCODE_F10) key_shot_ = true;
                   if (e->key.scancode == SDL_SCANCODE_F11) CycleDiagMode();
@@ -877,15 +903,15 @@ class Renderer {
     flick_hist_notes_[flick_hist_n_ - 1] = std::move(flick_notes_[slot]);
   }
 
-  // F8 (--gtav_native_replay): the last kReplayFrames presented frames, written on a worker
+  // Replay dump (Campaign F8 / Workshop Shift+F8): the last kReplayFrames, written on a worker
   // thread to logs/replay/<frame>/ as PPM with each frame's counters in frames.txt.
   void WriteReplay(uint64_t now) {
     if (!REXCVAR_GET(gtav_native_replay)) {
-      REXLOG_INFO("[native] F8: replay is off (--gtav_native_replay=true)");
+      REXLOG_INFO("[native] replay is off (--gtav_native_replay=true)");
       return;
     }
     std::string dir = fmt::format("{}/{:06}", LogPath("replay"), now);
-    REXLOG_INFO("[native] F8: writing the last {} frames to {}", replay_.size(), dir);
+    REXLOG_INFO("[native] replay: writing the last {} frames to {}", replay_.size(), dir);
     std::thread([frames = std::move(replay_), dir] {
       std::error_code ec;
       std::filesystem::create_directories(dir, ec);
@@ -1519,7 +1545,7 @@ class Renderer {
   }
 
   static inline std::atomic<bool> key_dump_{false}, key_shot_{false};  // F9 / F10 (window thread)
-  static inline std::atomic<bool> key_replay_{false};                   // F8
+  static inline std::atomic<bool> key_replay_{false};                   // F8 / Shift+F8
   std::string readback_restore_;  // readback_resolve to restore after a shadow-mode F9 dump
   uint64_t readback_restore_at_ = 0;
   uint64_t native_dump_at_ = 0;  // guest frame to dump (F9; delayed in shadow mode)

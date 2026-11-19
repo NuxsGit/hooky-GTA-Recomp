@@ -15,6 +15,13 @@ contact Rockstar. They currently use the original GTA free-roam world, including
 screens and prologue when there is no free-roam save yet. Play through those screens on the sandbox
 profile first. The Workshop does not skip the prologue, import saves, or interrupt missions.
 
+## Build overlay and AdminOS
+
+In Workshop free roam, **F8** opens the permission-gated Creative Build overlay; **P / Up** opens
+the phone. Use **F6** for the original checkpoint editor and private sessions. See the
+[Build, phone, controls, and runtime limits](WORKSHOP_CREATIVE.md) for the new tools. They are
+local to the host copy of the game; the private v2 room does not replicate them.
+
 ## Building a layout and playing
 
 1. In free roam, press **F6 → Map builder**. Use the keyboard and mouse for the editor. Type a
@@ -33,7 +40,7 @@ profile first. The Workshop does not skip the prologue, import saves, or interru
    joining PCs to drive. For a race, visit the points in order; for a hunt, visit them in any order
    (the yellow marker points to the nearest unvisited one). Approach a point within 6 m to collect
    it. A round ends once every racer completes it or after 20 minutes. See times in **Results**.
-6. In **Test drive**, choose a stock vehicle and spawn it nearby from free roam while on foot.
+6. With Creative build access, **Test drive** spawns a stock vehicle nearby from free roam while on foot.
    Model streaming is time-limited, and only your local test vehicle is driveable.
 
 The host owns the layout and controls the minigame. The layout is shared in the room; a guest's
@@ -84,7 +91,7 @@ No discovery, relay, updates, accounts, or asset transfers use this protocol.
 - To turn off live props and ghosts if streaming causes trouble, pass `--gtav_workshop_scene=false`
   after the launcher's `--` separator. Checkpoints, map markers, layouts and test vehicles remain.
 - **F1** settings and **F2** debug still work (**Fn+F2** on media-key keyboards). Story cheat actions
-  are disabled in private multiplayer. Intentional mission-failure slow motion is unchanged.
+  are Campaign-only. Intentional mission-failure slow motion is unchanged.
 
 ## Verification
 
@@ -96,7 +103,8 @@ ctest --test-dir build-launcher --output-on-failure
 
 The asset-free `sandbox_loopback` test covers both minigames, old/new layout files, bounds, scene
 selection by distance and pose freshness, and TCP rooms with multiple clients, capacity, refused
-edits, bad invites, disconnect and restart. The Linux launcher fixture checks the startup flag and
+edits, bad invites, disconnect and restart. The `workshop_core` suite tests the authoritative
+core, deferred effects and JSON on a fake game. The Linux launcher fixture checks the startup flag and
 its explicit campaign override. The Windows packaging smoke checks verified ZIP application,
 helper handoff, dashboard relaunch and preservation of player data. It separately starts the
 packaged host with a temporary no-game DLL to verify the actual selector and Solo default. Neither

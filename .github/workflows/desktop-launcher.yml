@@ -6,6 +6,10 @@ on:
     paths:
       - 'loader/**'
       - 'gtav/src/frontend/modes.h'
+      - 'gtav/src/core/**'
+      - 'gtav/src/sandbox/**'
+      - 'gtav/src/utils/ConfigStorage.*'
+      - 'gtav/WorkshopCore.cmake'
       - '.github/workflows/desktop-launcher.yml'
   workflow_dispatch:
 
@@ -25,8 +29,19 @@ jobs:
         with:
           persist-credentials: false
       - name: Build the launcher and local fixtures
+        shell: bash
         run: |
-          cmake -S loader -B build/desktop-launcher -DCMAKE_BUILD_TYPE=Release -DGTAV_LAUNCHER_TESTS=ON
-          cmake --build build/desktop-launcher --parallel 4
+          log="$RUNNER_TEMP/desktop-launcher-build.log"
+          if ! { cmake -S loader -B build/desktop-launcher -DCMAKE_BUILD_TYPE=Release -DGTAV_LAUNCHER_TESTS=ON &&
+                 cmake --build build/desktop-launcher --parallel 4; } 2>&1 | tee "$log"; then
+            details=$(grep -E 'CMake Error|error:|FAILED:|Undefined symbols|^ld:' "$log" | head -12 || true)
+            if [[ -z "$details" ]]; then details=$(tail -8 "$log"); fi
+            details=${details:0:4500}
+            details=${details//%/%25}
+            details=${details//$'\n'/%0A}
+            details=${details//$'\r'/%0D}
+            printf '::error title=Desktop launcher build::%s\n' "$details"
+            exit 1
+          fi
       - name: Run storage, update policy and Workshop checks without retail data
         run: ctest --test-dir build/desktop-launcher --output-on-failure

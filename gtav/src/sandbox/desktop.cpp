@@ -1,4 +1,5 @@
 #include "desktop.h"
+#include "CreativeRuntime.h"
 
 #include "courses.h"
 #include "../frontend/play_hub.h"
@@ -51,7 +52,7 @@ Guest GuestState() {
 const char* GuestLabel() {
   switch (GuestState()) {
     case Guest::Loading: return "Waiting for the TU27 world. Load a sandbox save and enter free roam.";
-    case Guest::Ready: return "Free roam ready. F6 toggles the Workshop.";
+    case Guest::Ready: return "Free roam ready. F6: Workshop | F8: Creative Build | P / Up: phone.";
     case Guest::Busy: return "Waiting for free roam (not during a cutscene, mission or pause).";
     default: return "TU27 native context unavailable. Local vehicles and map markers are disabled.";
   }
@@ -89,7 +90,7 @@ void EditCourse(const SessionView& view, const Player* local) {
         "Edit rejected. Check the layout name and the 15 m spacing rule.";
   };
   const bool at_player = local && local->pose && GuestState() == Guest::Ready;
-  ImGui::BeginDisabled(racing);
+  ImGui::BeginDisabled(racing || !workshop::BuildAllowed());
   ImGui::InputText("Layout name", name, sizeof(name));
   int game = int(world.course.game);
   if (ImGui::Combo("Minigame", &game, kGameNames, int(std::size(kGameNames))))
@@ -129,6 +130,7 @@ void EditCourse(const SessionView& view, const Player* local) {
   if (ImGui::Button("Clear layout"))
     edit([](Course& c) { c.props.clear(); c.points.clear(); }, "Layout cleared (saved files unchanged).");
   ImGui::EndDisabled();
+  if (!workshop::BuildAllowed()) ImGui::TextDisabled("Creative build permission and free roam are required to edit.");
   ImGui::Separator();
   if (!racing) {
     if (ImGui::Button("Start minigame")) {
@@ -216,13 +218,17 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
   paths.user_data_root = workspace->profile_root;
   installed_content_root = workspace->common_content_root;
   courses = workspace->course_root;
+  workshop::Start(workspace->profile_root, chosen == Mode::Solo, {
+      [](std::string_view line) { REXLOG_INFO("{}", line); },
+      [](uint8_t failed) { REXLOG_WARN("[workshop] could not write config documents (mask {})", unsigned(failed)); },
+  });
   mode.store(chosen, std::memory_order_relaxed);
   native::menu::OpenWorkshop();
   REXLOG_INFO("[workshop] {} mode. Story saves are not mounted.", chosen == Mode::Solo ? "solo" : "multiplayer");
   return true;
 }
 
-void Shutdown() { if (Active()) Party().Stop(); }
+void Shutdown() { if (Active()) { workshop::Stop(); Party().Stop(); } }
 void ReportGuest(Guest state) {
   guest_at.store(NowMs(), std::memory_order_relaxed);
   guest.store(state);
@@ -260,7 +266,7 @@ void DrawWorkshop() {
   if (ImGui::BeginTabItem("Test drive")) {
     static int selection = 0;
     ImGui::Combo("Vehicle", &selection, kVehicleNames.data(), int(kVehicleNames.size()));
-    ImGui::BeginDisabled(GuestState() != Guest::Ready);
+    ImGui::BeginDisabled(GuestState() != Guest::Ready || !workshop::BuildAllowed());
     if (ImGui::Button("Spawn nearby (on foot)")) {
       std::lock_guard lock(vehicle_mutex);
       vehicle_request = VehicleRequest{unsigned(selection), NowMs() + 2'000};
@@ -303,7 +309,7 @@ void DrawHud() {
     else if (world.race == Race::Running || world.race == Race::Finished)
       ImGui::Text("%s | %u/%zu | %.2f s%s", world.course.name.c_str(), local->Passed(), world.course.points.size(),
                   (local->finish_ms ? local->finish_ms : world.clock_ms) / 1000.0, local->finish_ms ? "  FINISHED" : "");
-    else ImGui::Text("%s | %zu player%s  [F6]", CurrentMode() == Mode::Solo ? "SANDBOX" : LinkLabel(view.link),
+    else ImGui::Text("%s | %zu player%s  [F6] [F8] [P]", CurrentMode() == Mode::Solo ? "SANDBOX" : LinkLabel(view.link),
                      world.players.size(), world.players.size() == 1 ? "" : "s");
     if (world.race == Race::Running && local->pose) {
       if (auto next = NextCheckpoint(world.course, *local)) {

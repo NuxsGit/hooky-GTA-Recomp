@@ -260,8 +260,17 @@ void VerifyHostSelector(const fs::path& root) {
     WaitExit(process.handle.Get(), 10'000, have_partitions ? 1 : 0);
     CHECK(fs::is_directory(workspace / "profile") == have_partitions);
     CHECK(fs::is_directory(workspace / "courses") == have_partitions);
+    const auto config = workspace / "profile/config";
+    CHECK(fs::is_directory(config) == have_partitions);
+    CHECK(!fs::exists(root / "data/user/config"));
+    if (have_partitions) {
+      for (const auto* name : {"permissions.json", "bans.json", "build_favorites.json", "presets.json"}) {
+        CHECK(Text(config / name).find("\"version\": 1") != std::string::npos);
+        CHECK(!fs::exists(config / (std::string(name) + ".new")));
+      }
+    }
   }
-  std::cout << "Packaged host rendered the mode hub, blocked campaign co-op and routed Sandbox without running the title\n";
+  std::cout << "Packaged host rendered the mode hub, blocked campaign co-op and flushed the isolated Workshop profile without running the title\n";
 }
 }  // namespace
 

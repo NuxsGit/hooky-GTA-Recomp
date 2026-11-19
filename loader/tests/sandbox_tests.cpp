@@ -273,6 +273,10 @@ void Loopback() {
   CHECK(client.Join("127.0.0.1", listening.port, "Friend", listening.invite));
   CHECK(Until([&] { return client.View().link == Link::Joined; }));
   CHECK(!client.SetCourse({"Cannot edit host map", {}}) && !client.StartRace());
+#ifdef __linux__
+  CHECK(Until([&] { return client.View().rtt_ms.has_value(); }));
+  CHECK(*client.View().rtt_ms < 1000);
+#endif
   const auto id = client.View().world.self;
   CHECK(id > 1 && client.View().world.course == kTrack);
   CHECK(friend2.Join("127.0.0.1", listening.port, "Friend Two", listening.invite));

@@ -3,6 +3,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #include <bcrypt.h>
 #else
 #include <arpa/inet.h>
@@ -17,6 +18,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <utility>
 
 namespace gtav::sandbox {
@@ -94,6 +96,31 @@ bool Nonblocking(Sock socket) {
 void LowLatency(Sock socket) {
   const int on = 1;
   setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&on), sizeof(on));
+}
+
+std::optional<uint32_t> MeasureRtt(Sock sock) {
+#if defined(_WIN32) && defined(NTDDI_WIN10_RS2) && NTDDI_VERSION >= NTDDI_WIN10_RS2
+  TCP_INFO_v0 info{};
+  ULONG version = 0;
+  DWORD bytes = 0;
+  if (WSAIoctl(sock, SIO_TCP_INFO, &version, sizeof(version), &info, sizeof(info), &bytes, nullptr, nullptr) == 0 &&
+      bytes >= offsetof(TCP_INFO_v0, RttUs) + sizeof(info.RttUs) && info.RttUs)
+    return uint32_t((uint64_t(info.RttUs) + 500) / 1000);
+#elif defined(__linux__) && defined(TCP_INFO)
+  tcp_info info{};
+  SockLen bytes = sizeof(info);
+  if (getsockopt(sock, IPPROTO_TCP, TCP_INFO, &info, &bytes) == 0 &&
+      bytes >= offsetof(tcp_info, tcpi_rtt) + sizeof(info.tcpi_rtt) && info.tcpi_rtt)
+    return uint32_t((uint64_t(info.tcpi_rtt) + 500) / 1000);
+#elif defined(__APPLE__) && defined(TCP_CONNECTION_INFO)
+  tcp_connection_info info{};
+  SockLen bytes = sizeof(info);
+  if (getsockopt(sock, IPPROTO_TCP, TCP_CONNECTION_INFO, &info, &bytes) == 0 &&
+      bytes >= offsetof(tcp_connection_info, tcpi_srtt) + sizeof(info.tcpi_srtt)) return info.tcpi_srtt;
+#else
+  (void)sock;
+#endif
+  return std::nullopt;
 }
 
 void Pause() { std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
@@ -247,6 +274,7 @@ void Session::StopLocked() {
   invite_.clear();
   error_.clear();
   remote_ = {};
+  rtt_ms_.reset();
   last_snapshot_ms_ = 0;
   ResetRoom("Player");
 }
@@ -258,8 +286,14 @@ void Session::Fail(std::string error) {
   invite_.clear();
   error_ = std::move(error);
   remote_ = {};
+  rtt_ms_.reset();
   last_snapshot_ms_ = 0;
   ResetRoom("Player");
+}
+
+Link Session::LinkState() const {
+  std::lock_guard lock(mutex_);
+  return link_;
 }
 
 SessionView Session::View() const {
@@ -269,7 +303,7 @@ SessionView Session::View() const {
   auto world = remote_;
   if (now - last_snapshot_ms_ > kPoseLifetimeMs)
     for (auto& p : world.players) p.pose.reset();
-  return {link_, port_, {}, error_, std::move(world)};
+  return {link_, port_, {}, error_, std::move(world), rtt_ms_};
 }
 
 void Session::Publish(std::optional<Presence> point) {
@@ -412,7 +446,7 @@ void Session::RunClient(std::stop_token stop, std::string ipv4, uint16_t port, s
   Pipe pipe(std::move(connection), begin);
   pipe.Queue(wire::Hello(invite, name), begin);
   uint32_t self = 0;
-  int64_t update_at = 0;
+  int64_t update_at = 0, rtt_at = 0;
   while (!stop.stop_requested()) {
     const auto now = NowMs();
     if ((!self && now - begin >= kHandshakeMs) || !pipe.Read(now, [&](const wire::Frame& frame) {
@@ -428,6 +462,12 @@ void Session::RunClient(std::stop_token stop, std::string ipv4, uint16_t port, s
       if (!stop.stop_requested()) Fail(self ? "Disconnected from the host." :
           "The host did not accept this connection. Check invite, room capacity and game version.");
       return;
+    }
+    if (self && now >= rtt_at) {
+      rtt_at = now + 1000;
+      const auto rtt = MeasureRtt(pipe.socket.Get());
+      std::lock_guard lock(mutex_);
+      rtt_ms_ = rtt;
     }
     if (self && now >= update_at && pipe.outgoing.empty()) {
       update_at = now + kUpdateMs;

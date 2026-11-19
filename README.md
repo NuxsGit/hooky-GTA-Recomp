@@ -162,7 +162,9 @@ The desktop **Play** hub has illustrated cards for **Campaign solo**, **Sandbox 
 **Private session** (Sandbox multiplayer). **Campaign co-op** is visible but unavailable:
 story missions and progress are not synchronized. Select a mode with mouse, keyboard or D-pad;
 Enter/A confirms and Esc/B closes. The two sandbox modes have a separate local profile. Press
-**F6** in free roam to build and save layouts, run minigames, or host/join a private session.
+**F6** in free roam to save checkpoint layouts, run minigames, or host/join a private session.
+Try the [Creative Build overlay (F8) and AdminOS phone (P / Up)](docs/WORKSHOP_CREATIVE.md)
+for local construction and Solo practice moderation.
 In a private room (IPv4, TCP port, invite code), friends see nearby ghost actors. This is not
 GTA Online or full world synchronization.
 See [Workshop setup, limitations, and testing](docs/SANDBOX.md).
@@ -203,7 +205,7 @@ On Windows, **Display** offers 1080p, 1440p, 4K and borderless desktop output, a
 render scale, and optional AMD FSR 1. See [Windows graphics settings](docs/WINDOWS_GRAPHICS.md).
 
 **Desktop debug overlay (native renderer).** Press **F2** (**Fn + F2** if required by your keyboard)
-for live logs and the experimental **Story tools** tab. In offline free roam, explicitly enable the
+for live logs and the experimental **Story tools** tab. In Campaign free roam, explicitly enable the
 actions to give a pistol with ammo, teleport a short distance, fly or use freecam. F2 or Esc closes
 the panel and releases its controls. Use a spare save. See [debug controls and validation](docs/DEBUG_AND_UPDATES.md).
 

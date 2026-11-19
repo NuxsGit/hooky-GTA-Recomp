@@ -19,7 +19,12 @@ void ToggleDebug();  // F2 (Fn + F2 on media-key keyboards)
 void OpenWorkshop();  // startup, before the native window appears
 bool ToggleWorkshop();  // F6, sandbox modes only
 bool WorkshopOpen();
-void OnText(uint32_t ascii);
+bool ToggleBuild();  // F8 on Workshop desktop, consumes the shortcut even when Build is denied
+bool OpenPhone();  // P / Up only when no other overlay is handling input
+void CloseCreative();  // focus lost: cancel placement and relinquish cursor
+bool TextPanel();
+void OnText(uint32_t codepoint);
+void OnText16(uint32_t codeunit);
 #endif
 void Close();
 bool IsOpen();
@@ -28,7 +33,7 @@ void OnMouseButton(int button, bool down);
 void OnMouseWheel(float dy);
 enum class Key {
   kUp, kDown, kLeft, kRight, kEnter, kSpace, kTab,
-  kBackspace, kDelete, kHome, kEnd, kCtrl, kShift, kSuper, kA, kC, kV, kX
+  kBackspace, kDelete, kHome, kEnd, kCtrl, kShift, kSuper, kA, kC, kV, kX, kY, kZ
 };
 void OnKey(Key key, bool down);
 

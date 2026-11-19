@@ -14,6 +14,7 @@ struct SessionView {
   std::string invite;
   std::string error;
   World world;
+  std::optional<uint32_t> rtt_ms{};  // kernel TCP estimate, not a v2 packet field
   bool Owner() const { return link == Link::Idle || link == Link::Hosting || link == Link::Failed; }
 };
 
@@ -31,6 +32,7 @@ class Session {
   bool Join(std::string ipv4, uint16_t port, std::string name, std::string_view invite);
   void Stop();
   SessionView View() const;
+  Link LinkState() const;
   void Publish(std::optional<Presence> point);
   bool SetCourse(Course course);
   bool StartRace();
@@ -53,6 +55,7 @@ class Session {
   Room room_{"Player"};
   World remote_;
   std::optional<Presence> local_pose_;
+  std::optional<uint32_t> rtt_ms_;
   int64_t last_pose_ms_ = 0, last_snapshot_ms_ = 0;
   std::jthread worker_;  // joined before the fields a worker uses are destroyed
 };

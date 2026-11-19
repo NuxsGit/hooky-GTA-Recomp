@@ -1,6 +1,9 @@
 #include "input.h"
 
 #include "../debug_tools.h"
+#ifdef GTAV_DESKTOP_WORKSHOP
+#include "../sandbox/CreativeRuntime.h"
+#endif
 
 #include "menu.h"
 #include "paths.h"
@@ -11,6 +14,7 @@
 #include <rex/logging.h>
 #include <rex/ui/sdl_virtual_key.h>
 
+#include <algorithm>
 #include <atomic>
 #include <bitset>
 #include <cstdint>
@@ -18,6 +22,7 @@
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -83,6 +88,9 @@ void Focus(bool value) {
     state.reset_motion = true;
   }
   if (!value && debug::PanelControls().Open()) debug::PanelControls().Reset();
+#ifdef GTAV_DESKTOP_WORKSHOP
+  if (!value) { workshop::ResetInput(); menu::CloseCreative(); }
+#endif
 }
 
 void DebugKey(VirtualKey key, bool down) {
@@ -105,6 +113,25 @@ void DebugKey(VirtualKey key, bool down) {
 }
 
 void Key(VirtualKey key, bool down) {
+#ifdef GTAV_DESKTOP_WORKSHOP
+  using V = VirtualKey;
+  unsigned flight = 6;
+  switch (key) {
+    case V::kW: flight = 0; break;
+    case V::kS: flight = 1; break;
+    case V::kA: flight = 2; break;
+    case V::kD: flight = 3; break;
+    case V::kSpace: flight = 4; break;
+    case V::kControl: case V::kLControl: case V::kRControl: flight = 5; break;
+    default: break;
+  }
+  if (flight < 6 && (!down || HasMenuFocus()) && workshop::FlightKey(flight, down)) {
+    // Don't send the original sprint/jump/duck bindings while these keys steer flight.
+    std::lock_guard lock(state_mutex);
+    state.keys[unsigned(key)] = false;
+    return;
+  }
+#endif
   const auto code = static_cast<uint32_t>(key);
   if (!code || code >= std::size(state.keys)) return;
   std::lock_guard lock(state_mutex);
@@ -174,7 +201,13 @@ bool GamepadEvent(const SDL_Event& event) {
   held[button] = down;
   const bool toggle = focused_menu && combo && down && held[SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER] &&
                       held[SDL_GAMEPAD_BUTTON_BACK];
-  if (toggle) {
+  bool phone = false;
+#ifdef GTAV_DESKTOP_WORKSHOP
+  if (focused_menu && !was_open && down && button == SDL_GAMEPAD_BUTTON_DPAD_UP) phone = menu::OpenPhone();
+#endif
+  if (phone) {
+    // Consume D-pad Up before GTA's stock phone sees it.
+  } else if (toggle) {
     menu::Toggle();
   } else if (focused_menu && button == SDL_GAMEPAD_BUTTON_EAST && was_open && down) {
     menu::Close();
@@ -182,7 +215,7 @@ bool GamepadEvent(const SDL_Event& event) {
     menu::OnKey(*key, down);
   }
   if (held.none()) pads.erase(it);
-  return down && (was_open || toggle);
+  return down && (was_open || toggle || phone);
 }
 
 #ifdef _WIN32
@@ -272,9 +305,12 @@ float MenuPixelDensity(SDL_WindowID id) {
   return 1.0f;
 }
 
-void Keyboard(SDL_Scancode scan, bool down, bool repeat) {
+void Keyboard(const SDL_KeyboardEvent& key) {
+  const auto [scan, down, repeat] = std::tuple(key.scancode, key.down, key.repeat);
 #ifdef GTAV_DESKTOP_WORKSHOP
   if (scan == SDL_SCANCODE_F6 && down && !repeat && menu::ToggleWorkshop()) return;
+  if (scan == SDL_SCANCODE_F8 && down && !repeat && !(key.mod & SDL_KMOD_SHIFT) && menu::ToggleBuild()) return;
+  if ((key.key == SDLK_P || scan == SDL_SCANCODE_UP) && down && !repeat && menu::OpenPhone()) return;
 #endif
   if (scan == SDL_SCANCODE_F1 || scan == SDL_SCANCODE_AC_BACK || (kDesktop && scan == SDL_SCANCODE_F2)) {
     if (down && !repeat) {
@@ -285,8 +321,18 @@ void Keyboard(SDL_Scancode scan, bool down, bool repeat) {
   }
   if (menu::IsOpen()) {
 #ifdef GTAV_DESKTOP_WORKSHOP
-    if (menu::WorkshopOpen()) {
+    if (menu::TextPanel()) {
+      // Undo uses the logical Z/Y on AZERTY, not the US physical positions.
       using K = menu::Key;
+      switch (key.key) {
+        case SDLK_A: menu::OnKey(K::kA, down); break;
+        case SDLK_C: menu::OnKey(K::kC, down); break;
+        case SDLK_V: menu::OnKey(K::kV, down); break;
+        case SDLK_X: menu::OnKey(K::kX, down); break;
+        case SDLK_Y: menu::OnKey(K::kY, down); break;
+        case SDLK_Z: menu::OnKey(K::kZ, down); break;
+        default: break;
+      }
       switch (scan) {
         case SDL_SCANCODE_BACKSPACE: menu::OnKey(K::kBackspace, down); break;
         case SDL_SCANCODE_DELETE: menu::OnKey(K::kDelete, down); break;
@@ -295,10 +341,6 @@ void Keyboard(SDL_Scancode scan, bool down, bool repeat) {
         case SDL_SCANCODE_LCTRL: case SDL_SCANCODE_RCTRL: menu::OnKey(K::kCtrl, down); break;
         case SDL_SCANCODE_LSHIFT: case SDL_SCANCODE_RSHIFT: menu::OnKey(K::kShift, down); break;
         case SDL_SCANCODE_LGUI: case SDL_SCANCODE_RGUI: menu::OnKey(K::kSuper, down); break;
-        case SDL_SCANCODE_A: menu::OnKey(K::kA, down); break;
-        case SDL_SCANCODE_C: menu::OnKey(K::kC, down); break;
-        case SDL_SCANCODE_V: menu::OnKey(K::kV, down); break;
-        case SDL_SCANCODE_X: menu::OnKey(K::kX, down); break;
         default: break;
       }
     }
@@ -339,12 +381,15 @@ bool SDLCALL WindowEvent(void*, SDL_Event* event) {
     case SDL_EVENT_KEY_UP:
       if (event->key.windowID == id ||
           (!kDesktop && event->key.windowID == 0 && event->key.scancode == SDL_SCANCODE_AC_BACK))
-        Keyboard(event->key.scancode, event->key.down, event->key.repeat);
+        Keyboard(event->key);
       break;
 #ifdef GTAV_DESKTOP_WORKSHOP
     case SDL_EVENT_TEXT_INPUT:
-      if (event->text.windowID == id && event->text.text && menu::WorkshopOpen())
-        for (const auto* c = event->text.text; *c; ++c) menu::OnText(uint8_t(*c));
+      if (event->text.windowID == id && event->text.text && menu::TextPanel()) {
+        const char* text = event->text.text;
+        size_t bytes = std::min(std::char_traits<char>::length(text), size_t(512));
+        while (bytes) menu::OnText(SDL_StepUTF8(&text, &bytes));
+      }
       break;
 #endif
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -451,6 +496,9 @@ void Reset() {
   std::lock_guard lock(state_mutex);
   state = {};
   state.reset_motion = true;
+#ifdef GTAV_DESKTOP_WORKSHOP
+  workshop::ResetInput();
+#endif
 }
 
 void Shutdown() {
@@ -587,7 +635,7 @@ void UpdateMouseCapture() {
   const bool capture_changed = capture_requested.exchange(wanted) != wanted;
 #ifdef GTAV_DESKTOP_WORKSHOP
   static std::atomic<bool> text_requested{false};
-  const bool text_wanted = sdl_focused && menu::WorkshopOpen();
+  const bool text_wanted = sdl_focused && menu::TextPanel();
   const bool text_changed = text_requested.exchange(text_wanted) != text_wanted;
 #else
   constexpr bool text_changed = false;
@@ -598,7 +646,7 @@ void UpdateMouseCapture() {
         capture_queued = false;
         if (auto* window = SDL_GetWindowFromID(window_id.load())) {
 #ifdef GTAV_DESKTOP_WORKSHOP
-          const bool text = menu::WorkshopOpen() && SDL_GetKeyboardFocus() == window;
+          const bool text = menu::TextPanel() && SDL_GetKeyboardFocus() == window;
           if (text && !SDL_TextInputActive(window)) SDL_StartTextInput(window);
           else if (!text && SDL_TextInputActive(window)) SDL_StopTextInput(window);
 #endif

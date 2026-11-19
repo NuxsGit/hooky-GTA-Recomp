@@ -4,7 +4,17 @@
 #include "debug_tools.h"
 
 #include "frame_pacing.h"
+#include "native/tu27_call.h"
 #include "sandbox/desktop.h"
+
+#ifdef GTAV_DESKTOP_WORKSHOP
+#include "native/capture.h"
+#include "sandbox/CreativeRuntime.h"
+#include "sandbox/Tu27Workshop.h"
+#include <rex/cvar.h>
+REXCVAR_DEFINE_BOOL(gtav_workshop_extended_tu27, false, "GTAV",
+    "Workshop: enable experimental TU27 output-pointer and string natives (ground/waypoint/weather/max ammo) and Noclip");
+#endif
 
 #include <imgui.h>
 #include <rex/hook.h>
@@ -41,19 +51,10 @@ int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
 }
 
-bool Readable(rex::memory::Memory& memory, uint32_t address, uint32_t size, bool write = false) {
-  if (address < 0x10000 || address % 4 || size > UINT32_MAX - address) return false;
-  auto* heap = memory.LookupHeap(address);
-  if (!heap || heap != memory.LookupHeap(address + size - 1)) return false;
-  using Access = rex::memory::PageAccess;
-  const auto access = heap->QueryRangeAccess(address, address + size - 1);
-  return access == Access::kReadWrite || access == Access::kExecuteReadWrite ||
-         (!write && (access == Access::kReadOnly || access == Access::kExecuteReadOnly));
-}
-
-uint32_t Load(rex::memory::Memory& memory, uint32_t addr) {
-  return rex::memory::load_and_swap<uint32_t>(memory.TranslateVirtual(addr));
-}
+using tu27::Load;
+using tu27::NativeCall;
+using tu27::Readable;
+using tu27::Vec;
 
 // Inspect a real, live call before attempting any synthetic native invocation. No guessed
 // host pointers, arbitrary guest reads, or changes to the caller's native context.
@@ -91,91 +92,6 @@ enum Native : uint32_t {
   kBlockPed = 0x82D1CD70, kCreatePed = 0x82CE60F0, kCreateObject = 0x82D1E4B0,
   kLockDoors = 0x82D4E510,
 #endif
-};
-
-struct Vec {
-  float x, y, z;
-  bool Valid(float bound) const {
-    return std::abs(x) <= bound && std::abs(y) <= bound && std::abs(z) <= bound;
-  }
-};
-
-// A separate PPCContext and bounded stack scratch keep the real VM call's arguments, return
-// values and registers intact. Run on the bound guest script thread, not the overlay thread.
-class NativeCall {
- public:
-  NativeCall(PPCContext& context, uint8_t* base, rex::memory::Memory& memory,
-             rex::runtime::FunctionDispatcher& dispatcher)
-      : context_(context), base_(base), memory_(memory), dispatcher_(dispatcher), sp_(context.r1.u32) {}
-
-  bool SafeStack() const { return sp_ > 0x800 && Readable(memory_, sp_ - 0x800, 0x800, true); }
-  bool Supports(std::initializer_list<Native> natives) const {
-    return std::all_of(natives.begin(), natives.end(), [this](Native n) { return dispatcher_.GetFunction(n) != nullptr; });
-  }
-
-  bool Invoke(Native native, std::initializer_list<uint32_t> args = {}, PPCFunc* original = nullptr,
-              std::optional<uint32_t> reference = std::nullopt) {
-    if (!ok_) return false;
-    auto* fn = original ? original : dispatcher_.GetFunction(native);
-    if (!fn || args.size() > 16 || (reference && args.size())) { ok_ = false; return false; }
-    const uint32_t call = sp_ - 0x100;
-    result_ = call + 0x10;
-    const uint32_t arguments = call + 0x30;
-    memory_.Zero(call, 0x100);
-    Store(call, result_);
-    Store(call + 4, static_cast<uint32_t>(args.size()));
-    Store(call + 8, arguments);
-    for (uint32_t i = 0; i < 4; ++i) Store(result_ + i * 4, kUnset);
-    uint32_t offset = arguments;
-    for (const auto value : args) { Store(offset, value); offset += 4; }
-    if (reference) {
-      // Pointer natives such as REMOVE_BLIP and DELETE_VEHICLE may zero the caller's handle.
-      // Give them a writable guest word in scratch, never a host pointer or real VM slot.
-      Store(call + 0x20, *reference);
-      Store(arguments, call + 0x20);
-      Store(call + 4, 1);
-    }
-    PPCContext side = context_;
-    side.r1.u32 -= 0x200;  // linkage/argument-save area below the native-call scratch
-    side.r3.u64 = call;
-    fn(side, base_);
-    if (Load(memory_, result_ + 12) != kUnset) ok_ = false;
-    return ok_;
-  }
-
-  uint32_t Read(Native native, std::initializer_list<uint32_t> args = {}) {
-    if (!Invoke(native, args)) return 0;
-    const auto value = Result();
-    if (value == kUnset) ok_ = false;
-    return value;
-  }
-  bool Flag(Native native, std::initializer_list<uint32_t> args = {}) {
-    const uint32_t value = Read(native, args);
-    if (value > 1) ok_ = false;
-    return value != 0;
-  }
-  float Float(Native native, std::initializer_list<uint32_t> args = {}) { return std::bit_cast<float>(Read(native, args)); }
-  Vec Vector(Native native, std::initializer_list<uint32_t> args = {}) {
-    if (!Invoke(native, args)) return {};
-    return {std::bit_cast<float>(Result(0)), std::bit_cast<float>(Result(1)), std::bit_cast<float>(Result(2))};
-  }
-  uint32_t Result(unsigned i = 0) const { return Load(memory_, result_ + 4 * i); }
-  bool Okay() const { return ok_; }
-  NativeCall CleanupCall() const {
-    return NativeCall(context_, base_, memory_, dispatcher_);
-  }
-
- private:
-  static constexpr uint32_t kUnset = 0x7fc00000;  // unmodified vector slots are not finite
-  void Store(uint32_t addr, uint32_t value) {
-    rex::memory::store_and_swap<uint32_t>(memory_.TranslateVirtual(addr), value);
-  }
-  PPCContext& context_;
-  uint8_t* base_;
-  rex::memory::Memory& memory_;
-  rex::runtime::FunctionDispatcher& dispatcher_;
-  uint32_t sp_, result_ = 0;
-  bool ok_ = true;
 };
 
 constexpr uint32_t HashName(const char* name) {
@@ -603,8 +519,7 @@ struct WorkshopWorld {
     }
   }
 
-  void Tick(NativeCall& call, int64_t now) {
-    const auto ped = PlayablePed(call);
+  void Tick(NativeCall& call, uint32_t ped, int64_t now, bool creative_holds_model) {
     auto pose_call = call.CleanupCall();
     std::optional<sandbox::Presence> pose;
     Vec coords{};
@@ -633,10 +548,10 @@ struct WorkshopWorld {
     auto map_call = call.CleanupCall();
     Markers(map_call, world, pose.has_value());
     auto vehicle_call = call.CleanupCall();
-    Vehicles(vehicle_call, pose ? ped : 0, coords, now);
+    if (!creative_holds_model) Vehicles(vehicle_call, pose && workshop::BuildAllowed() ? ped : 0, coords, now);
     auto scene_call = call.CleanupCall();
     scene.Update(scene_call, sandbox::SceneTargets(world, sandbox::SceneEnabled() ? pose : std::nullopt),
-                 now, !requested_model);
+                 now, !requested_model && !creative_holds_model);
   }
 };
 #endif
@@ -657,13 +572,17 @@ void GuestTick(PPCContext& ctx, uint8_t* base, rex::runtime::ThreadState& thread
   last_script_ms = now;
   last_game_timer = timer;
 #ifdef GTAV_DESKTOP_WORKSHOP
-  static WorkshopWorld workshop;
-  static int64_t next_workshop = 0;
+  static WorkshopWorld legacy;
+  static workshop::FlightState flight;
+  static uint64_t last_frame = UINT64_MAX;
+  static int64_t next_workshop = 0, last_creative = 0;
   const bool workshop_active = sandbox::Active();
   const bool workshop_tick = workshop_active && now >= next_workshop;
-  const bool allow_cheats = sandbox::CurrentMode() != sandbox::Mode::Multiplayer;
+  const uint64_t frame = native::GuestFrame();
+  const bool creative_tick = workshop_active && (workshop_tick || (frame != last_frame && workshop::WantsFrame()));
+  const bool allow_cheats = !workshop_active;
 #else
-  constexpr bool workshop_active = false, workshop_tick = false, allow_cheats = true;
+  constexpr bool workshop_active = false, creative_tick = false, allow_cheats = true;
 #endif
   const bool cheat_tick = ((allow_cheats && controls.Armed()) || cheats.Active()) && now - cheats.last_tick >= 16;
   if (!workshop_active && !controls.Armed() && !cheats.Active()) {
@@ -671,7 +590,7 @@ void GuestTick(PPCContext& ctx, uint8_t* base, rex::runtime::ThreadState& thread
     if (!failed) status = Status::Ready;
     return;
   }
-  if (failed || (!cheat_tick && !workshop_tick)) return;
+  if (failed || (!cheat_tick && !creative_tick)) return;
   const auto id = thread.thread_id();
   if (!id || (script_thread && script_thread != id)) return;
   auto* kernel = rex::system::kernel_state();
@@ -711,10 +630,20 @@ void GuestTick(PPCContext& ctx, uint8_t* base, rex::runtime::ThreadState& thread
     mode_running = cheats.Active();
   }
 #ifdef GTAV_DESKTOP_WORKSHOP
-  if (workshop_tick) {
-    next_workshop = now + 100;
+  if (creative_tick) {
     auto workshop_call = call.CleanupCall();
-    workshop.Tick(workshop_call, now);
+    const auto ped = PlayablePed(workshop_call);
+    workshop::Tu27Workshop game(workshop_call, {ped, workshop::Kind::Ped}, REXCVAR_GET(gtav_workshop_extended_tu27),
+                               flight, (now - last_creative) / 1000.f);
+    last_creative = now;
+    last_frame = frame;
+    // Never share a streaming reference with the original F6 test car/scene path. Whichever
+    // consumer already requested a model finishes/releases it before the other can acquire one.
+    const bool holding = workshop::GuestFrame(game, {ped, workshop::Kind::Ped}, frame, !legacy.requested_model && !legacy.scene.loading);
+    if (workshop_tick) {
+      next_workshop = now + 100;
+      legacy.Tick(workshop_call, ped, now, holding);
+    }
   }
 #endif
 }
@@ -805,12 +734,12 @@ void DrawPanel(unsigned fps, double frame_ms, float scale) {
     ImGui::TextDisabled("%s", alive || state == Status::Unavailable ? StatusText(state) : StatusText(Status::Waiting));
     bool armed = controls.Armed();
 #ifdef GTAV_DESKTOP_WORKSHOP
-    const bool multiplayer = sandbox::CurrentMode() == sandbox::Mode::Multiplayer;
-    if (multiplayer) ImGui::TextDisabled("Story cheats are disabled in multiplayer. Use F6 for the Workshop.");
+    const bool workshop_mode = sandbox::Active();
+    if (workshop_mode) ImGui::TextDisabled("Story tools are Campaign-only. Use the Workshop phone for AdminOS.");
 #else
-    constexpr bool multiplayer = false;
+    constexpr bool workshop_mode = false;
 #endif
-    ImGui::BeginDisabled(multiplayer || !alive || state == Status::Unavailable);
+    ImGui::BeginDisabled(workshop_mode || !alive || state == Status::Unavailable);
     if (ImGui::Checkbox("Enable story-mode actions for this panel", &armed)) controls.Arm(armed);
     ImGui::BeginDisabled(!armed || state == Status::Blocked);
     if (ImGui::Button("Give pistol + ammo")) controls.Queue(Action::Give, now);

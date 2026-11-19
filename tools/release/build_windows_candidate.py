@@ -203,7 +203,8 @@ def main():
         f"-DREX_SDK_SRC={sdk / 'src'}", *clang)
     run("cmake", "--build", "build-dll", "--parallel")
     run("cmake", "-S", "gtav/tests", "-B", "build/graphics-tests", "-G", "Ninja",
-        "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_CXX_COMPILER={llvm_bin / 'clang++.exe'}")
+        "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_CXX_COMPILER={llvm_bin / 'clang++.exe'}",
+        f"-DGTAV_IMGUI_SOURCE={sdk / 'thirdparty/imgui'}")
     run("cmake", "--build", "build/graphics-tests", "--parallel")
     run("ctest", "--test-dir", "build/graphics-tests", "--output-on-failure")
     run("cmake", "-S", "loader", "-B", "build-launcher", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",

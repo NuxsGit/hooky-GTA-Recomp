@@ -101,6 +101,9 @@ postprocessed scene before HUD and keep HUD composition separate. Check supporte
 multipliers on the actual adapter/driver and validate pacing, input latency, and resets in-game.
 No DLSS/FG multiplier is claimed by the current build.
 
+The optional `--gtav_native_replay=true` buffer still dumps with **F8** in Campaign. In
+Workshop use **Shift+F8**; F8 on its own is reserved for Build.
+
 Run the asset-free presentation and resolve replay tests with:
 
 ```sh

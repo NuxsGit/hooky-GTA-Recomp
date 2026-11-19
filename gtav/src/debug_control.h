@@ -8,7 +8,7 @@
 
 namespace gtav::debug {
 
-enum class Panel { Closed, Settings, Debug, Workshop };
+enum class Panel { Closed, Settings, Debug, Workshop, Build, Phone };
 constexpr Panel TogglePanel(Panel shown, Panel requested) {
   return shown == requested ? Panel::Closed : requested;
 }

@@ -4,6 +4,9 @@
 #include "../sandbox/desktop.h"
 
 #ifdef GTAV_DESKTOP_WORKSHOP
+#include "../phone/PhoneShellUI.h"
+#include "../sandbox/BuildMenuUI.h"
+#include "../sandbox/CreativeRuntime.h"
 #include <SDL3/SDL.h>
 #endif
 
@@ -25,6 +28,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,7 +37,7 @@ namespace gtav::native::menu {
 namespace {
 
 struct Input {
-  enum Type { kMove, kButton, kWheel, kKey, kText } type;
+  enum Type { kMove, kButton, kWheel, kKey, kText, kText16 } type;
   float x = 0, y = 0;
   int code = 0;
   bool down = false;
@@ -44,6 +48,9 @@ std::vector<Input> g_input;
 using debug::Panel;
 std::atomic<Panel> g_panel{Panel::Closed};
 bool g_clear_imgui_input = false;
+#ifdef GTAV_DESKTOP_WORKSHOP
+std::atomic<bool> g_reset_phone{false};
+#endif
 
 ImGuiContext* g_context = nullptr;
 bool g_font_uploaded = false;
@@ -188,6 +195,8 @@ ImGuiKey ToImGui(Key key) {
     case Key::kC: return ImGuiKey_C;
     case Key::kV: return ImGuiKey_V;
     case Key::kX: return ImGuiKey_X;
+    case Key::kY: return ImGuiKey_Y;
+    case Key::kZ: return ImGuiKey_Z;
   }
   return ImGuiKey_None;
 }
@@ -372,14 +381,21 @@ void BuildWorkshop() {
 }
 #endif
 
-void SwitchPanel(Panel wanted) {
+void SwitchPanel(Panel wanted, std::optional<Panel> only_if = {}) {
   std::lock_guard lock(g_input_mutex);
+  if (only_if && g_panel.load() != *only_if) return;
   const auto next = debug::TogglePanel(g_panel.load(), wanted);
   g_panel = next;
   g_input.clear();
   g_clear_imgui_input = true;
   debug::PanelControls().SetOpen(next == Panel::Debug);
   input::Reset();
+#ifdef GTAV_DESKTOP_WORKSHOP
+  if (sandbox::Active()) {
+    workshop::SetCapture(next == Panel::Build, next == Panel::Phone, next != Panel::Closed && next != Panel::Build && next != Panel::Phone);
+    if (next == Panel::Phone) g_reset_phone = true;
+  }
+#endif
 }
 
 }  // namespace
@@ -394,8 +410,31 @@ bool ToggleWorkshop() {
   return true;
 }
 bool WorkshopOpen() { return g_panel.load() == Panel::Workshop; }
-void OnText(uint32_t ascii) {
-  if (ascii >= 32 && ascii < 127 && WorkshopOpen()) Push({Input::kText, 0, 0, int(ascii)});
+bool ToggleBuild() {
+  if (!sandbox::Active()) return false;
+  if (g_panel.load() == Panel::Build) SwitchPanel(Panel::Closed, Panel::Build);
+  else if (workshop::BuildAllowed()) SwitchPanel(Panel::Build);
+  return true;
+}
+bool OpenPhone() {
+  // Let arrows and P reach the current text/nav widget; never open over a text field.
+  if (!sandbox::Active() || IsOpen()) return false;
+  SwitchPanel(Panel::Phone, Panel::Closed);
+  return true;
+}
+void CloseCreative() {
+  const auto panel = g_panel.load();
+  if (panel == Panel::Build || panel == Panel::Phone) SwitchPanel(Panel::Closed, panel);
+}
+bool TextPanel() {
+  const auto panel = g_panel.load();
+  return panel == Panel::Workshop || panel == Panel::Build || panel == Panel::Phone;
+}
+void OnText(uint32_t ch) {
+  if (ch >= 32 && ch != 127 && ch <= 0x10ffff && TextPanel()) Push({Input::kText, 0, 0, int(ch)});
+}
+void OnText16(uint32_t ch) {
+  if (ch >= 32 && ch != 127 && ch <= 0xffff && TextPanel()) Push({Input::kText16, 0, 0, int(ch)});
 }
 #endif
 void Close() { SwitchPanel(Panel::Closed); }
@@ -460,6 +499,7 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const P
         case Input::kWheel: io.AddMouseWheelEvent(0.0f, in.y); break;
         case Input::kKey: io.AddKeyEvent(ToImGui(Key(in.code)), in.down); break;
         case Input::kText: io.AddInputCharacter(unsigned(in.code)); break;
+        case Input::kText16: io.AddInputCharacterUTF16(ImWchar16(in.code)); break;
       }
     }
     g_input.clear();
@@ -476,6 +516,27 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const P
     case Panel::Workshop:
 #ifdef GTAV_DESKTOP_WORKSHOP
       BuildWorkshop();
+#endif
+      break;
+    case Panel::Build:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (!workshop::BuildAllowed()) SwitchPanel(Panel::Closed, Panel::Build);
+      else {
+        const auto view = workshop::Snapshot();
+        // Desktop presents across the viewport; only the mobile renderer letterboxes.
+        if (!workshop::DrawBuildMenu(*view, g_scale, {0, 0, {w, h}})) SwitchPanel(Panel::Closed, Panel::Build);
+      }
+#endif
+      break;
+    case Panel::Phone:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (g_reset_phone.exchange(false)) workshop::ResetPhone();
+      switch (workshop::DrawPhone(*workshop::Snapshot(), fps, g_scale)) {
+        case workshop::PhoneAction::Session: SwitchPanel(Panel::Workshop, Panel::Phone); break;
+        case workshop::PhoneAction::Build: if (workshop::BuildAllowed()) SwitchPanel(Panel::Build, Panel::Phone); break;
+        case workshop::PhoneAction::Close: SwitchPanel(Panel::Closed, Panel::Phone); break;
+        case workshop::PhoneAction::None: break;
+      }
 #endif
       break;
     case Panel::Closed:
