@@ -50,6 +50,7 @@ int main() {
   controls.SetKey(Key::Forward, true);
   auto input = controls.Consume(30);
   CHECK(input.armed && input.action == Action::Give && input.Axis(Key::Forward, Key::Back) == 1);
+  CHECK(controls.StillArmed(input.epoch));
   CHECK(!controls.Consume(31).action);
   CHECK(controls.Queue(Action::Teleport, 35));
   CHECK(!controls.Consume(2036).action);  // stale UI command never executes when loading finishes
@@ -60,6 +61,7 @@ int main() {
   controls.SetOpen(false);
   controls.SetOpen(true);
   const auto reopened = controls.Consume(2110);
+  CHECK(!controls.StillArmed(input.epoch));
   CHECK(!reopened.armed && !reopened.action && !reopened.keys && reopened.epoch != input.epoch);
   controls.Arm(true);
   CHECK(controls.Queue(Action::Give, 2120));

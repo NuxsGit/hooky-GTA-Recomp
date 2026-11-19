@@ -176,28 +176,33 @@ Vec Horizontal(float yaw, float forward, float right, float up) {
 // Only touched by the one guest script thread which passed the runtime ABI check.
 struct Cheats {
   uint64_t epoch = 0;
-  uint32_t cam = 0;
+  uint32_t cam = 0, active_ped = 0;
   bool fly = false;
   int64_t last_tick = 0, cam_started = 0;
   Vec origin{}, position{}, rotation{};
 
   bool Active() const { return cam != 0 || fly; }
-  void Stop(NativeCall& call) {
+  bool Stop(NativeCall& call) {
     fly = false;  // Flight only applies velocity; no invulnerability, collision or gravity edits.
     if (cam) {
       auto cleanup = call.CleanupCall();
-      if (cleanup.Flag(kCamExists, {cam}) && cleanup.Okay()) {
-        if (cleanup.Read(kRenderingCam) == cam && cleanup.Okay()) cleanup.Invoke(kRenderCams, {0, 0, 0, 1, 0, 0});
-        cleanup.Invoke(kDestroyCam, {cam, 0});  // only the camera this tool created
+      const bool exists = cleanup.Flag(kCamExists, {cam});
+      if (!cleanup.Okay()) return false;
+      if (exists) {
+        const auto rendering = cleanup.Read(kRenderingCam);
+        if (!cleanup.Okay() || (rendering == cam && !cleanup.Invoke(kRenderCams, {0, 0, 0, 1, 0, 0})) ||
+            !cleanup.Invoke(kDestroyCam, {cam, 0})) return false;
       }
       cam = 0;
     }
+    active_ped = 0;
+    return true;
   }
 
   void Tick(NativeCall& call, const Controls::Input& in, int64_t now) {
     const float dt = std::clamp((now - last_tick) / 1000.f, 0.f, .05f);
     last_tick = now;
-    if (epoch != in.epoch || !in.armed) Stop(call);
+    if ((epoch != in.epoch || !in.armed) && !Stop(call)) { status = Status::Unavailable; return; }
     epoch = in.epoch;
     if (!in.armed) { status = Status::Ready; return; }
 
@@ -223,11 +228,16 @@ struct Cheats {
       return;
     }
     const bool on_foot = !call.Flag(kInVehicle, {ped, 0}) && call.Okay();
-    if (!on_foot) fly = false;
+    if (Active() && (ped != active_ped || (fly && !on_foot))) {
+      controls.Reset();
+      status = Stop(call) ? Status::Blocked : Status::Unavailable;
+      return;
+    }
+    if (!controls.StillArmed(epoch)) { Stop(call); return; }
 
     if (in.action) {
       switch (*in.action) {
-        case Action::Stop: Stop(call); status = Status::Ready; break;
+        case Action::Stop: status = Stop(call) ? Status::Ready : Status::Unavailable; return;
         case Action::Give:
           status = call.Invoke(kGive, {ped, HashName("weapon_pistol"), 60, 0}) ? Status::Gave : Status::Rejected;
           break;
@@ -237,17 +247,18 @@ struct Cheats {
           const float heading = call.Float(kHeading, {ped});
           if (!here.Valid(20'000.f) || !std::isfinite(heading) || !call.Okay()) { status = Status::Rejected; break; }
           const auto step = Horizontal(heading, 10.f, 0.f, 2.f);
+          if (!controls.StillArmed(epoch)) return;
           status = call.Invoke(kSetCoords, {ped, F(here.x + step.x), F(here.y + step.y), F(here.z + step.z), 0, 0, 1})
                        ? Status::Teleported : Status::Rejected;
           break;
         }
         case Action::Fly:
           if (fly) { fly = false; status = Status::Ready; }
-          else if (on_foot && !cam && call.Flag(kGameplayCam) && call.Okay()) fly = true;
+          else if (on_foot && !cam && call.Flag(kGameplayCam) && call.Okay()) { fly = true; active_ped = ped; }
           else status = Status::Rejected;
           break;
         case Action::Freecam: {
-          if (cam) { Stop(call); status = Status::Ready; break; }
+          if (cam) { status = Stop(call) ? Status::Ready : Status::Unavailable; return; }
           if (fly || !call.Flag(kGameplayCam)) { status = Status::Rejected; break; }
           origin = position = call.Vector(kGameplayCoord);
           rotation = call.Vector(kGameplayRot, {2});
@@ -256,10 +267,12 @@ struct Cheats {
             status = Status::Rejected;
             break;
           }
+          if (!controls.StillArmed(epoch)) return;
           const auto created = call.Read(kCreateCam, {HashName("default_scripted_camera"), F(position.x),
               F(position.y), F(position.z), F(rotation.x), F(rotation.y), F(rotation.z), F(fov), 1, 2});
           if (created && created != UINT32_MAX && call.Flag(kCamExists, {created}) && call.Okay()) {
             cam = created;
+            active_ped = ped;
             cam_started = now;
             call.Invoke(kRenderCams, {1, 0, 0, 1, 0, 0});
           } else status = Status::Rejected;
@@ -267,6 +280,7 @@ struct Cheats {
         }
       }
     }
+    if (!controls.StillArmed(epoch)) { Stop(call); return; }
     if (cam && call.Okay()) {
       const uint32_t rendered = call.Read(kRenderingCam);
       // Allow one tick for camera activation; relinquish if a game script took over later.
@@ -291,29 +305,46 @@ struct Cheats {
                              status == Status::Camera)) {
       status = Status::Ready;
     }
-    if (!call.Okay()) { Stop(call); status = Status::Unavailable; }
+    if (!call.Okay()) { controls.Reset(); Stop(call); status = Status::Unavailable; }
   }
 };
 
 void GuestTick(PPCContext& ctx, uint8_t* base, rex::runtime::ThreadState& thread,
                uint32_t timer, PPCFunc* original, int64_t now) {
-  static std::atomic<uint32_t> script_thread{0};
+  // Do not run synthetic natives just to view logs. Serialize the tick (including recursive
+  // timer calls) and only bind to a VM thread while a tool is armed or needs cleanup.
+  static std::atomic_flag busy;
+  if (busy.test_and_set(std::memory_order_acquire)) return;
+  struct ReleaseTick {
+    std::atomic_flag& busy;
+    ~ReleaseTick() { busy.clear(std::memory_order_release); }
+  } release{busy};
   static Cheats cheats;
+  static uint32_t script_thread = 0;
+  static bool verified = false, failed = false;
+  last_script_ms = now;
+  last_game_timer = timer;
+  if (!controls.Armed() && !cheats.Active()) {
+    script_thread = 0;
+    if (!failed) status = Status::Ready;
+    return;
+  }
+  if (failed || now - cheats.last_tick < 16) return;
   const auto id = thread.thread_id();
-  uint32_t expected = 0;
-  if (!id || (!script_thread.compare_exchange_strong(expected, id) && expected != id)) return;
-  if ((!controls.Open() && !cheats.Active()) || now - cheats.last_tick < 16) return;
+  if (!id || (script_thread && script_thread != id)) return;
   auto* kernel = rex::system::kernel_state();
   if (!kernel || !kernel->function_dispatcher()) return;
   NativeCall call(ctx, base, *thread.memory(), *kernel->function_dispatcher());
-  if (!call.SafeStack()) { status = Status::Unavailable; return; }
-
-  static bool verified = false, failed = false;
-  if (failed) return;
+  if (!call.SafeStack()) {
+    controls.Reset();
+    status = Status::Unavailable;
+    return;
+  }
   if (!verified) {
     // Same native, actual guest timer versus a synthetic call. Do not arm actions if the
     // installed code doesn't accept the expected context/result slots on this thread.
     if (!call.Invoke(kTimer, {}, original) || call.Result() - timer > 1000) {
+      controls.Reset();
       status = Status::Unavailable;
       failed = true;
       REXLOG_WARN("[debug] TU27 script native ABI check failed; cheats disabled");
@@ -322,8 +353,7 @@ void GuestTick(PPCContext& ctx, uint8_t* base, rex::runtime::ThreadState& thread
     REXLOG_INFO("[debug] validated script timer context on guest thread {}", id);
     verified = true;
   }
-  last_script_ms = now;
-  last_game_timer = timer;
+  script_thread = id;
   const auto in = controls.Consume(now);
   if (in.action) REXLOG_INFO("[debug] story action {} requested", static_cast<unsigned>(*in.action));
   cheats.Tick(call, in, now);
@@ -484,7 +514,7 @@ REX_HOOK_RAW(sub_82C87678) {  // GET_GAME_TIMER(), in the real game's VM
     static std::atomic<int64_t> next_log{0};
     auto next = next_log.load();
     if (now >= next && next_log.compare_exchange_strong(next, now + 3'000))
-      REXLOG_INFO("[mission] script timer still running: {} ms", timer);
+      REXLOG_INFO("[mission] guest GET_GAME_TIMER={} ms", timer);
   }
   if (panel_or_mode) GuestTick(ctx, base, *thread, timer, &__imp__sub_82C87678, now);
 }

@@ -59,18 +59,21 @@ Fly applies short velocity changes, not god mode or permanent gravity/collision 
 - Check that one physical F2 press/release toggles once (hold F2 down, too), that the SDL and Win32
   native windows don't send the key into gameplay, and that F1/RB+Back and DualSense still work.
 - Commands are allowlisted and consumed only inside the game's `GET_GAME_TIMER` wrapper, on the
-  live guest script thread. The context/return pointer is checked against guest memory and a second
-  scalar timer call is compared before mutating anything. The scratch area and PPC registers are
+  live guest script thread. In log-only mode, the hook only samples the existing call. When Story
+  tools are armed, it checks the context/return pointer and compares a second scalar timer call
+  before mutating anything. The scratch area and PPC registers are
   isolated from the real VM call. Checks block actions while online, paused, dead, switching, in a
   mission/cutscene or fading. Camera cleanup targets only the camera the tool created.
 
 ABI references: TU27 handler addresses/hashes in `tools/scripttools/{handlers,fn2name}.txt`,
 [`scrNativeCallContext` on 360](https://blog.lms-dev.com/reverse-engineering/vs-native-invocation/),
 and Xbox 360 [TU27 call layout](https://github.com/xxHASTERxx/GTA-V-Mod-Menu-TU27/blob/master/GTAVNatives.h).
-The Xbox context uses 32-bit big-endian pointers/words, not the PC 64-bit native ABI. A working
-scalar ABI probe doesn't replace a real play-test of vector results, physics and camera ownership.
+The Xbox context uses 32-bit big-endian pointers/words, not the PC 64-bit native ABI. The TU27
+examples read the entity and gameplay-camera results as three contiguous floats. A working scalar
+probe or these examples don't replace a real play-test of vector results, physics and camera ownership.
 
 Asset-free checks: configure `loader` with `-DGTAV_LAUNCHER_TESTS=ON`, build, then run `ctest`.
 Fixtures cover update discovery/digest policy, Windows staging and rollback, pacing and request
-state, and Linux cold/incremental/corrupted/cancelled builds. Run the native Windows candidate and
-controller smoke workflow before sharing a ZIP. These tests do not run retail TU27.
+state, and Linux cold/incremental/corrupted/cancelled builds. The native Windows candidate also
+feeds its exact ZIP through the updater's SHA-256 and system `tar.exe` staging path. These tests do
+not run retail TU27 or validate controllers over physical USB/Bluetooth.

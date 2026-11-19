@@ -1,5 +1,6 @@
 #include "windows_update.h"
 #include "win_process.h"
+#include "sources.h"
 
 #include <array>
 #include <cstdlib>
@@ -8,15 +9,6 @@
 
 namespace fs = std::filesystem;
 using namespace loader;
-
-// No online dependency: mismatch/cancellation are exercised with a deterministic digest.
-namespace loader {
-bool HashUpdateArchive(const fs::path& path, std::string* digest, uint64_t* size, InstallUi& ui) {
-  *size = fs::file_size(path);
-  *digest = std::string(64, 'a');
-  return !ui.Cancelled();
-}
-}  // namespace loader
 
 #define CHECK(x) do { if (!(x)) { std::wcerr << L"Failed at line " << __LINE__ << L": " << error << '\n'; std::exit(1); } } while (false)
 
@@ -54,8 +46,20 @@ class Ui final : public InstallUi {
 };
 }  // namespace
 
-int main() {
+int wmain(int argc, wchar_t** argv) {
   std::wstring error;
+  if (argc == 6 && std::wstring_view(argv[1]) == L"--verify-package") {
+    // Smoke-test the exact release ZIP with Windows tar.exe, not a second extraction implementation.
+    const fs::path root = argv[2], archive = argv[3];
+    CHECK(fs::create_directory(root));
+    const UpdateAsset asset{Narrow(argv[4]), Narrow(argv[5]), fs::file_size(archive)};
+    Ui ui;
+    CHECK(detail::StageUpdate(root, archive, asset, ui, &error));
+    CHECK(!HasPendingWindowsUpdate(root));
+    fs::remove_all(root);
+    return 0;
+  }
+  CHECK(argc == 1);
   // Non-ASCII filename and paths with spaces. All fixtures are tiny, invented files.
   const auto root = fs::temp_directory_path() / (L"GTAV update \u00e9 fixture " + std::to_wstring(GetCurrentProcessId()));
   std::error_code ec;
@@ -76,6 +80,11 @@ int main() {
   CHECK(!PrepareWindowsUpdate(root, archive, asset, ui, &error));
   CHECK(error.find(L"SHA-256 mismatch") != error.npos && !HasPendingWindowsUpdate(root));
   CHECK(Text(root / "gtav_fast.exe") == "previous host");
+  {
+    win::Handle lock(win::OpenSetupLock(root / "data/setup.lock"));
+    CHECK(lock && !PrepareWindowsUpdate(root, archive, asset, ui, &error));
+    CHECK(error.find(L"Close the game") != error.npos);
+  }
   ui.cancelled = true;
   CHECK(!PrepareWindowsUpdate(root, archive, asset, ui, &error) && error == L"Cancelled.");
   ui.cancelled = false;
@@ -87,6 +96,14 @@ int main() {
   Put(stage / "data/user/foreign-save", "must not import");
   CHECK(!detail::JournalUpdate(root, "99.0.0", &error));
   fs::remove_all(stage / "data");
+  Put(stage.parent_path() / L"unexpected.txt", "extra root entry");
+  CHECK(!detail::JournalUpdate(root, "99.0.0", &error));
+  fs::remove(stage.parent_path() / L"unexpected.txt");
+  const auto kept = stage / "selected.zip";
+  Put(kept, "not an archive");
+  CHECK(!PrepareWindowsUpdate(root, kept, asset, ui, &error));
+  CHECK(Text(kept) == "not an archive");
+  fs::remove(kept);
 
   // Deny rename of a later asset. Earlier paths must be restored, not left half updated.
   CHECK(detail::JournalUpdate(root, "99.0.0", &error));

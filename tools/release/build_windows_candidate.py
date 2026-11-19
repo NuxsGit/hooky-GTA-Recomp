@@ -111,6 +111,13 @@ def smoke_package(archive):
                     raise SystemExit(f"Unexpected file in Windows package: {name}")
             zf.extractall(tmp)
         host = Path(tmp) / PACKAGE
+        digest = hashlib.sha256()
+        with archive.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        version = (REPO / "loader/VERSION").read_text(encoding="ascii").strip()
+        run(REPO / "build-launcher/gtav_windows_update_tests.exe", "--verify-package",
+            Path(tmp) / "Update fixture with spaces", archive, version, digest.hexdigest(), timeout=210)
         for exe, args in (
             ("rexgluerd.exe", ("--version",)),
             ("tools/XenosRecomp.exe", ()),

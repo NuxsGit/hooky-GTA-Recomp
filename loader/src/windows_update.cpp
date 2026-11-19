@@ -71,6 +71,11 @@ bool ValidatePackage(const fs::path& work, std::string_view version, std::wstrin
   if (Kind(work) != PathKind::Folder || Kind(work / L"stage") != PathKind::Folder || Kind(stage) != PathKind::Folder)
     return Error(error, L"The verified archive does not have the expected Windows package folder.");
   std::error_code ec;
+  for (auto it = fs::directory_iterator(work / L"stage", ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    if (it->path().filename() != stage.filename())
+      return Error(error, L"The ZIP contains files outside the expected package folder.");
+  }
+  if (ec) return Error(error, L"Could not read the update staging folder.");
   for (auto it = fs::directory_iterator(stage, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
     const auto name = it->path().filename().wstring();
     if (std::find(kOwned.begin(), kOwned.end(), name) == kOwned.end())
@@ -272,21 +277,15 @@ bool RollbackUpdate(const fs::path& root, std::wstring* error) {
 
 bool HasPendingWindowsUpdate(const fs::path& root) { return Kind(root / kWork / kJournal) != PathKind::Missing; }
 
-bool PrepareWindowsUpdate(const fs::path& root, const fs::path& archive, const UpdateAsset& asset,
-                          InstallUi& ui, std::wstring* error) {
+bool detail::StageUpdate(const fs::path& root, const fs::path& archive, const UpdateAsset& asset,
+                         InstallUi& ui, std::wstring* error) {
   if (!asset || !IsVersion(asset.version) || !IsHex(asset.sha256) || asset.size > kMaxUpdateArchiveBytes)
     return Error(error, L"There is no newer official Windows ZIP with a published SHA-256 digest.");
   const auto work = root / kWork;
-  const auto data = root / "data";
   std::error_code ec;
-  fs::create_directories(data / "logs", ec);
-  win::Handle lock(ec ? nullptr : win::OpenSetupLock(data / "setup.lock", true));
-  if (!lock) return Error(error, L"Close the game and any other setup before applying an update.");
   fs::create_directory(work, ec);
   if (ec || Kind(work) != PathKind::Folder || HasPendingWindowsUpdate(root))
     return Error(error, L"An update is already pending or the update folder is unavailable.");
-  std::ofstream log(data / "logs/update.log", std::ios::app);
-  log << "Preparing verified update v" << asset.version << '\n';
 
   // Take a private copy before hashing/extracting, so changing the selected file cannot change
   // which bytes get unpacked. Reject reparse points in the working paths.
@@ -296,10 +295,12 @@ bool PrepareWindowsUpdate(const fs::path& root, const fs::path& archive, const U
     return Error(error, L"The selected file does not match the size of the latest official Windows ZIP.");
   ui.Stage(L"Verifying the official ZIP (SHA-256)...");
   // In particular, never remove the ZIP the player selected when it is inside our work area.
-  auto source = fs::canonical(archive, ec);
+  const auto source = fs::canonical(archive, ec);
   if (ec) return Error(error, L"Could not read the selected ZIP path.");
+  const auto destination = fs::canonical(work, ec);
+  if (ec) return Error(error, L"Could not resolve the update staging folder.");
   for (auto parent = source.parent_path(); !parent.empty(); parent = parent.parent_path()) {
-    if (CompareStringOrdinal(parent.c_str(), -1, work.c_str(), -1, TRUE) == CSTR_EQUAL)
+    if (CompareStringOrdinal(parent.c_str(), -1, destination.c_str(), -1, TRUE) == CSTR_EQUAL)
       return Error(error, L"Choose a ZIP outside the installer's .gtav-update folder.");
     if (parent == parent.parent_path()) break;
   }
@@ -321,12 +322,33 @@ bool PrepareWindowsUpdate(const fs::path& root, const fs::path& archive, const U
   }
   ui.Progress(.35);
   ui.Stage(L"Unpacking the verified update (your data is not being changed)...");
-  if (!fs::create_directory(stage, ec) || ec || !Extract(zip, stage, ui, error) || ui.Cancelled()) {
+  if (!fs::create_directory(stage, ec) || ec || !Extract(zip, stage, ui, error) || ui.Cancelled() ||
+      !ValidatePackage(work, asset.version, error)) {
     cleanup();
     if (error->empty()) *error = ui.Cancelled() ? L"Cancelled." : L"Could not create the staging directory.";
     return false;
   }
   fs::remove(zip, ec);
+  return true;
+}
+
+bool PrepareWindowsUpdate(const fs::path& root, const fs::path& archive, const UpdateAsset& asset,
+                          InstallUi& ui, std::wstring* error) {
+  const auto data = root / "data", work = root / kWork;
+  std::error_code ec;
+  fs::create_directories(data / "logs", ec);
+  win::Handle lock(ec ? nullptr : win::OpenSetupLock(data / "setup.lock", true));
+  if (!lock) return Error(error, L"Close the game and any other setup before applying an update.");
+  std::ofstream log(data / "logs/update.log", std::ios::app);
+  log << "Preparing verified update v" << asset.version << '\n';
+  if (!detail::StageUpdate(root, archive, asset, ui, error)) {
+    log << Narrow(*error) << '\n';
+    return false;
+  }
+  const auto cleanup = [&] {
+    std::error_code ignored;
+    fs::remove_all(work / L"stage", ignored);
+  };
   const auto helper = work / kHelper;
   if (Kind(helper) == PathKind::Unsafe || !fs::copy_file(root / kLauncher, helper, fs::copy_options::overwrite_existing, ec) || ec ||
       ui.Cancelled() || !detail::JournalUpdate(root, asset.version, error)) {

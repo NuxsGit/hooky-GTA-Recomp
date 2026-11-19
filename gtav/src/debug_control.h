@@ -49,6 +49,10 @@ class Controls {
     std::lock_guard lock(mutex_);
     return armed_;
   }
+  bool StillArmed(uint64_t epoch) const {
+    std::lock_guard lock(mutex_);
+    return armed_ && epoch_ == epoch;
+  }
   void SetKey(Key key, bool down) {
     std::lock_guard lock(mutex_);
     if (!armed_) return;
