@@ -369,6 +369,8 @@ void StartUpdateInstall(fs::path zip, bool automatic) {
   g_installing_update = true;
   g_update_automatic = automatic;
   g_pause_auto = true;  // avoid repeated downloads in this session on cancellation or failure
+  g_update_notice = zip.empty() ? L"Téléchargement et vérification de v" + Widen(asset.version) + L"…"
+                                 : L"Vérification de l’archive avec la version publiée sur GitHub…";
   g_phone_job = 0;
   g_rebuilding = false;
   SetBusy(true);
@@ -912,7 +914,7 @@ LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
       }
       if (update_job && prepared == UpdatePreparation::Deferred && !g_cancelled) {
-        g_pause_auto = !automatic;
+        g_pause_auto = false;
         g_update_attempt_after = GetTickCount64() + 5'000;
         g_update_notice = kDeferredUpdate;
         RefreshUpdateControls();
@@ -1150,6 +1152,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     if (g_status == InstallStatus::NeedsRebuild) StartInstall(true);
     else SetWindowTextW(g_stage, g_status == InstallStatus::Ready ? L"Mise à jour installée. Prêt à jouer."
                                                                 : L"Mise à jour installée. Choisis tes disques pour commencer.");
+    RedrawDashboard();
   }
   SetTimer(hw, kDashboardTimer, 1'000, nullptr);
   MSG m;

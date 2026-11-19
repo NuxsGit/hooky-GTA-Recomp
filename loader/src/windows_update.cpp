@@ -316,7 +316,7 @@ bool WindowsUpdateIdle(const fs::path& root) {
 bool HasPendingWindowsUpdate(const fs::path& root) { return Kind(root / kWork / kJournal) != PathKind::Missing; }
 
 bool detail::StageUpdate(const fs::path& root, const fs::path& archive, const UpdateAsset& asset,
-                         InstallUi& ui, std::wstring* error, const ArchiveDownload& download) {
+                         InstallUi& ui, std::wstring* error) {
   if (!asset) return Error(error, L"There is no newer official Windows ZIP with a published SHA-256 digest.");
   const auto work = root / kWork;
   std::error_code ec;
@@ -350,7 +350,7 @@ bool detail::StageUpdate(const fs::path& root, const fs::path& archive, const Up
   };
   cleanup();
   if (source.empty()) {
-    if (!download(asset, zip, ui, error)) { cleanup(); return false; }
+    if (!DownloadWindowsAsset(asset, zip, ui, error)) { cleanup(); return false; }
   } else if (!CopyFileExW(source.c_str(), zip.c_str(), CopyProgress, &ui, nullptr, COPY_FILE_FAIL_IF_EXISTS)) {
     cleanup();
     return Error(error, ui.Cancelled() ? L"Cancelled." : L"Could not copy the selected ZIP for verification.");
@@ -376,7 +376,7 @@ bool detail::StageUpdate(const fs::path& root, const fs::path& archive, const Up
 }
 
 UpdatePreparation PrepareWindowsUpdate(const fs::path& root, const fs::path& archive, const UpdateAsset& asset,
-                                       InstallUi& ui, std::wstring* error, const detail::ArchiveDownload& download) {
+                                       InstallUi& ui, std::wstring* error) {
   using enum UpdatePreparation;
   error->clear();
   const auto data = root / "data", work = root / kWork;
@@ -398,7 +398,7 @@ UpdatePreparation PrepareWindowsUpdate(const fs::path& root, const fs::path& arc
   }
   std::ofstream log(data / "logs/update.log", std::ios::app);
   log << "Preparing verified update v" << asset.version << '\n';
-  if (!detail::StageUpdate(root, archive, asset, ui, error, download)) {
+  if (!detail::StageUpdate(root, archive, asset, ui, error)) {
     log << Narrow(*error) << '\n';
     return Failed;
   }

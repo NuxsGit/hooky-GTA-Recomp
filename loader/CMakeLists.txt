@@ -149,6 +149,19 @@ if(GTAV_LAUNCHER_TESTS)
         gtav_update_definitions(gtav_windows_update_tests)
         target_link_libraries(gtav_windows_update_tests PRIVATE user32 bcrypt winhttp)
         add_test(NAME windows_update_transaction COMMAND gtav_windows_update_tests)
+
+        # An older launcher for the exact-package test. Only the HTTP transport is replaced;
+        # the dashboard timer, policy, installer, lock and restart helper are production code.
+        add_executable(gtav_launcher_update_fixture WIN32 src/main.cpp src/windows_update.cpp
+            src/update.cpp tests/update_transport_stub.cpp src/install.cpp src/sources.cpp
+            src/launcher.manifest ../gtav/src/native/adreno_shader_fix.cpp)
+        target_include_directories(gtav_launcher_update_fixture PRIVATE src)
+        target_compile_definitions(gtav_launcher_update_fixture PRIVATE
+            UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN GTAV_LAUNCHER_VERSION="0.0.0")
+        target_link_libraries(gtav_launcher_update_fixture PRIVATE comctl32 ole32 shell32 bcrypt dwmapi)
+        if(MSVC)
+            target_compile_options(gtav_launcher_update_fixture PRIVATE /utf-8)
+        endif()
     endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
         find_package(Python3 REQUIRED COMPONENTS Interpreter)

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -32,7 +33,7 @@ inline std::optional<BuildVersion> ParseBuildVersion(std::string_view text) {
     if (serial.size() > 18 || !number(serial, parsed.nightly) || !parsed.nightly) return std::nullopt;
     text = text.substr(0, offset);
   }
-  for (size_t i = 0; i < parsed.base.size(); ++i) {
+  for (std::size_t i = 0; i < parsed.base.size(); ++i) {
     const auto dot = text.find('.');
     if ((i < 2) != (dot != text.npos) || !number(text.substr(0, dot), parsed.base[i])) return std::nullopt;
     if (i < 2) text.remove_prefix(dot + 1);

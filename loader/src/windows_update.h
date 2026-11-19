@@ -4,15 +4,8 @@
 #include "update.h"
 
 #include <cstdint>
-#include <functional>
 
 namespace loader {
-
-namespace detail {
-using ArchiveDownload = std::function<bool(const UpdateAsset&, const std::filesystem::path&, InstallUi&, std::wstring*)>;
-bool DownloadWindowsAsset(const UpdateAsset& asset, const std::filesystem::path& output,
-                          InstallUi& ui, std::wstring* error);
-}
 
 enum class UpdatePreparation { Failed, Deferred, Ready };
 
@@ -21,8 +14,7 @@ enum class UpdatePreparation { Failed, Deferred, Ready };
 // Prepare while the launcher is running. On success the caller must close: the helper holds the
 // per-installation lock, waits for its parent to exit, swaps package assets and starts the launcher.
 UpdatePreparation PrepareWindowsUpdate(const std::filesystem::path& root, const std::filesystem::path& archive,
-                          const UpdateAsset& asset, InstallUi& ui, std::wstring* error,
-                          const detail::ArchiveDownload& download = detail::DownloadWindowsAsset);
+                                       const UpdateAsset& asset, InstallUi& ui, std::wstring* error);
 UpdatePreferences LoadWindowsUpdatePreferences(const std::filesystem::path& root);
 bool SaveWindowsUpdatePreferences(const std::filesystem::path& root, UpdatePreferences prefs);
 bool WindowsUpdateIdle(const std::filesystem::path& root);
@@ -31,11 +23,12 @@ bool StartWindowsUpdateRecovery(const std::filesystem::path& root, std::wstring*
 int FinishWindowsUpdate(const std::filesystem::path& helper, uintptr_t parent, uintptr_t lock, bool recover);
 
 namespace detail {
+bool DownloadWindowsAsset(const UpdateAsset& asset, const std::filesystem::path& output,
+                          InstallUi& ui, std::wstring* error);
 bool ParseWindowsAssetRedirect(std::wstring_view url, std::wstring& host, std::wstring& path);
 // Internal stages. Callers hold the setup lock; the release smoke test uses a private fixture folder.
 bool StageUpdate(const std::filesystem::path& root, const std::filesystem::path& archive,
-                 const UpdateAsset& asset, InstallUi& ui, std::wstring* error,
-                 const ArchiveDownload& download = DownloadWindowsAsset);
+                 const UpdateAsset& asset, InstallUi& ui, std::wstring* error);
 bool JournalUpdate(const std::filesystem::path& root, std::string_view version, std::wstring* error);
 bool ApplyUpdate(const std::filesystem::path& root, std::wstring* error);
 bool RollbackUpdate(const std::filesystem::path& root, std::wstring* error);

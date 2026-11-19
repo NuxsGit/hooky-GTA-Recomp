@@ -91,7 +91,7 @@ struct AssetRequest {
     if (!connection.handle) return 0;
     request.handle = WinHttpOpenRequest(connection.handle, L"GET", path.c_str(), nullptr,
                                         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                        WINHTTP_FLAG_SECURE | WINHTTP_FLAG_ESCAPE_DISABLE);
+                                        WINHTTP_FLAG_SECURE | WINHTTP_FLAG_ESCAPE_DISABLE | WINHTTP_FLAG_ESCAPE_DISABLE_QUERY);
     if (!request.handle) return 0;
     DWORD disabled = WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_AUTHENTICATION;
     if (!WinHttpSetOption(request.handle, WINHTTP_OPTION_DISABLE_FEATURE, &disabled, sizeof(disabled)) ||

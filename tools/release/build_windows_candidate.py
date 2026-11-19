@@ -138,7 +138,7 @@ def smoke_package(archive, version):
                 digest.update(block)
         run(REPO / "build-launcher/gtav_windows_update_tests.exe", "--verify-package",
             Path(tmp) / "Update fixture with spaces", archive, version, digest.hexdigest(),
-            host / "gtav_launcher.exe", timeout=250)
+            host / "gtav_launcher.exe", REPO / "build-launcher/gtav_launcher_update_fixture.exe", timeout=250)
         for exe, args in (
             ("rexgluerd.exe", ("--version",)),
             ("tools/XenosRecomp.exe", ()),

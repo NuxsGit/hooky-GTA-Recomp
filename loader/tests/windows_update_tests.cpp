@@ -129,24 +129,41 @@ void WaitExit(HANDLE process, DWORD timeout) {
   CHECK(exit == 0);
 }
 
-// Real helper, real official-format ZIP, real restarted launcher. The previous install is disposable:
-// its helper executable is bootstrapped from the candidate, not dependent on a past release URL.
-void VerifyPackage(const fs::path& test, const fs::path& root, const fs::path& archive,
-                   const wchar_t* version, const wchar_t* hash, const fs::path& candidate) {
+// The previous launcher reads a fixture feed instead of GitHub; everything from discovery and
+// auto-install scheduling through the game's lock, updater and restarted dashboard is real code.
+void VerifyPackage(const fs::path& root, const fs::path& archive, const wchar_t* version, const wchar_t* hash,
+                   const fs::path& candidate, const fs::path& old_launcher) {
   std::wstring error;
+  const auto build = ParseBuildVersion(Narrow(version));
+  CHECK(build);
+  const bool nightly = build->Channel() == UpdateChannel::Nightly;
   CHECK(fs::create_directory(root));
   const auto launcher = root / "gtav_launcher.exe";
-  CHECK(fs::copy_file(candidate, launcher));
+  CHECK(fs::copy_file(old_launcher, launcher));
   for (const auto* path : kPreserved) Put(root / path, "local content");
   Put(root / "tools/original.txt", "old tools");
   Put(root / "gtav_fast.exe", "previous host");
   Put(root / "gtav_release.txt", "previous package");
-  const UpdatePreferences stable_auto{UpdateChannel::Stable, true};
-  CHECK(SaveWindowsUpdatePreferences(root, stable_auto));
+  const UpdatePreferences prefs{build->Channel(), true};
+  CHECK(SaveWindowsUpdatePreferences(root, prefs));
+  const auto feed = root / ".test-feed";
+  std::string release = "{\"tag_name\":\"v" + Narrow(version) + "\",\"draft\":false,\"prerelease\":" + (nightly ? "true" : "false") +
+      ",\"assets\":[{\"name\":\"" + std::string(kWindowsPackageName) + "\",\"state\":\"uploaded\",\"digest\":\"sha256:" + Narrow(hash) +
+      "\",\"size\":" + std::to_string(fs::file_size(archive)) + "}]}";
+  Put(feed / (nightly ? "nightly.json" : "stable.json"), nightly ? '[' + release + ']' : release);
+  CHECK(fs::copy_file(archive, feed / "asset.zip"));
+  DWORD old_pid = 0;
   TestProcess parent;
-  CHECK(win::Spawn(test, Quote(test) + L" --prepare-package " + Quote(root) + L" " + Quote(archive) + L" " +
-                       version + L" " + hash, root, 0, &parent.handle));
-  WaitExit(parent.handle.Get(), 200'000);
+  {
+    win::Handle game(win::OpenSetupLock(root / "data/setup.lock"));
+    CHECK(game && win::Spawn(launcher, Quote(launcher), root, 0, &parent.handle));
+    old_pid = GetProcessId(parent.handle.Get());
+    CHECK(old_pid && WaitWindow({nullptr, L"GtavRecompDashboard", old_pid, launcher}, parent.handle.Get(),
+        L"Mise \u00e0 jour pr\u00eate. Elle attend la fermeture du jeu ou de l\u2019installation en cours."));
+    CHECK(!HasPendingWindowsUpdate(root) && !fs::exists(root / ".gtav-update/verified.zip"));
+    CHECK(Text(root / "gtav_fast.exe") == "previous host");
+  }
+  WaitExit(parent.handle.Get(), 200'000);  // releasing the game's lock lets automatic installation proceed
   auto dashboard = WaitWindow({nullptr, L"GtavRecompDashboard", 0, launcher});
   if (!dashboard) error = Widen(Text(root / "data/logs/update.log"));
   CHECK(dashboard);
@@ -154,10 +171,10 @@ void VerifyPackage(const fs::path& test, const fs::path& root, const fs::path& a
   GetWindowThreadProcessId(dashboard, &pid);
   TestProcess restarted;
   restarted.handle.Set(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, FALSE, pid));
-  CHECK(restarted.handle);
+  CHECK(restarted.handle && pid != old_pid);
   CHECK(WaitWindow({nullptr, L"GtavRecompDashboard", pid, launcher}, restarted.handle.Get(),
                    L"Mise \u00e0 jour install\u00e9e. Choisis tes disques pour commencer."));
-  CHECK(LoadWindowsUpdatePreferences(root) == stable_auto);
+  CHECK(LoadWindowsUpdatePreferences(root) == prefs);
   // Exercise real controls in the restarted dashboard, without contacting unpopulated feeds.
   const auto updates = HasLabel(dashboard, L"Mises \u00e0 jour");
   CHECK(updates && IsWindowVisible(updates));
@@ -168,16 +185,19 @@ void VerifyPackage(const fs::path& test, const fs::path& root, const fs::path& a
   CHECK(auto_button && IsWindowVisible(auto_button) && download && !IsWindowEnabled(download));
   CHECK(SendMessageTimeoutW(dashboard, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(auto_button), BN_CLICKED),
                             reinterpret_cast<LPARAM>(auto_button), SMTO_ABORTIFHUNG, 2'000, nullptr));
-  CHECK(LoadWindowsUpdatePreferences(root) == (UpdatePreferences{UpdateChannel::Stable, false}));
-  const auto nightly = HasLabel(dashboard, L"Nightly   /   Exp\u00e9rimental");
-  CHECK(nightly && IsWindowVisible(nightly));
-  CHECK(PostMessageW(dashboard, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(nightly), BN_CLICKED), reinterpret_cast<LPARAM>(nightly)));
-  const auto confirm = WaitWindow({L"Canal Nightly", L"#32770", pid, {}}, restarted.handle.Get());
-  CHECK(confirm);
-  CHECK(PostMessageW(confirm, WM_COMMAND, IDYES, 0));
+  CHECK(LoadWindowsUpdatePreferences(root) == (UpdatePreferences{prefs.channel, false}));
+  const auto other = nightly ? UpdateChannel::Stable : UpdateChannel::Nightly;
+  const auto channel = HasLabel(dashboard, nightly ? L"Stable   /   Recommand\u00e9" : L"Nightly   /   Exp\u00e9rimental");
+  CHECK(channel && IsWindowVisible(channel));
+  CHECK(PostMessageW(dashboard, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(channel), BN_CLICKED), reinterpret_cast<LPARAM>(channel)));
+  if (!nightly) {
+    const auto confirm = WaitWindow({L"Canal Nightly", L"#32770", pid, {}}, restarted.handle.Get());
+    CHECK(confirm);
+    CHECK(PostMessageW(confirm, WM_COMMAND, IDYES, 0));
+  }
   CHECK(WaitWindow({nullptr, L"GtavRecompDashboard", pid, launcher}, restarted.handle.Get(),
                    L"Canal s\u00e9lectionn\u00e9. Lance une recherche pour voir les versions disponibles."));
-  CHECK(LoadWindowsUpdatePreferences(root) == (UpdatePreferences{UpdateChannel::Nightly, false}));
+  CHECK(LoadWindowsUpdatePreferences(root) == (UpdatePreferences{other, false}));
   CHECK(PostMessageW(dashboard, WM_CLOSE, 0, 0));
   WaitExit(restarted.handle.Get(), 10'000);
   CHECK(!HasPendingWindowsUpdate(root) && !fs::exists(root / ".gtav-update/stage"));
@@ -186,10 +206,11 @@ void VerifyPackage(const fs::path& test, const fs::path& root, const fs::path& a
   CHECK(Text(root / ".gtav-update/backup/tools/original.txt") == "old tools");
   CHECK(Text(root / ".gtav-update/backup/gtav_fast.exe") == "previous host");
   CHECK(Text(launcher) == Text(candidate));
+  CHECK(Text(root / ".gtav-update/backup/gtav_launcher.exe") == Text(old_launcher));
   CHECK(fs::file_size(root / "gtav_fast.exe") == fs::file_size(candidate.parent_path() / "gtav_fast.exe"));
   for (const auto* path : kPreserved) CHECK(Text(root / path) == "local content");
   fs::remove_all(root);
-  std::cout << "Windows ZIP verified, applied and relaunched; player data preserved\n";
+  std::cout << "Automatic Windows update waited for game lock, verified exact ZIP and relaunched; data and settings preserved\n";
 }
 
 void VerifyHostSelector(const fs::path& root) {
@@ -229,26 +250,8 @@ void VerifyHostSelector(const fs::path& root) {
 int wmain(int argc, wchar_t** argv) try {
   std::wstring error;
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
-  if (argc == 7 && std::wstring_view(argv[1]) == L"--verify-package") {
-    VerifyPackage(fs::absolute(argv[0]), argv[2], argv[3], argv[4], argv[5], argv[6]);
-    return 0;
-  }
-  if (argc == 6 && std::wstring_view(argv[1]) == L"--prepare-package") {
-    const fs::path root = argv[2], archive = argv[3];
-    Ui ui;
-    const auto version = Narrow(argv[4]);
-    const auto build = ParseBuildVersion(version);
-    CHECK(build);
-    // Drive the automatic download-to-staging path using the exact ZIP as the transport fixture.
-    // The production WinHTTP client is not contacted until a public release actually exists.
-    const auto download = [&](const UpdateAsset&, const fs::path& path, InstallUi&, std::wstring*) {
-      return fs::copy_file(archive, path);
-    };
-    CHECK(PrepareWindowsUpdate(root, {}, {version, Narrow(argv[5]), fs::file_size(archive), build->Channel()}, ui, &error, download) == UpdatePreparation::Ready);
-    // The helper must wait for this parent and hold the game/setup lock across that handoff.
-    CHECK(HasPendingWindowsUpdate(root) && Text(root / "gtav_fast.exe") == "previous host");
-    win::Handle lock(win::OpenSetupLock(root / "data/setup.lock"));
-    CHECK(!lock);
+  if (argc == 8 && std::wstring_view(argv[1]) == L"--verify-package") {
+    VerifyPackage(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
     return 0;
   }
   if (argc == 3 && std::wstring_view(argv[1]) == L"--verify-host-selector") {

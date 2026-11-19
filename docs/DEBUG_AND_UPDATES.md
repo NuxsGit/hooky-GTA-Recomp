@@ -14,8 +14,10 @@
   running, leave a launcher open on Accueil: the update must wait for the game to exit. Cancel once
   during download, make sure no runtime file moved, then retry on demand. Check that **ZIP local…**
   accepts the exact ZIP for the selected feed and rejects a modified one. Use `--no-auto-update`
-  to suppress the automatic check during testing. The clean Windows CI also tests the exact ZIP's
-  staged apply, dashboard relaunch, preferences, input layout and game mode selector with fixtures.
+  to suppress the automatic check during testing. Windows CI drives the real automatic update flow
+  against a local test feed with the exact ZIP. It checks waiting for the game/setup lock, applying
+  the ZIP, restarting, preserving data and switching preferences. It also smokes the mode selector.
+  The shipped launcher uses WinHTTP; the test-only executable is never packaged.
 - Saves, Workshop layouts, `gtav.toml`, `gtav_settings.ini`, `args.txt`, custom pad mappings, local game
   DLL, shader caches and `data/build/` survive. A compatible build ID needs no recompilation. For a
   changed build ID, inspect the number of reused/compiled C++ units in `data/logs/install.log`.
