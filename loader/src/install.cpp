@@ -2414,7 +2414,12 @@ bool RunAndroidBuild(const fs::path& root, const fs::path& home, InstallUi& ui, 
   return inst.RunAndroid(error);
 }
 
+#ifdef _WIN32
+bool LaunchWindowsGame(const fs::path& root, std::wstring* error, const std::vector<std::wstring>& extra,
+                       win::Handle* process) {
+#else
 bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std::wstring>& extra) {
+#endif
   fs::path data = root / L"data";
   std::error_code ec;
   fs::create_directories(data / L"spirv", ec);
@@ -2502,7 +2507,7 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
   return false;
 #else
   HANDLE inherit[] = {lock.Get()};
-  if (!win::Spawn(root / kGameExe, CommandLine(args), root, 0, nullptr, inherit)) {
+  if (!win::Spawn(root / kGameExe, CommandLine(args), root, 0, process, inherit)) {
     *error = L"Could not start gtav_fast.exe";
     return false;
   }
@@ -2511,6 +2516,10 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
 }
 
 #ifdef _WIN32
+bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std::wstring>& extra) {
+  return LaunchWindowsGame(root, error, extra, nullptr);
+}
+
 bool HashUpdateArchive(const fs::path& path, std::string* digest, uint64_t* size, InstallUi& ui) {
   return HashFile(path, digest, size, &ui);
 }

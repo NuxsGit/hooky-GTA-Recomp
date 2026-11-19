@@ -154,11 +154,12 @@ def main():
     ap.add_argument("--expected", required=True)
     ap.add_argument("--licenses", required=True)
     ap.add_argument("--zip", action="store_true")
+    ap.add_argument("--nightly-build", default="", help="the serial used to build the Windows launcher")
     ap.add_argument("--vcruntime", help="folder with the x64 Visual C++ runtime DLLs (default: "
                     "%%VCToolsRedistDir%%\\x64\\Microsoft.VC14x.CRT from a VS developer prompt)")
     a = ap.parse_args()
 
-    version = launcher_version(REPO / "build-launcher")
+    version = launcher_version(REPO / "build-launcher", a.nightly_build)
     sdk = a.sdk or REPO / "rexglue-sdk"
     sdk_bin = sdk / "out" / "install" / "win-amd64" / "bin"
     llvm = Path(a.llvm).resolve()

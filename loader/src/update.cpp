@@ -1,5 +1,6 @@
 #include "update.h"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <optional>
@@ -9,7 +10,7 @@ namespace loader {
 namespace {
 
 #if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
-constexpr std::string_view kPackage = "gtav-recomp-windows-x64.zip";
+constexpr std::string_view kPackage = kWindowsPackageName;
 #elif defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__))
 constexpr std::string_view kPackage = "gtav-recomp-macos-arm64.zip";
 #elif defined(__linux__) && defined(__x86_64__)
@@ -17,23 +18,6 @@ constexpr std::string_view kPackage = "gtav-recomp-linux-x64.tar.gz";
 #else
 constexpr std::string_view kPackage{};
 #endif
-
-using Version = std::array<unsigned, 3>;
-
-std::optional<Version> ParseVersion(std::string_view text) {
-  Version version{};
-  for (size_t i = 0; i < version.size(); ++i) {
-    const size_t dot = text.find('.');
-    if ((i < 2) != (dot != text.npos)) return std::nullopt;
-    auto part = text.substr(0, dot);
-    if (part.empty() || (part.size() > 1 && part.front() == '0')) return std::nullopt;
-    auto end = part.data() + part.size();
-    auto [ptr, ec] = std::from_chars(part.data(), end, version[i]);
-    if (ec != std::errc{} || ptr != end) return std::nullopt;
-    if (i < 2) text.remove_prefix(dot + 1);
-  }
-  return version;
-}
 
 // Read just the fields used by the launcher, skipping release notes and unknown values. We only
 // compare strings with fixed ASCII keys, package names and version syntax; escapes are validated
@@ -180,13 +164,51 @@ class Json {
   std::string_view rest_;
 };
 
+struct Release {
+  std::string_view tag, digest;
+  std::optional<bool> draft, prerelease;
+  uint64_t size = 0;
+  bool compatible = false;
+};
+
+bool ReadRelease(Json& json, std::string_view package, Release& release) {
+  bool assets = false;
+  return json.Object([&](std::string_view key) {
+    if (key == "tag_name") return release.tag.empty() && json.String(&release.tag) && !release.tag.empty();
+    if (key == "draft") return json.Boolean(&release.draft);
+    if (key == "prerelease") return json.Boolean(&release.prerelease);
+    if (key != "assets") return json.Skip();
+    if (std::exchange(assets, true)) return false;
+    return json.Array([&] {
+      std::string_view name, state, digest;
+      uint64_t size = 0;
+      bool has_digest = false, has_size = false;
+      if (!json.Object([&](std::string_view field) {
+            if (field == "name") return name.empty() && json.String(&name) && !name.empty();
+            if (field == "state") return state.empty() && json.String(&state) && !state.empty();
+            if (field == "digest") return !std::exchange(has_digest, true) && json.OptionalDigest(&digest);
+            if (field == "size") return !std::exchange(has_size, true) && json.Unsigned(&size);
+            return json.Skip();
+          })) return false;
+      if (name == package && state == "uploaded") {
+        if (std::exchange(release.compatible, true)) return false;
+        release.digest = digest;
+        release.size = size;
+      }
+      return true;
+    });
+  }) && assets && !release.tag.empty() && release.draft.has_value() && release.prerelease.has_value();
+}
+
+std::optional<BuildVersion> TaggedVersion(std::string_view tag) {
+  return tag.starts_with('v') ? ParseBuildVersion(tag.substr(1)) : std::nullopt;
+}
+
 std::string UpdateInstructions() {
 #ifdef __APPLE__
-  return "Quit the game, replace GTAV.app with the new one, and keep the same game folder. "
-         "Recompile if prompted.";
+  return "Quit the game, replace GTAV.app with the new one, and keep the same game folder. Recompile if prompted.";
 #elif defined(_WIN32)
-  return "Download the official ZIP, then choose Install update ZIP in the launcher. "
-         "The launcher keeps your existing installation and rebuilds only if needed.";
+  return "Open Updates in the launcher to install the verified ZIP. Your saves, game files and settings are kept.";
 #else
   return "Quit the game and extract the download to a new folder. Copy your data folder, "
          "locally built game library and settings into it (see README). Recompile if prompted.";
@@ -196,76 +218,95 @@ std::string UpdateInstructions() {
 }  // namespace
 
 UpdateResult EvaluateRelease(int status, std::string_view body, std::string_view current,
-                             std::string_view package) {
-  if (status == 404) return {UpdateStatus::NoRelease, "No stable release has been published for this fork yet.", {}};
+                             std::string_view package, UpdateChannel channel) {
+  const bool nightly = channel == UpdateChannel::Nightly;
+  const std::string channel_name = nightly ? "nightly" : "stable";
+  const UpdateResult none{UpdateStatus::NoRelease, "No " + channel_name + " release has been published for this channel yet.", {}};
+  if (status == 404) return none;
   if (status != 200)
     return {UpdateStatus::Error, "GitHub update check failed (HTTP " + std::to_string(status) + "). Try again later.", {}};
-  if (body.size() > kMaxReleaseBytes)
-    return {UpdateStatus::Error, "The GitHub response is too large.", {}};
+  if (body.size() > kMaxReleaseBytes) return {UpdateStatus::Error, "The GitHub response is too large.", {}};
+  const UpdateResult invalid{UpdateStatus::Error, "GitHub did not return valid " + channel_name + " release metadata.", {}};
+  const auto installed = ParseBuildVersion(current);
+  if (!installed) return invalid;
 
   Json json(body);
-  std::string_view tag;
-  std::optional<bool> draft, prerelease;
-  bool assets = false, compatible = false;
-  std::string_view asset_digest;
-  uint64_t asset_size = 0;
-  const bool parsed = json.Object([&](std::string_view key) {
-    if (key == "tag_name") return tag.empty() && json.String(&tag) && !tag.empty();
-    if (key == "draft") return json.Boolean(&draft);
-    if (key == "prerelease") return json.Boolean(&prerelease);
-    if (key != "assets") return json.Skip();
-    if (assets) return false;
-    assets = true;
-    return json.Array([&] {
-      std::string_view name, state, digest;
-      uint64_t size = 0;
-      bool has_digest = false, has_size = false;
-      if (!json.Object([&](std::string_view asset_key) {
-            if (asset_key == "name") return name.empty() && json.String(&name) && !name.empty();
-            if (asset_key == "state") return state.empty() && json.String(&state) && !state.empty();
-            if (asset_key == "digest") return !std::exchange(has_digest, true) && json.OptionalDigest(&digest);
-            if (asset_key == "size") return !std::exchange(has_size, true) && json.Unsigned(&size);
-            return json.Skip();
-          })) return false;
-      if (name == package && state == "uploaded") {
-        if (compatible) return false;
-        compatible = true;
-        asset_digest = digest;
-        asset_size = size;
-      }
-      return true;
-    });
-  });
-  const auto bad_release = UpdateResult{UpdateStatus::Error, "GitHub did not return valid stable release metadata.", {}};
-  if (!parsed || !json.Done() || !draft.has_value() || !prerelease.has_value() || !assets || tag.empty())
-    return bad_release;
-  if (*draft || *prerelease)
-    return {UpdateStatus::NoRelease, "No stable update is available from this fork.", {}};
-  const auto installed = ParseVersion(current);
-  const auto latest = tag.starts_with('v') ? ParseVersion(tag.substr(1)) : std::nullopt;
-  if (!latest || !installed) return bad_release;
-  if (*latest <= *installed)
-    return {UpdateStatus::Current, "Launcher v" + std::string(current) + " is up to date (latest stable: " +
-                                       std::string(tag) + ").", {}};
-  if (!compatible)
-    return {UpdateStatus::NoPackage, std::string(tag) + " is published, but the package for this system is not available.", {}};
-  UpdateAsset asset;
-  if (asset_digest.size() == 71 && asset_digest.starts_with("sha256:") &&
-      asset_digest.substr(7).find_first_not_of("0123456789abcdef") == asset_digest.npos &&
-      asset_size > 0 && asset_size <= kMaxUpdateArchiveBytes) {
-    asset = {std::string(tag.substr(1)), std::string(asset_digest.substr(7)), asset_size};
+  Release newest;
+  std::optional<BuildVersion> latest;
+  if (nightly) {
+    // The rolling list is small. Pick the highest parsed version, not the order of API records
+    // or the release name. Stable, drafts and unrelated previews never enter the nightly feed.
+    std::array<BuildVersion, 20> seen;
+    auto seen_end = seen.begin();
+    unsigned count = 0;
+    if (!json.Array([&] {
+          Release item;
+          if (++count > seen.size() || !ReadRelease(json, package, item)) return false;
+          if (*item.draft || !*item.prerelease) return true;
+          auto version = TaggedVersion(item.tag);
+          if (!version || version->Channel() != channel) return true;
+          if (std::find(seen.begin(), seen_end, *version) != seen_end) return false;
+          *seen_end++ = *version;
+          if (!latest || CanUpdate(*latest, *version)) { latest = version; newest = item; }
+          return true;
+        }) || !json.Done()) return invalid;
+    if (!latest) return none;
+  } else {
+    if (!ReadRelease(json, package, newest) || !json.Done()) return invalid;
+    if (*newest.draft || *newest.prerelease) return none;
+    latest = TaggedVersion(newest.tag);
+    if (!latest || latest->Channel() != channel) return invalid;
   }
-  return {UpdateStatus::Available, "Update available: " + std::string(tag) + " (installed: v" + std::string(current) +
+  const std::string tag(newest.tag), version = tag.substr(1);
+  if (!CanUpdate(*installed, *latest)) {
+    if (installed->base > latest->base && installed->Channel() != channel) {
+      return {UpdateStatus::OlderChannel, "This channel is older than your installed build. To switch, use a separate installation.",
+              {}, {}, version};
+    }
+    return {UpdateStatus::Current, "Launcher v" + std::string(current) + " is up to date (latest " + channel_name + ": " + tag + ").",
+            {}, {}, version};
+  }
+  if (!newest.compatible)
+    return {UpdateStatus::NoPackage, tag + " is published, but the package for this system is not available.", {}, {}, version};
+  UpdateAsset asset;
+  if (newest.digest.starts_with("sha256:")) {
+    UpdateAsset candidate{version, std::string(newest.digest.substr(7)), newest.size, channel};
+    if (candidate) asset = std::move(candidate);
+  }
+  return {UpdateStatus::Available, "Update available: " + tag + " (installed: v" + std::string(current) +
                                       ").\nDownload " + std::string(package) + " from GitHub.\n\n" + UpdateInstructions(),
-          std::string(kReleasePage) + "/tag/" + std::string(tag), std::move(asset)};
+          std::string(ReleasePage(channel)) + "/tag/" + tag, std::move(asset), version};
 }
 
-UpdateResult CheckForUpdate() {
+UpdateResult CheckForUpdate(UpdateChannel channel) {
   if (kPackage.empty()) return {UpdateStatus::Error, "This system has no supported desktop package.", {}};
   int status = 0;
   std::string body, error;
-  if (!detail::FetchRelease(&status, &body, &error)) return {UpdateStatus::Error, std::move(error), {}};
-  return EvaluateRelease(status, body, kLauncherVersion, kPackage);
+  if (!detail::FetchRelease(channel, &status, &body, &error)) return {UpdateStatus::Error, std::move(error), {}};
+  return EvaluateRelease(status, body, kLauncherVersion, kPackage, channel);
+}
+
+std::string WindowsAssetPath(const UpdateAsset& asset) {
+  if (!asset) return {};
+  return "/" + std::string(ReleaseRepository(asset.channel)) + "/releases/download/v" + asset.version + "/" +
+         std::string(kWindowsPackageName);
+}
+
+std::optional<UpdatePreferences> ParseUpdatePreferences(std::string_view text) {
+  constexpr std::string_view magic = "gtav-updates-1\n";
+  if (!text.starts_with(magic)) return std::nullopt;
+  text.remove_prefix(magic.size());
+  const auto newline = text.find('\n');
+  if (newline == text.npos) return std::nullopt;
+  const auto channel = text.substr(0, newline);
+  const auto automatic = text.substr(newline + 1);
+  if ((channel != "nightly" && channel != "stable") || (automatic != "on\n" && automatic != "off\n")) return std::nullopt;
+  return UpdatePreferences{channel == "nightly" ? UpdateChannel::Nightly : UpdateChannel::Stable, automatic == "on\n"};
+}
+
+std::string SerializeUpdatePreferences(UpdatePreferences prefs) {
+  return std::string("gtav-updates-1\n") + (prefs.channel == UpdateChannel::Nightly ? "nightly\n" : "stable\n") +
+         (prefs.automatic ? "on\n" : "off\n");
 }
 
 }  // namespace loader

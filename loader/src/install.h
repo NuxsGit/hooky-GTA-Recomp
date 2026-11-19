@@ -62,6 +62,12 @@ bool RunInstall(const std::filesystem::path& root, const std::filesystem::path& 
 // game as a separate process (root = the game folder) and returns.
 bool LaunchGame(const std::filesystem::path& root, std::wstring* error,
                 const std::vector<std::wstring>& extra = {});
+#ifdef _WIN32
+namespace win { class Handle; }
+// The dashboard can track the host while the existing inherited install lock protects its files.
+bool LaunchWindowsGame(const std::filesystem::path& root, std::wstring* error,
+                       const std::vector<std::wstring>& extra, win::Handle* process);
+#endif
 // Checks that can fail before anything is touched (CPU, runtime DLLs, bundled tools).
 bool Preflight(const std::filesystem::path& root, std::wstring* error);
 #ifdef __APPLE__

@@ -21,20 +21,31 @@ SHA-256 hashes only).
 
 ## Publishing updates for this fork
 
-The launcher checks `NuxsGit/hooky-GTA-Recomp`'s latest **stable** GitHub release, on request only.
-The browser handles the download; the player replaces the runtime as described in
-[Recompiling and updating](../README.md#recompiling-and-updating). There is no updater service,
-installer process, automatic download or in-place patch. The original project's releases are not
-part of this feed.
+Both Windows channels default to `NuxsGit/hooky-GTA-Recomp`. A distributor with separate trusted
+repositories can pin `-DGTAV_STABLE_REPO=owner/repo` and `-DGTAV_NIGHTLY_REPO=owner/repo` when
+building the launcher. These are build settings, **not** editable HTTP feed URLs in the player UI.
+Linux and macOS still check Stable on request and install manually.
+
+- **Stable** uses GitHub `releases/latest` and only non-draft, non-prerelease `vMAJOR.MINOR.PATCH`
+  tags. The Windows candidate workflow can attach to an explicitly requested empty stable draft;
+  the maintainer publishes Stable separately, after verifying the candidate in the retail game.
+- **Nightly** uses the newest version in the pinned repository's recent published prereleases with
+  tags `vMAJOR.MINOR.PATCH-nightly.SERIAL`. A stable tag or an unrelated preview cannot be selected
+  by this channel. For the same base version, switching channels is permitted; no channel switches
+  automatically install an older base. Nightly must never be marked as the latest stable release.
+- Windows saves the channel and automatic-update setting in `data/launcher-updates.txt`. It
+  downloads assets from the pinned GitHub repository, following at most one HTTPS hop to GitHub’s
+  release asset CDN; size and SHA-256 must match the uploaded asset metadata before extraction.
+  It stages and applies only under the installation lock, then restarts. See [the update test
+  checklist](DEBUG_AND_UPDATES.md#testing-the-launcher-and-updates).
 
 1. Set `loader/VERSION` to the intended `MAJOR.MINOR.PATCH` **before building all launchers**.
    This drives the displayed version and the macOS bundle version. Each packager checks the
    launcher's build sidecar before staging. Start with a new or empty staging directory, not an
    extracted package or an installed game folder.
-2. Use a consistent release commit and the tag `vMAJOR.MINOR.PATCH`. Build and scan each desktop
-   archive using the platform procedure below, plus the complete corresponding source archive.
-   Upload the archives with these exact names before publishing the draft as the latest stable
-   release. The launcher offers an update only when the asset for that platform is uploaded.
+2. Use a consistent release commit and version tag for the Windows ZIP and matching sources.
+   Build and scan each desktop archive using the platform procedure below. Upload the archives
+   with these exact names. The launcher offers an update only when its platform asset is uploaded.
 
    | Platform | Asset name |
    | --- | --- |
@@ -98,15 +109,23 @@ the PPCContext / PPCImageInfo layout on both sides with static_asserts.
 
 Developer side (Windows x64):
 
-- The **Windows x64 release candidate** workflow builds the desktop ZIP, matching source
-  archive and SHA-256 manifest. Its optional `stage_draft` input can attach those files to
-  the existing empty draft on this fork, but cannot publish it. The workflow runs tests
-  without game files; real install, gameplay, controller tests and the taint scan are still
-  required before any public release. No mobile shells are built by this job.
+- **Windows x64 packages** builds the tested desktop ZIP, matching source archive and SHA-256
+  manifest. On an `arena/**` push it produces a Stable-format candidate only; a push with
+  `[nightly-candidate]` in its head commit instead validates the Nightly format. Neither publishes.
+  The opt-in `stage_draft` input still only fills a matching empty **Stable draft**.
+- On the official repository's **main** branch, the daily schedule (03:17 UTC) builds a new
+  Nightly if the source commit has changed. `workflow_dispatch` with `nightly: true` also builds a
+  Nightly. Only main can publish it; elsewhere the run leaves artifacts for validation. The serial
+  is the Actions run ID followed by its zero-padded three-digit attempt. Publication is a separate
+  job with write access: it checks both archives, uploads to a draft and publishes it as a prerelease
+  with `latest=false`. The launcher matches the build's exact serial in its version and ZIP marker.
+  Scheduled publication starts after the workflow is on `main`. No mobile shells or retail game
+  data are built by these jobs; the smoke uses fixtures and cannot certify in-game play.
 - To build the same desktop ZIP locally, use a fresh checkout and run
   `python tools/release/build_windows_candidate.py --llvm DIR --dxc-license FILE` in a VS x64
   developer prompt with CMake 3.25–3.x, Ninja, Git, Python, the official LLVM 19.1.5 win64
-  bundle and Microsoft's DirectXShaderCompiler license. It fetches the pinned dependencies,
+  bundle and Microsoft's DirectXShaderCompiler license. Add `--nightly-build SERIAL` to reproduce
+  a Nightly package (the suffix from its tag). It fetches the pinned dependencies,
   builds the host, runs the asset-free tests and smoke-tests the extracted ZIP.
 - For the individual steps, get the
   [pinned upstream sources and submodules](MAC_THEN_ANDROID_PLAN.md#1-set-up-the-tree)

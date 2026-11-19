@@ -1,6 +1,6 @@
 # Desktop Workshop preview
 
-The desktop launcher’s **Play** button starts the game and opens the mode selector **before** the
+The desktop launcher’s **Jouer** (Windows) / **Play** button starts the game and opens the mode selector **before** the
 TU27 guest boots. **Sandbox solo** is the default (Enter); **Private multiplayer** and **Campaign**
 are the other choices. Escape closes the selector without booting the game. This is a feature of the
 new runtime + launcher, not of previously released ZIPs. Phone builds still use their existing startup.

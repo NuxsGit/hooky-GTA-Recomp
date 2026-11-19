@@ -87,12 +87,12 @@ from them.
 1. Download `gtav-recomp-windows-x64.zip`, unzip it somewhere with enough space, and run
    `gtav_launcher.exe`.
 2. Pick **Disc 1**, **Disc 2** and the **title update** (File... or Folder...), then press
-   **Install & build**.
-3. When setup finishes, press **Play**.
+   **Installer et compiler**.
+3. When setup finishes, press **Jouer**.
 
-Later: `gtav_launcher.exe` opens the **Overview**, with installation status, **Play**, updates and
-recent activity. Use **Source setup** for the discs, or **Activity log** to open the logs folder.
-A shortcut can start the game directly with `gtav_launcher.exe --play`.
+Later: `gtav_launcher.exe` opens **Accueil**, with game status and **Jouer**. The sidebar keeps
+**Installation**, **Mises à jour** and **Journaux** separate. `gtav_launcher.exe --play` is still a
+shortcut to launch the game directly.
 
 ## Linux
 
@@ -118,13 +118,22 @@ opening it (or pass `--setup`) to manage the install and updates.
 
 ## Recompiling and updating
 
-**Windows:** Close the game. In **Overview → Updates**, choose **Check** and **Get ZIP** to download
-from this fork's GitHub Releases. Then select that archive with **Install update ZIP…**. The launcher
-checks its SHA-256 against the latest published stable Windows asset, replaces the runtime and tools
-in place, and restarts. It keeps `data/`, your local `gtav_game.dll`, saves, controller mappings and
-settings. If the build ID is unchanged it can play immediately; otherwise it starts an incremental
-rebuild. **Activity log** opens `data/logs/`, including `update.log` and `install.log`. No automatic
-updates or background network checks. An interrupted swap is rolled back on the next launch.
+**Windows x64:** **Mises à jour** shows the installed build, the selected GitHub channel and the
+latest release. **Stable** is the default for a stable package. **Nightly** is opt-in and may contain
+regressions. The launcher checks at startup and every 20 minutes while idle on Accueil or Mises à
+jour. With **Automatique** enabled it downloads and installs a verified update if the game is
+closed. Play remains available during the background version check, and the dashboard stays open
+behind the game so a waiting update can run after you quit. No resident updater runs when the
+launcher is closed. Toggle automatic updates off to use **Rechercher** and **Installer
+maintenant** on demand. **ZIP local…** verifies a separately downloaded ZIP against the selected
+feed. `--no-auto-update` suppresses background checks for one launch.
+
+The launcher installs only the selected repository's Windows ZIP after its size and SHA-256 match
+GitHub metadata. It restarts without replacing `data/`, your local `gtav_game.dll`, saves, controller
+mappings or settings. If the build ID changed it starts an incremental rebuild. **Journaux** opens
+`data/logs/`, including `update.log` and `install.log`. An interrupted swap is rolled back on the
+next launch. Returning to Stable never automatically installs an older base version; use a separate
+folder if Stable is behind Nightly. See [release channels](docs/RELEASE_CLEANROOM.md#publishing-updates-for-this-fork).
 
 For a legacy Windows launcher (or a draft, offline or differently laid-out ZIP), use the manual
 method: extract to a **new folder** and copy `data/`, `gtav_game.dll` and your local settings
@@ -136,7 +145,7 @@ new folder. Copy `data/`, your local `gtav_game.so` and the settings listed abov
 in the new folder. **macOS:** Quit and replace the **whole `GTAV.app`**, keeping the same game folder.
 Don't copy files into the signed bundle. Locally built phone exports can stay in the old folder.
 
-**Recompile** (or `--rebuild`) uses the existing game files, without the original discs. It verifies
+**Recompiler** / **Recompile** (or `--rebuild`) uses the existing game files, without the original discs. It verifies
 XEX/XEXP and generated sources, keeps `data/build/` as a local cache, and compiles only changed units
 and units affected by shared headers, flags or the compiler. A link-only change uses the cached
 objects. First migration from a launcher that discarded its cache may need one full rebuild. You can
@@ -146,7 +155,7 @@ or your local game library. Use **Install & build** with your originals if data 
 
 ## Desktop Workshop (experimental)
 
-**Play** opens a game-startup choice: **Sandbox solo** (default), **Private multiplayer**, or
+**Jouer** (Windows) / **Play** opens a game-startup choice: **Sandbox solo** (default), **Private multiplayer**, or
 **Campaign**. The two sandbox modes have a separate local profile. Press **F6** in free roam to
 build and save layouts with props and checkpoints, run a race or checkpoint hunt, and test a local
 vehicle. In a private room (IPv4, TCP port, invite code), friends see nearby ghost actors. This is
@@ -219,7 +228,7 @@ A free Apple ID works, but the app has to be re-signed every 7 days.
 
 1. **Install and play the game on your computer first, for a while.** The phone gets the shaders your
    computer has seen, so drive around and go inside some buildings.
-2. **Build for iPhone.** Open the setup window (Windows: **Source setup**; macOS:
+2. **Build for iPhone.** Open the setup window (Windows: **Installation**; macOS:
    hold Option opening the app; Linux: `./gtav_launcher --setup`) and press **Build for iPhone**
    (or run the launcher with `--iphone`). It takes about 15-25 minutes and shows you
    `iphone/GTAV.ipa` in your game folder.

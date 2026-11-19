@@ -2,24 +2,28 @@
 
 ## Testing the launcher and updates
 
-- Open `gtav_launcher.exe` at normal and high DPI. Tab through Overview, Source setup and
-  Activity log. Check the game folder and logs buttons, Play, input file/folder pickers,
-  install/cancel/resume, rebuilding, and the `--play`, `--setup`, `--unattended` and `--rebuild`
-  switches. Play should refuse a stale library or another running copy in the same folder.
-- Install the standard ZIP from a **newer, stable** release of the fork using **Install update ZIP**.
-  This is a verified import of the original downloaded ZIP, not an auto-downloader. Drafts,
-  prereleases, older builds, archives without a GitHub asset digest, modified ZIPs and optional
-  mobile package layouts require manual installation (see the README). When GitHub has no
-  stable release, expect the launcher to say so and change no runtime files.
-- Check that saves, `gtav.toml`, `gtav_settings.ini`, `args.txt`, custom pad mappings, local game DLL,
-  shader caches, and `data/build/` survive. Check that a second launcher or running game blocks
-  the update. With a compatible game build ID, the new launcher should say **No recompilation
-  needed**. For a changed ID, inspect the number of C++ units reused and compiled in `install.log`.
-- Updates stage an authenticated ZIP using the Windows system `tar.exe` and swap only the
-  standard package's owned paths. The helper waits for the old launcher to exit and holds the
-  installer lock until the swap or rollback is complete. The previous package files are retained
-  in `.gtav-update/backup`; the next update replaces this backup. If interrupted mid-swap,
-  reopen `gtav_launcher.exe` to recover. Keep the backup and journal if recovery reports an error.
+- Open `gtav_launcher.exe` at normal and high DPI. Tab through **Accueil**, **Installation**,
+  **Mises à jour** and **Journaux**. Check the game/log folder buttons, **Jouer**, file/folder pickers,
+  setup/cancel/resume, recompilation, and `--play`, `--setup`, `--unattended`, `--rebuild`.
+- With published releases, test Stable and Nightly independently. A Stable launcher never offers
+  a prerelease unless Nightly is selected and confirmed. Channel and **Automatique** survive a
+  restart. Check that **Rechercher** is nonblocking, that **Installer maintenant** stays disabled
+  without an uploaded, digest-bearing ZIP, and that an offline or empty feed leaves Play usable.
+  An older base version is never installed automatically on a channel change.
+- Test **Automatique** on a copy of a working installation with a newer official ZIP. With the game
+  running, leave a launcher open on Accueil: the update must wait for the game to exit. Cancel once
+  during download, make sure no runtime file moved, then retry on demand. Check that **ZIP local…**
+  accepts the exact ZIP for the selected feed and rejects a modified one. Use `--no-auto-update`
+  to suppress the automatic check during testing. The clean Windows CI also tests the exact ZIP's
+  staged apply, dashboard relaunch, preferences, input layout and game mode selector with fixtures.
+- Saves, Workshop layouts, `gtav.toml`, `gtav_settings.ini`, `args.txt`, custom pad mappings, local game
+  DLL, shader caches and `data/build/` survive. A compatible build ID needs no recompilation. For a
+  changed build ID, inspect the number of reused/compiled C++ units in `data/logs/install.log`.
+- The installer opens verified ZIPs with Windows `tar.exe` and swaps only the standard package’s
+  owned paths. The helper waits for the old launcher and holds the install lock through swap or
+  rollback. The previous package files remain in `.gtav-update/backup` until the next update. If
+  interrupted mid-swap, reopen `gtav_launcher.exe` to recover. Keep the backup and journal if
+  recovery reports an error.
 - A clean `data/build/` compile can take as long as before. The cache lives on the player's
   PC and is never part of a release. XEX/XEXP and the generated reference files always pass
   strict SHA-256 checks on a rebuild. Non-code verification receipts reuse only previously

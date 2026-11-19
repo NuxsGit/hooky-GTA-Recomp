@@ -52,12 +52,6 @@ bool IsHex(std::string_view value) {
   return value.size() == 64 && value.find_first_not_of("0123456789abcdef") == value.npos;
 }
 
-bool IsVersion(std::string_view value) {
-  if (value.empty() || value.size() > 32 || value.find_first_not_of(".0123456789") != value.npos) return false;
-  return std::count(value.begin(), value.end(), '.') == 2 && value.front() != '.' &&
-         value.back() != '.' && value.find("..") == value.npos;
-}
-
 bool ReadLine(const fs::path& file, std::string* text, uintmax_t max_bytes) {
   if (Kind(file) != PathKind::File) return false;
   std::error_code ec;
@@ -134,7 +128,7 @@ bool ReadJournal(const fs::path& work, Journal* journal) {
   const auto split = text.find(' ', 14);
   if (split == text.npos) return false;
   journal->version = text.substr(14, split - 14);
-  if (!IsVersion(journal->version) || text.size() != split + 1 + kOwned.size()) return false;
+  if (!ParseBuildVersion(journal->version) || text.size() != split + 1 + kOwned.size()) return false;
   for (size_t i = 0; i < kOwned.size(); ++i) {
     const char bit = text[split + 1 + i];
     if (bit != '0' && bit != '1') return false;
@@ -204,7 +198,7 @@ namespace detail {
 bool JournalUpdate(const fs::path& root, std::string_view version, std::wstring* error) {
   const auto work = root / kWork;
   const auto backup = work / L"backup";
-  if (!IsVersion(version) || Kind(work / kJournal) != PathKind::Missing || !ValidatePackage(work, version, error)) {
+  if (!ParseBuildVersion(version) || Kind(work / kJournal) != PathKind::Missing || !ValidatePackage(work, version, error)) {
     if (error->empty()) *error = L"A previous update still needs recovery.";
     return false;
   }
@@ -275,34 +269,79 @@ bool RollbackUpdate(const fs::path& root, std::wstring* error) {
 
 }  // namespace detail
 
+UpdatePreferences LoadWindowsUpdatePreferences(const fs::path& root) {
+  const auto data = root / "data";
+  const auto directory = Kind(data);
+  constexpr UpdatePreferences fallback{UpdateChannel::Stable, false};
+  if (directory != PathKind::Missing && directory != PathKind::Folder) return fallback;
+  const auto path = data / "launcher-updates.txt";
+  const auto kind = Kind(path);
+  const auto installed = ParseBuildVersion(kLauncherVersion);
+  if (kind == PathKind::Missing) return {installed ? installed->Channel() : UpdateChannel::Stable, true};
+  if (kind != PathKind::File) return fallback;
+  std::ifstream in(path, std::ios::binary);
+  char text[64];
+  in.read(text, sizeof(text));
+  if (!in.eof() || in.bad()) return fallback;
+  return ParseUpdatePreferences(std::string_view(text, size_t(in.gcount()))).value_or(fallback);
+}
+
+bool SaveWindowsUpdatePreferences(const fs::path& root, UpdatePreferences prefs) {
+  const auto data = root / "data", path = data / "launcher-updates.txt";
+  std::error_code ec;
+  fs::create_directories(data, ec);
+  if (ec || Kind(data) != PathKind::Folder || !SafeOwnedPath(path)) return false;
+  const auto temp = data / (L"launcher-updates-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                            std::to_wstring(GetTickCount64()) + L".new");
+  win::Handle file(CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+  if (!file) return false;
+  const auto text = SerializeUpdatePreferences(prefs);
+  DWORD written = 0;
+  const bool saved = WriteFile(file.Get(), text.data(), static_cast<DWORD>(text.size()), &written, nullptr) &&
+                     written == text.size() && FlushFileBuffers(file.Get());
+  file.Close();
+  if (saved && Move(temp, path, true)) return true;
+  fs::remove(temp, ec);
+  return false;
+}
+
+bool WindowsUpdateIdle(const fs::path& root) {
+  std::error_code ec;
+  fs::create_directories(root / "data", ec);
+  if (ec) return false;
+  win::Handle lock(win::OpenSetupLock(root / "data/setup.lock"));
+  return bool(lock) && !HasPendingWindowsUpdate(root);
+}
+
 bool HasPendingWindowsUpdate(const fs::path& root) { return Kind(root / kWork / kJournal) != PathKind::Missing; }
 
 bool detail::StageUpdate(const fs::path& root, const fs::path& archive, const UpdateAsset& asset,
-                         InstallUi& ui, std::wstring* error) {
-  if (!asset || !IsVersion(asset.version) || !IsHex(asset.sha256) || asset.size > kMaxUpdateArchiveBytes)
-    return Error(error, L"There is no newer official Windows ZIP with a published SHA-256 digest.");
+                         InstallUi& ui, std::wstring* error, const ArchiveDownload& download) {
+  if (!asset) return Error(error, L"There is no newer official Windows ZIP with a published SHA-256 digest.");
   const auto work = root / kWork;
   std::error_code ec;
   fs::create_directory(work, ec);
   if (ec || Kind(work) != PathKind::Folder || HasPendingWindowsUpdate(root))
     return Error(error, L"An update is already pending or the update folder is unavailable.");
 
-  // Take a private copy before hashing/extracting, so changing the selected file cannot change
-  // which bytes get unpacked. Reject reparse points in the working paths.
+  // Verify/extract only a private copy, even if a local ZIP is replaced during preparation.
   const auto zip = work / L"verified.zip", stage = work / L"stage";
-  if (!SafeOwnedPath(zip) || Kind(stage) == PathKind::Unsafe || Kind(archive) != PathKind::File ||
-      fs::file_size(archive, ec) != asset.size || ec)
-    return Error(error, L"The selected file does not match the size of the latest official Windows ZIP.");
-  ui.Stage(L"Verifying the official ZIP (SHA-256)...");
-  // In particular, never remove the ZIP the player selected when it is inside our work area.
-  const auto source = fs::canonical(archive, ec);
-  if (ec) return Error(error, L"Could not read the selected ZIP path.");
-  const auto destination = fs::canonical(work, ec);
-  if (ec) return Error(error, L"Could not resolve the update staging folder.");
-  for (auto parent = source.parent_path(); !parent.empty(); parent = parent.parent_path()) {
-    if (CompareStringOrdinal(parent.c_str(), -1, destination.c_str(), -1, TRUE) == CSTR_EQUAL)
-      return Error(error, L"Choose a ZIP outside the installer's .gtav-update folder.");
-    if (parent == parent.parent_path()) break;
+  if (!SafeOwnedPath(zip) || Kind(stage) == PathKind::Unsafe)
+    return Error(error, L"The update staging folder or ZIP path is unsafe.");
+  fs::path source;
+  if (!archive.empty()) {
+    if (Kind(archive) != PathKind::File || fs::file_size(archive, ec) != asset.size || ec)
+      return Error(error, L"The selected file does not match the size of the latest official Windows ZIP.");
+    // Never remove a file that the player selected from inside our staging area.
+    source = fs::canonical(archive, ec);
+    if (ec) return Error(error, L"Could not read the selected ZIP path.");
+    const auto destination = fs::canonical(work, ec);
+    if (ec) return Error(error, L"Could not resolve the update staging folder.");
+    for (auto parent = source.parent_path(); !parent.empty(); parent = parent.parent_path()) {
+      if (CompareStringOrdinal(parent.c_str(), -1, destination.c_str(), -1, TRUE) == CSTR_EQUAL)
+        return Error(error, L"Choose a ZIP outside the installer's .gtav-update folder.");
+      if (parent == parent.parent_path()) break;
+    }
   }
   const auto cleanup = [&] {
     std::error_code ignored;
@@ -310,17 +349,21 @@ bool detail::StageUpdate(const fs::path& root, const fs::path& archive, const Up
     fs::remove_all(stage, ignored);
   };
   cleanup();
-  if (!CopyFileExW(source.c_str(), zip.c_str(), CopyProgress, &ui, nullptr, COPY_FILE_FAIL_IF_EXISTS)) {
+  if (source.empty()) {
+    if (!download(asset, zip, ui, error)) { cleanup(); return false; }
+  } else if (!CopyFileExW(source.c_str(), zip.c_str(), CopyProgress, &ui, nullptr, COPY_FILE_FAIL_IF_EXISTS)) {
     cleanup();
     return Error(error, ui.Cancelled() ? L"Cancelled." : L"Could not copy the selected ZIP for verification.");
   }
+  ui.Stage(L"Verifying the official ZIP (SHA-256)...");
+  ui.Progress(.67);
   std::string digest;
   uint64_t size = 0;
   if (!HashUpdateArchive(zip, &digest, &size, ui) || size != asset.size || digest != asset.sha256) {
     cleanup();
     return Error(error, ui.Cancelled() ? L"Cancelled." : L"SHA-256 mismatch. Download the official Windows ZIP again.");
   }
-  ui.Progress(.35);
+  ui.Progress(.82);
   ui.Stage(L"Unpacking the verified update (your data is not being changed)...");
   if (!fs::create_directory(stage, ec) || ec || !Extract(zip, stage, ui, error) || ui.Cancelled() ||
       !ValidatePackage(work, asset.version, error)) {
@@ -332,18 +375,32 @@ bool detail::StageUpdate(const fs::path& root, const fs::path& archive, const Up
   return true;
 }
 
-bool PrepareWindowsUpdate(const fs::path& root, const fs::path& archive, const UpdateAsset& asset,
-                          InstallUi& ui, std::wstring* error) {
+UpdatePreparation PrepareWindowsUpdate(const fs::path& root, const fs::path& archive, const UpdateAsset& asset,
+                                       InstallUi& ui, std::wstring* error, const detail::ArchiveDownload& download) {
+  using enum UpdatePreparation;
+  error->clear();
   const auto data = root / "data", work = root / kWork;
   std::error_code ec;
   fs::create_directories(data / "logs", ec);
-  win::Handle lock(ec ? nullptr : win::OpenSetupLock(data / "setup.lock", true));
-  if (!lock) return Error(error, L"Close the game and any other setup before applying an update.");
+  if (ec) {
+    *error = L"Could not create the log folder. Check write permissions.";
+    return Failed;
+  }
+  win::Handle lock(win::OpenSetupLock(data / "setup.lock", true));
+  if (!lock) {
+    const auto reason = GetLastError();
+    if (reason == ERROR_SHARING_VIOLATION || reason == ERROR_LOCK_VIOLATION) {
+      *error = L"Close the game and any other setup before applying an update.";
+      return Deferred;
+    }
+    *error = L"Could not lock the game folder. Check write permissions.";
+    return Failed;
+  }
   std::ofstream log(data / "logs/update.log", std::ios::app);
   log << "Preparing verified update v" << asset.version << '\n';
-  if (!detail::StageUpdate(root, archive, asset, ui, error)) {
+  if (!detail::StageUpdate(root, archive, asset, ui, error, download)) {
     log << Narrow(*error) << '\n';
-    return false;
+    return Failed;
   }
   const auto cleanup = [&] {
     std::error_code ignored;
@@ -354,16 +411,20 @@ bool PrepareWindowsUpdate(const fs::path& root, const fs::path& archive, const U
       ui.Cancelled() || !detail::JournalUpdate(root, asset.version, error)) {
     cleanup();
     if (error->empty()) *error = ui.Cancelled() ? L"Cancelled." : L"Could not prepare the restart helper.";
-    return false;
+    log << Narrow(*error) << '\n';
+    return Failed;
   }
-  if (!StartHelper(root, false, lock.Get(), error)) {
+  if (ui.Cancelled() || !StartHelper(root, false, lock.Get(), error)) {
     // No runtime file moved yet. Leave the journal intact if removing it fails.
     if (DeleteFileW((work / kJournal).c_str())) cleanup();
-    return false;
+    else *error = L"Could not remove the update journal. Reopen the launcher to recover.";
+    if (error->empty()) *error = L"Cancelled.";
+    log << Narrow(*error) << '\n';
+    return Failed;
   }
   log << "Verified and staged; waiting for launcher to exit\n";
   ui.Progress(1.0);
-  return true;
+  return Ready;
 }
 
 bool StartWindowsUpdateRecovery(const fs::path& root, std::wstring* error) {
@@ -402,7 +463,7 @@ int FinishWindowsUpdate(const fs::path& helper, uintptr_t parent, uintptr_t lock
   }
   const auto launcher = root / kLauncher;
   if (updated || restored) {
-    if (win::Spawn(launcher, Quote(launcher) + (updated ? L" --updated" : L" --setup"), root, 0)) return 0;
+    if (win::Spawn(launcher, Quote(launcher) + (updated ? L" --updated" : L" --setup --no-auto-update"), root, 0)) return 0;
     MessageBoxW(nullptr, L"Open gtav_launcher.exe to continue.", L"GTA V Recomp | Update", MB_ICONINFORMATION);
   }
   return 1;

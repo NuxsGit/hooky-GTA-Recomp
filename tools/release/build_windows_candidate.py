@@ -16,6 +16,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from release_metadata import launcher_version
+
 REPO = Path(__file__).resolve().parents[2]
 PACKAGE = "gtav-recomp-windows-x64"
 DEPS = (
@@ -119,7 +121,7 @@ def selector_fixture(host, scratch):
         (host / "gtav_game.dll").unlink()
 
 
-def smoke_package(archive):
+def smoke_package(archive, version):
     # Test the extracted download, not the build directory (which could hide missing DLLs).
     with tempfile.TemporaryDirectory(prefix="gtav-win-smoke-") as tmp:
         with zipfile.ZipFile(archive) as zf:
@@ -134,7 +136,6 @@ def smoke_package(archive):
         with archive.open("rb") as stream:
             for block in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(block)
-        version = (REPO / "loader/VERSION").read_text(encoding="ascii").strip()
         run(REPO / "build-launcher/gtav_windows_update_tests.exe", "--verify-package",
             Path(tmp) / "Update fixture with spaces", archive, version, digest.hexdigest(),
             host / "gtav_launcher.exe", timeout=250)
@@ -158,6 +159,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--llvm", type=Path, required=True, help="official unpacked LLVM 19.1.5 win64")
     ap.add_argument("--dxc-license", type=Path, required=True, help="DirectXShaderCompiler LICENSE.TXT")
+    ap.add_argument("--nightly-build", default="", help="positive ID for a versioned Nightly package")
     ap.add_argument("--sdk-cache", type=Path, help="optional runner cache of a matching, complete SDK install")
     args = ap.parse_args()
     if os.name != "nt" or platform.machine().lower() not in ("amd64", "x86_64"):
@@ -195,7 +197,8 @@ def main():
         f"-DREX_SDK_SRC={sdk / 'src'}", *clang)
     run("cmake", "--build", "build-dll", "--parallel")
     run("cmake", "-S", "loader", "-B", "build-launcher", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
-        "-DCMAKE_CXX_COMPILER=cl", "-DGTAV_LAUNCHER_TESTS=ON", f"-DGTAV_SDK_THIRDPARTY={sdk / 'thirdparty'}")
+        "-DCMAKE_CXX_COMPILER=cl", "-DGTAV_LAUNCHER_TESTS=ON", f"-DGTAV_NIGHTLY_BUILD={args.nightly_build}",
+        f"-DGTAV_SDK_THIRDPARTY={sdk / 'thirdparty'}")
     run("cmake", "--build", "build-launcher", "--parallel")
     run("ctest", "--test-dir", "build-launcher", "--output-on-failure")
     run("cmake", "-S", "tools/input_tests/sdl_probe", "-B", "build/controller-check", "-G", "Ninja",
@@ -209,8 +212,8 @@ def main():
     shutil.copyfile(dxc_license, licenses / "dxc-LICENSE.TXT")
     shutil.copyfile(REPO / "LICENSE", licenses / "GPL-3.0.txt")
     run("python", "tools/release/make_release.py", f"dist/{PACKAGE}", "--llvm", llvm,
-        "--expected", "tools/release/expected.txt", "--licenses", licenses, "--zip")
-    smoke_package(REPO / "dist" / f"{PACKAGE}.zip")
+        "--expected", "tools/release/expected.txt", "--licenses", licenses, "--zip", "--nightly-build", args.nightly_build)
+    smoke_package(REPO / "dist" / f"{PACKAGE}.zip", launcher_version(REPO / "build-launcher", args.nightly_build))
     print(f"Windows candidate: dist/{PACKAGE}.zip (in-game validation still required)", flush=True)
 
 

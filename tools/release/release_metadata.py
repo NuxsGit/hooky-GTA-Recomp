@@ -6,11 +6,20 @@ from pathlib import Path
 LOADER = Path(__file__).resolve().parents[2] / "loader"
 
 
-def launcher_version(build_dir):
+def build_version(nightly_build=""):
     version = (LOADER / "VERSION").read_text(encoding="ascii").strip()
-    stamp = build_dir / "launcher-version.txt"
     if not re.fullmatch(r"(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){2}", version):
         raise SystemExit("loader/VERSION must be MAJOR.MINOR.PATCH")
+    if nightly_build:
+        if not re.fullmatch(r"[1-9][0-9]{0,17}", nightly_build):
+            raise SystemExit("nightly build serial must be a positive number (up to 18 digits)")
+        version += f"-nightly.{nightly_build}"
+    return version
+
+
+def launcher_version(build_dir, nightly_build=""):
+    version = build_version(nightly_build)
+    stamp = build_dir / "launcher-version.txt"
     if not stamp.is_file() or stamp.read_text(encoding="ascii").strip() != version:
         raise SystemExit(f"rebuild the launcher in {build_dir} for version {version} before packaging")
     return version

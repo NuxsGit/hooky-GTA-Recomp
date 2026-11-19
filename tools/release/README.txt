@@ -28,19 +28,19 @@ What you need
 First run
 ---------
 1. Unzip this folder somewhere with enough space and run gtav_launcher.exe.
-2. Open Source setup, pick Disc 1, Disc 2 and the title update, then press Install & build.
+2. Open Installation, pick Disc 1, Disc 2 and the title update, then press Installer et compiler.
 3. The launcher checks every file against known-good hashes, copies them into data\, generates
    C++ from your game executable, compiles it into gtav_game.dll, and keeps a local compilation cache in data\build.
    This takes 15-30 minutes depending on your CPU.
-4. Press Play. The first minutes of play translate shaders in the background; some objects
+4. Press Jouer. The first minutes of play translate shaders in the background; some objects
    can be missing until their shader is ready. They are kept in data\spirv for later runs.
 
-Later runs open the Overview dashboard, with Play, updates, setup and an activity log.
+Later runs open Accueil. Use the sidebar for Installation, Mises à jour or Journaux.
 Use --play in a shortcut if you prefer to start the game directly.
 
 Desktop Workshop (experimental)
 --------------------------------
-Play opens a mode selector before the game starts: Sandbox solo (default), Private multiplayer,
+Jouer opens a mode selector before the game starts: Sandbox solo (default), Private multiplayer,
 or Campaign. Sandbox uses a separate profile: data\user\sandbox\profile. On the first sandbox
 run, complete the original game’s first-run screens and prologue before using free-roam tools.
 Press F6 in free roam: build and save layouts with props, set up checkpoint races or hunts,
@@ -52,13 +52,16 @@ Skip the selector for story mode with: gtav_launcher.exe --play -- --gtav_mode=c
 
 Recompile and update
 --------------------
-Choose Recompile (or run the launcher with --rebuild) to check the existing game data and build
-the game library without recopying the discs. Use Install & build when the data is missing or
+Choose Recompiler (or run the launcher with --rebuild) to check the existing game data and build
+the game library without recopying the discs. Use Installer et compiler when the data is missing or
 damaged. Recompile leaves your game data, saves and settings in place.
 
-Under Updates choose Check and Get ZIP. Download from the fork's stable GitHub release, then
-select that ZIP with Install update ZIP. Close the game first. The launcher checks the asset's
-SHA-256, replaces the package files and restarts without changing data, saves or settings.
+In Mises à jour, Stable is recommended. Nightly contains experimental builds and requires
+confirmation to select from Stable. Automatique checks the chosen GitHub feed and downloads and
+installs a verified ZIP while this launcher is open and the game is closed. Turn it off to check and
+install on demand (Rechercher, Installer maintenant). ZIP local verifies a downloaded ZIP against
+the chosen feed. Run with --no-auto-update to pause automatic behavior for one launch.
+The launcher checks the asset size and SHA-256, updates package files only and restarts.
 A compatible runtime update requires no recompilation; otherwise existing verified objects are
 reused and only affected C++ files are compiled. The first rebuild from an older launcher may
 have no cache to reuse. Logs: data\logs\install.log and data\logs\update.log.
@@ -96,7 +99,7 @@ Play GTA V on an iPhone 12 or newer (iOS 17+). The phone cannot build the game i
 PC does it once (about 15 minutes); the phone then installs the game files from your discs.
 1. Set up and play the game here for a while first (the phone gets the shaders the PC has seen:
    drive around, go indoors).
-2. In Source setup, press "Build for iPhone". When it is done,
+2. In Installation, press "Construire pour iPhone". When it is done,
    Explorer shows iphone\GTAV.ipa.
 3. Drag GTAV.ipa into Sideloadly (sideloadly.io) with the iPhone plugged in, and sign in with
    your Apple ID. (A free Apple ID has to re-sign every 7 days.)
@@ -112,7 +115,7 @@ Play GTA V on an Android phone with a recent Snapdragon (tested: Galaxy S23 FE, 
 and about 40 GB free during setup. The app has no game in it: this PC builds your game code for
 the phone once (about 15-30 minutes), and the phone installs the game files from your discs.
 1. Set up and play the game here for a while first (the phone gets the shaders the PC has seen).
-2. In Source setup, press "Build for Android". When it is done,
+2. In Installation, press "Construire pour Android". When it is done,
    Explorer shows android\gtav-android-pack.zip (android\GTAV.apk is next to it).
 3. Copy GTAV.apk, gtav-android-pack.zip, your Disc 1 ISO, Disc 2 ISO and the TU file to the
    phone (for example its Download folder).

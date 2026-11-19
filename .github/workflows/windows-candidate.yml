@@ -1,8 +1,14 @@
-name: Windows x64 release candidate
+name: Windows x64 packages
 
 on:
+  schedule:
+    - cron: '17 3 * * *'  # UTC; GitHub runs schedules only from the default branch
   workflow_dispatch:
     inputs:
+      nightly:
+        description: Build a Nightly (publish only from main in the official repository)
+        type: boolean
+        default: false
       stage_draft:
         description: Attach to the empty matching draft (never publish it)
         type: boolean
@@ -22,7 +28,52 @@ permissions:
   contents: read
 
 jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      serial: ${{ steps.version.outputs.serial }}
+      build: ${{ steps.version.outputs.build }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - id: version
+        name: Select the release channel and build version
+        shell: bash
+        env:
+          NIGHTLY: ${{ github.event_name == 'schedule' || inputs.nightly || (github.event_name == 'push' && contains(github.event.head_commit.message, '[nightly-candidate]')) }}
+          STAGE_DRAFT: ${{ inputs.stage_draft }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          serial=''
+          build=true
+          if [[ "$NIGHTLY" == true ]]; then
+            [[ "$STAGE_DRAFT" != true ]] || { echo 'Nightly cannot stage a stable draft'; exit 1; }
+            [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,2}$ ]]
+            printf -v serial '%s%03d' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          fi
+          tag="v$(PYTHONPATH=tools/release python3 -c 'import sys; from release_metadata import build_version; print(build_version(sys.argv[1]))' "$serial")"
+          if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            if [[ "$GITHUB_REPOSITORY" != NuxsGit/hooky-GTA-Recomp || "$GITHUB_REF" != refs/heads/main ]]; then
+              build=false
+            else
+              # No extra copy of a daily build when there is no new source on main.
+              latest=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 20 --json tagName,isPrerelease \
+                --jq 'map(select(.isPrerelease and (.tagName | test("^v[0-9.]+-nightly\\.[0-9]+$")))) | .[0].tagName // ""')
+              if [[ -n "$latest" ]]; then
+                target=$(gh release view "$latest" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)
+                if [[ "$target" == "$GITHUB_SHA" ]]; then build=false; fi
+              fi
+            fi
+          fi
+          printf 'build=%s\nserial=%s\ntag=%s\n' "$build" "$serial" "$tag" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: metadata
+    if: needs.metadata.outputs.build == 'true'
     runs-on: windows-2022
     timeout-minutes: 80
     steps:
@@ -62,10 +113,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'CMake installation failed' }
           (python -c 'import sysconfig; print(sysconfig.get_path("scripts"))') >> $env:GITHUB_PATH
       - name: Compile and test extracted package
+        env:
+          GTAV_NIGHTLY_SERIAL: ${{ needs.metadata.outputs.serial }}
         shell: cmd
         run: |
           call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 || exit /b 1
-          python -u tools\release\build_windows_candidate.py --llvm "%RUNNER_TEMP%\gtav-build-deps\llvm" --dxc-license "%RUNNER_TEMP%\gtav-build-deps\dxc-LICENSE.TXT" --sdk-cache build\windows-sdk-cache
+          python -u tools\release\build_windows_candidate.py --llvm "%RUNNER_TEMP%\gtav-build-deps\llvm" --dxc-license "%RUNNER_TEMP%\gtav-build-deps\dxc-LICENSE.TXT" --sdk-cache build\windows-sdk-cache --nightly-build "%GTAV_NIGHTLY_SERIAL%"
       - name: Record the successful SDK install even if a later build step failed
         if: ${{ !cancelled() && steps.sdk-cache.outputs.cache-hit != 'true' && hashFiles('build/windows-sdk-cache/*/.complete') != '' }}
         continue-on-error: true
@@ -89,6 +142,8 @@ jobs:
           compression-level: 0
 
   source:
+    needs: metadata
+    if: needs.metadata.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -99,13 +154,15 @@ jobs:
           persist-credentials: false
       - name: Archive the source from the same commit and dependency pins
         id: archive
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
           export GITHUB_ACTIONS
           PYTHONPATH=tools/release python3 -c 'from build_windows_candidate import checkout_dependencies, REPO; checkout_dependencies(REPO)'
-          tag="v$(tr -d '\r\n' < loader/VERSION)"
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="$TAG"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-nightly\.[1-9][0-9]{0,17})?$ ]]
           # Local to the runner only: no tag or release gets published.
           git tag "$tag" "$GITHUB_SHA"
           mkdir -p dist
@@ -125,10 +182,10 @@ jobs:
           compression-level: 0
 
   stage-draft:
-    needs: [build, source]
+    needs: [metadata, build, source]
     # This is opt-in: builds alone cannot change a release.
     if: >-
-      github.repository == 'NuxsGit/hooky-GTA-Recomp' &&
+      github.repository == 'NuxsGit/hooky-GTA-Recomp' && needs.metadata.outputs.serial == '' &&
       ((github.event_name == 'workflow_dispatch' && inputs.stage_draft) ||
        (github.event_name == 'push' && contains(github.event.head_commit.message, '[stage-windows-draft]')))
     runs-on: ubuntu-latest
@@ -166,8 +223,8 @@ jobs:
           tr -d '\r' < SHA256SUMS.windows > SHA256SUMS
           cat SHA256SUMS.source >> SHA256SUMS
           sha256sum --check --strict SHA256SUMS
-          checked_gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets,body > release.json
-          if ! jq -e '.isDraft and (.assets | length == 0)' release.json > /dev/null; then
+          checked_gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets,body > release.json
+          if ! jq -e '.isDraft and (.isPrerelease | not) and (.assets | length == 0)' release.json > /dev/null; then
             echo '::error::Refusing to replace an existing candidate or modify a published release'
             exit 1
           fi
@@ -182,3 +239,55 @@ jobs:
             jq -r .body release.json | sed '/^> \*\*Brouillon /d; /^Les tests du launcher Linux /d'
           } > notes.md
           checked_gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft --notes-file notes.md
+
+  publish-nightly:
+    needs: [metadata, build, source]
+    if: >-
+      github.repository == 'NuxsGit/hooky-GTA-Recomp' && github.ref == 'refs/heads/main' &&
+      needs.metadata.outputs.serial != '' &&
+      (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.nightly))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: windows-publish-nightly
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: windows-x64-release-candidate
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: matching-source
+      - name: Publish an independent prerelease, never the stable feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[1-9][0-9]{0,17}$ ]]
+          tr -d '\r' < SHA256SUMS.windows > SHA256SUMS
+          cat SHA256SUMS.source >> SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          {
+            echo '> **Nightly expérimental pour Windows x64.** Ce build ne remplace pas la version Stable.'
+            printf '\nCommit `%s`. Le ZIP vérifié et les sources correspondantes ne contiennent aucun fichier du jeu.\n' "$GITHUB_SHA"
+            echo 'Tests automatisés sans les disques/TU27 : compilation, lanceur, mise à jour et démarrage du sélecteur. Pas de validation en jeu.'
+          } > notes.md
+          # A release created against an existing tag would silently ignore --target.
+          [[ $(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG" --jq length) == 0 ]]
+          gh release create "$TAG" gtav-recomp-windows-x64.zip "gtav-recomp-src-$TAG.tar.xz" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --prerelease --latest=false \
+            --title "Hooky GTA Recomp $TAG" --notes-file notes.md
+          # The REST asset metadata is the same schema and digest the launcher will use.
+          api=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json apiUrl --jq .apiUrl)
+          [[ "$api" =~ ^https://api\.github\.com/repos/NuxsGit/hooky-GTA-Recomp/releases/[0-9]+$ ]]
+          gh api "${api#https://api.github.com/}" > release.json
+          jq -e --arg sha "$GITHUB_SHA" --arg tag "$TAG" --arg source "gtav-recomp-src-$TAG.tar.xz" \
+            --arg digest "sha256:$(cut -d ' ' -f1 SHA256SUMS.windows)" \
+            '.draft and .prerelease and .target_commitish == $sha and .tag_name == $tag and
+             ([.assets[] | select(.state == "uploaded" and .size > 0) | .name] | sort) ==
+             (["gtav-recomp-windows-x64.zip", $source, "SHA256SUMS"] | sort) and
+             any(.assets[]; .name == "gtav-recomp-windows-x64.zip" and .digest == $digest)' release.json
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
