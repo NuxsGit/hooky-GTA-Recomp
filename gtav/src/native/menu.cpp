@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
@@ -53,6 +54,11 @@ constexpr const char* kSettings[] = {
     "gtav_fps_limit",
     "gtav_native_vsync",
     "gtav_native_fps",
+#ifdef _WIN32
+    "gtav_native_output",
+    "gtav_native_fsr1",
+    "gtav_native_render_scale",
+#endif
     "gtav_native_tile_penumbra_all",
     "gtav_native_async_pipelines",
     "gpu_skip_rendering_lag_ms",
@@ -186,7 +192,68 @@ ImGuiKey ToImGui(Key key) {
   return ImGuiKey_None;
 }
 
-void BuildSettings(uint32_t fps, double frame_ms) {
+#ifdef _WIN32
+bool BuildDisplaySettings(Extent output, const PresentationInfo& info) {
+  ImGui::TextUnformatted("Display");
+  if (info.input.Empty()) ImGui::Text("Output: %u x %u", output.width, output.height);
+  else ImGui::Text("Output: %u x %u  |  Game buffer: %u x %u", output.width, output.height,
+                   info.input.width, info.input.height);
+
+  constexpr OutputMode modes[]{OutputMode::k720p, OutputMode::k1080p, OutputMode::k1440p,
+                               OutputMode::k2160p, OutputMode::kDesktop};
+  const char* outputs[]{"1280 x 720", "1920 x 1080 (1080p)", "2560 x 1440 (QHD)",
+                        "3840 x 2160 (4K)", "Borderless desktop"};
+  const auto mode = ParseOutputMode(std::atoi(rex::cvar::GetFlagByName("gtav_native_output").c_str()));
+  int selected = int(std::find(std::begin(modes), std::end(modes), mode) - std::begin(modes));
+  ImGui::SetNextItemWidth(240.0f * g_scale);
+  bool changed = ImGui::Combo("Output (restart)", &selected, outputs, IM_ARRAYSIZE(outputs));
+  if (changed) rex::cvar::SetFlagByName("gtav_native_output", std::to_string(int32_t(modes[selected])));
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("16:9 output, without stretching. Uses borderless on a matching monitor,\n"
+                      "or fits a window within the monitor's work area. Does not render the guest at 4K.");
+
+  // This is the renderer's existing startup-only scale, not a change to the Xbox display mode.
+  constexpr const char* values[]{"1", "0.875", "0.75", "0.666667", "0.5"};
+  const char* scales[]{"100% (original)", "87.5%", "75%", "66.7%", "50%", "Custom"};
+  const double scale = std::atof(rex::cvar::GetFlagByName("gtav_native_render_scale").c_str());
+  selected = IM_ARRAYSIZE(values);
+  for (int i = 0; i < IM_ARRAYSIZE(values); ++i)
+    if (std::abs(scale - std::atof(values[i])) < 0.0001) selected = i;
+  ImGui::SetNextItemWidth(240.0f * g_scale);
+  if (ImGui::Combo("Scene scale (restart)", &selected, scales,
+                   selected == IM_ARRAYSIZE(values) ? IM_ARRAYSIZE(scales) : IM_ARRAYSIZE(values)) &&
+      selected < IM_ARRAYSIZE(values)) {
+    rex::cvar::SetFlagByName("gtav_native_render_scale", values[selected]);
+    changed = true;
+  }
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Lowering the size of full-width scene targets can reduce GPU load;\n"
+                      "it doesn't speed up CPU-bound scenes. Keep 100%% for the sharpest input.");
+
+  const char* filters[]{"Linear", "AMD FSR 1 (spatial)"};
+  selected = GetBool("gtav_native_fsr1") ? 1 : 0;
+  ImGui::SetNextItemWidth(240.0f * g_scale);
+  if (ImGui::Combo("Upscaling", &selected, filters, IM_ARRAYSIZE(filters))) {
+    SetBool("gtav_native_fsr1", selected == 1);
+    changed = true;
+  }
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("FSR 1 sharpens the scaled game image (including its HUD). Applies live.\n"
+                      "It does not generate frames or change lighting or depth.");
+  switch (info.status) {
+    case UpscaleStatus::kFsr1:
+      ImGui::TextDisabled("FSR 1 active: %u x %u (up to 2x per axis)", info.fsr_output.width, info.fsr_output.height);
+      break;
+    case UpscaleStatus::kNoUpscale: ImGui::TextDisabled("FSR 1 bypassed: no upscale needed."); break;
+    case UpscaleStatus::kUnavailable: ImGui::TextDisabled("FSR 1 unavailable: using linear."); break;
+    case UpscaleStatus::kLinear: break;
+  }
+  ImGui::Separator();
+  return changed;
+}
+#endif
+
+void BuildSettings(uint32_t fps, double frame_ms, [[maybe_unused]] const PresentationInfo& info) {
 #if defined(__APPLE__) && TARGET_OS_IPHONE
   // Centred: the screen's sides are under the rounded corners and the notch.
   const ImVec2 display = ImGui::GetIO().DisplaySize;
@@ -195,6 +262,11 @@ void BuildSettings(uint32_t fps, double frame_ms) {
   ImGui::SetNextWindowPos(ImVec2(40.0f * g_scale, 40.0f * g_scale), ImGuiCond_FirstUseEver);
 #endif
   ImGui::SetNextWindowSize(ImVec2(520.0f * g_scale, 0.0f), ImGuiCond_FirstUseEver);
+#ifdef _WIN32
+  const auto output = ImGui::GetIO().DisplaySize;
+  ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(std::max(1.0f, output.x - 80.0f * g_scale),
+                                                           std::max(1.0f, output.y - 80.0f * g_scale)));
+#endif
   bool open = true;
   if (!ImGui::Begin("Settings (F1 / Esc / B to close)", &open, ImGuiWindowFlags_NoCollapse)) {
     ImGui::End();
@@ -212,6 +284,9 @@ void BuildSettings(uint32_t fps, double frame_ms) {
   ImGui::Separator();
 
   bool changed = false;
+#ifdef _WIN32
+  changed = BuildDisplaySettings({uint32_t(output.x), uint32_t(output.y)}, info);
+#endif
   int limit = std::atoi(rex::cvar::GetFlagByName("gtav_fps_limit").c_str());
   int choice = limit == 30 ? 0 : limit == 60 ? 1 : limit <= 0 ? 2 : 3;
   const char* limits[] = {"30 (the game's own limiter)", "60", "Uncapped", "Custom (command line)"};
@@ -246,8 +321,8 @@ void BuildSettings(uint32_t fps, double frame_ms) {
       changed = true;
     }
     if (ImGui::IsItemHovered())
-      ImGui::SetTooltip("On: the emulated GPU trails the game by 2 ms instead of 6 (about 20%% more fps).\n"
-                        "Off: the tested setting; with On, watch foliage and distant meshes while driving.");
+      ImGui::SetTooltip("On: the emulated GPU trails the game by 4 ms instead of 6.\n"
+                        "Off: the more conservative setting when checking streaming artifacts.");
   }
   ImGui::Separator();
   ImGui::TextUnformatted("Textures");
@@ -356,7 +431,7 @@ void LoadSettings() {
   }
 }
 
-ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms) {
+ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const PresentationInfo& info) {
   const bool touch_overlay = touch::Visible();
 #ifdef GTAV_DESKTOP_WORKSHOP
   const bool workshop_hud = sandbox::Active();
@@ -396,7 +471,7 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms) {
   }
   ImGui::NewFrame();
   switch (g_panel.load()) {
-    case Panel::Settings: BuildSettings(fps, frame_ms); break;
+    case Panel::Settings: BuildSettings(fps, frame_ms, info); break;
     case Panel::Debug: BuildDebug(fps, frame_ms); break;
     case Panel::Workshop:
 #ifdef GTAV_DESKTOP_WORKSHOP

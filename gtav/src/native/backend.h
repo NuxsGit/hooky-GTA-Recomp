@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "presentation.h"
+
 #include <plume_render_interface.h>
 
 #include <cstdint>
@@ -21,6 +23,12 @@ namespace gtav::native {
 
 struct FramePacket;
 
+struct FrontBuffer {
+  uint32_t descriptor = 0;
+  Extent size;
+  explicit operator bool() const { return !size.Empty(); }
+};
+
 // Tree-orb diagnostic (backend.cpp DiagFor): F11 cycles the mode, logs/diag_mode sets it.
 void CycleDiagMode();
 void SetDiagMode(uint32_t mode);
@@ -33,10 +41,9 @@ class Backend {
   // <name> (e.g. "ps_<HASH>.spv") was in the SPIR-V folder read at start-up (no disk access).
   static bool SpirvListed(const std::string& name);
 
-  // Records the frame into `list`. Returns the texture holding the guest front buffer (in
-  // SHADER_READ layout) and its descriptor index, or nullptr when the frame has none yet.
-  plume::RenderTexture* Execute(const FramePacket& frame, plume::RenderCommandList* list,
-                                uint32_t* front_descriptor);
+  // Records the frame into `list`. Returns the shader-readable front buffer's descriptor and
+  // physical extent, or an empty FrontBuffer when the frame has none yet.
+  FrontBuffer Execute(const FramePacket& frame, plume::RenderCommandList* list);
 
   // Frames in flight: the renderer records frame N+1 while the GPU runs frame N. Everything a
   // frame leaves for after its fence (uploads, deferred frees, resolve writebacks) is kept per
@@ -77,6 +84,14 @@ class Backend {
 
   // Draws `descriptor` (a 2D texture in the heap) over the bound framebuffer.
   void Blit(plume::RenderCommandList* list, uint32_t descriptor, plume::RenderFormat target_format);
+
+#ifdef _WIN32
+  // Presents the game with aspect correction and optional FSR. Leaves the output framebuffer
+  // bound with a full-size viewport/scissor so that the host overlays stay unscaled.
+  PresentationInfo PresentGame(plume::RenderCommandList* list, FrontBuffer front,
+                               const plume::RenderFramebuffer* output, Extent extent,
+                               plume::RenderFormat format, bool fsr1);
+#endif
 
   // Draws `value` as an on-screen counter with its top-left corner at (x, y).
   void DrawCounter(plume::RenderCommandList* list, uint32_t value, int32_t x, int32_t y, uint32_t scale,

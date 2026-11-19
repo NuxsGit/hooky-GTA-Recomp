@@ -383,6 +383,23 @@ add_dependencies(gtav gtav_native_shaders)
 endif()
 target_include_directories(gtav PRIVATE ${GTAV_NATIVE_SHADER_DIR})
 
+if(WIN32)
+    set(GTAV_FSR_HEADERS native_fsr_easu_ps.h native_fsr_rcas_ps.h)
+    if(GTAV_PREBUILT_NATIVE_SHADERS)
+        foreach(header IN LISTS GTAV_FSR_HEADERS)
+            if(NOT EXISTS "${GTAV_PREBUILT_NATIVE_SHADERS}/${header}")
+                message(FATAL_ERROR "Update GTAV_PREBUILT_NATIVE_SHADERS: missing ${header}, or clear it to rebuild the shaders")
+            endif()
+        endforeach()
+    else()
+        include(cmake/native_fsr1.cmake)
+        gtav_generate_fsr1("${GTAV_NATIVE_SHADER_DIR}" ${GTAV_DXC})
+        list(TRANSFORM GTAV_FSR_HEADERS PREPEND "${GTAV_NATIVE_SHADER_DIR}/")
+        add_custom_target(gtav_fsr1_shaders DEPENDS ${GTAV_FSR_HEADERS})
+        add_dependencies(gtav gtav_fsr1_shaders)
+    endif()
+endif()
+
 # Background shader compiler tools (shader_compiler.cpp; build.cmd copies them on Windows):
 # <exe>/tools/XenosRecomp, dxc (a wrapper that sets the library path) and shader_common.h.
 if(NOT WIN32 AND NOT APPLE AND NOT ANDROID)

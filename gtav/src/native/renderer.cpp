@@ -48,6 +48,11 @@
 
 REXCVAR_DEFINE_STRING(gtav_native, "off", "GTAV", "Native renderer: off | shadow | on");
 REXCVAR_DEFINE_BOOL(gtav_native_vsync, true, "GTAV", "Native renderer: wait for vertical sync when presenting");
+#ifdef _WIN32
+REXCVAR_DEFINE_INT32(gtav_native_output, 720, "GTAV",
+                     "Windows output height at startup: 720 | 1080 | 1440 | 2160 | 0 (borderless desktop)");
+REXCVAR_DEFINE_BOOL(gtav_native_fsr1, false, "GTAV", "Windows: AMD FSR 1 spatial upscaling of the SDR front buffer");
+#endif
 REXCVAR_DEFINE_BOOL(gtav_native_exact_barriers, true, "GTAV",
                     "Native renderer: no TOP_OF_PIPE / BOTTOM_OF_PIPE next to other barrier stages (MoltenVK waits less)");
 #ifdef __ANDROID__
@@ -345,17 +350,49 @@ class Renderer {
     bool done = false;
     window_thread_ = std::thread([&, this] {
       const bool on = REXCVAR_GET(gtav_native) == "on";
+      // The requested dimensions are physical client pixels, not scaled desktop units.
+      SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
       WNDCLASSEXW wc{sizeof(wc)};
       wc.lpfnWndProc = WndProc;
       wc.hInstance = GetModuleHandleW(nullptr);
       wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW
       wc.lpszClassName = L"GtavNative";
       RegisterClassExW(&wc);
+      const OutputMode mode = ParseOutputMode(REXCVAR_GET(gtav_native_output));
+      MONITORINFO monitor{sizeof(monitor)};
+      const bool have_monitor = GetMonitorInfoW(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY),
+                                                &monitor);
+      auto extent = [](RECT r) -> Extent { return {uint32_t(r.right - r.left), uint32_t(r.bottom - r.top)}; };
+      const bool borderless = have_monitor && UseBorderless(mode, extent(monitor.rcMonitor));
+      const DWORD style = borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
       RECT rc{0, 0, 1280, 720};
-      AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
-      HWND hwnd = CreateWindowExW(0, wc.lpszClassName, on ? L"GTA V" : L"GTA V - native renderer (shadow)",
-                                  WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left,
+      AdjustWindowRect(&rc, style, FALSE);
+      HWND hwnd = CreateWindowExW(0, wc.lpszClassName, on ? L"GTA V" : L"GTA V - native renderer (shadow)", style,
+                                  have_monitor ? monitor.rcMonitor.left : CW_USEDEFAULT,
+                                  have_monitor ? monitor.rcMonitor.top : CW_USEDEFAULT, rc.right - rc.left,
                                   rc.bottom - rc.top, nullptr, nullptr, wc.hInstance, nullptr);
+      if (hwnd && have_monitor) {
+        const RECT area = borderless ? monitor.rcMonitor : monitor.rcWork;
+        int width = area.right - area.left, height = area.bottom - area.top;
+        int x = area.left, y = area.top;
+        if (!borderless) {
+          RECT chrome{0, 0, 0, 0};
+          if (!AdjustWindowRectExForDpi(&chrome, style, FALSE, 0, GetDpiForWindow(hwnd)))
+            AdjustWindowRect(&chrome, style, FALSE);
+          const int dx = chrome.right - chrome.left, dy = chrome.bottom - chrome.top;
+          const Extent client = WindowedClient(mode, {uint32_t(std::max(1, width - dx)),
+                                                      uint32_t(std::max(1, height - dy))});
+          x += (width - int(client.width) - dx) / 2;
+          y += (height - int(client.height) - dy) / 2;
+          width = int(client.width) + dx;
+          height = int(client.height) + dy;
+        }
+        SetWindowPos(hwnd, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+        RECT actual{};
+        if (GetClientRect(hwnd, &actual))
+          REXLOG_INFO("[native] Windows output: requested {}, client {}x{} ({})", int32_t(mode),
+                      actual.right, actual.bottom, borderless ? "borderless" : "windowed");
+      }
       {
         std::lock_guard lock(m);
         window_ = hwnd;
@@ -405,6 +442,7 @@ class Renderer {
 #endif
 
   bool Init() {
+    menu::LoadSettings();  // including startup-only settings, before selecting the window dimensions
 #ifdef __ANDROID__
     // Plume reports its Vulkan failures on stderr, which Android discards.
     std::freopen((ExeDir() / "logs" / "stderr.txt").string().c_str(), "w", stderr);
@@ -550,7 +588,6 @@ class Renderer {
             window_,
 #endif
             kSwapchainFormat, kSwapchainBuffers));
-    menu::LoadSettings();
     vsync_ = REXCVAR_GET(gtav_native_vsync);
     swapchain_->setVsyncEnabled(vsync_);
     REXLOG_INFO("[native] init: swap chain created, resizing");
@@ -1053,7 +1090,6 @@ class Renderer {
       rex::cvar::SetFlagByName("readback_resolve", readback_restore_);
       readback_restore_.clear();
     }
-    uint32_t front_descriptor = 0;
     auto record_start = std::chrono::steady_clock::now();
     // GTAV_NATIVE_NO_BACKEND=1: present only a clear (bisects GPU hangs between the game's frame
     // and the swap chain path).
@@ -1065,8 +1101,8 @@ class Renderer {
       deferred_->Begin(list_);
       record_list = deferred_.get();
     }
-    plume::RenderTexture* front =
-        backend_ok_ && !no_backend ? backend_.Execute(frame, record_list, &front_descriptor) : nullptr;
+    const FrontBuffer front = backend_ok_ && !no_backend ? backend_.Execute(frame, record_list) : FrontBuffer{};
+    const uint32_t front_descriptor = front.descriptor;
     if (deferred) timing_.replay_wait_sum += deferred_->Finish();
     // The frame's rendering goes to the GPU now, in a command buffer of its own; only the copy
     // into the window waits for a drawable. As one submission, the whole frame waited for the
@@ -1158,7 +1194,12 @@ class Renderer {
       FlickerCapture(slot, frame.index, front_descriptor, w, h);
     }
     if (key_replay_.exchange(false)) WriteReplay(frame.index);
+    PresentationInfo presentation{front.size};
     if (front) {
+#ifdef _WIN32
+      presentation = backend_.PresentGame(list_, front, framebuffers_[image].get(), {w, h}, kSwapchainFormat,
+                                           REXCVAR_GET(gtav_native_fsr1));
+#else
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
       // Phone screens are wider than 16:9: keep the game's aspect ratio with black bars.
       {
@@ -1171,6 +1212,7 @@ class Renderer {
       backend_.Blit(list_, front_descriptor, kSwapchainFormat);
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
       list_->setViewports(plume::RenderViewport(0, 0, float(w), float(h)));
+#endif
 #endif
     } else {
       list_->clearColor(0, plume::RenderColor(0.12f, 0.0f, 0.12f, 1.0f));
@@ -1188,7 +1230,7 @@ class Renderer {
       backend_.DrawCounter(list_, fps_value_, 8, 8, std::max(1u, h / 720), kSwapchainFormat);
     if (backend_ok_) {
       double frame_ms = fps_value_ ? 1000.0 / fps_value_ : 0.0;
-      if (ImDrawData* menu_data = menu::Frame(w, h, fps_value_, frame_ms))
+      if (ImDrawData* menu_data = menu::Frame(w, h, fps_value_, frame_ms, presentation))
         backend_.DrawMenu(list_, menu_data, kSwapchainFormat);
     }
     list_->barriers(plume::RenderBarrierStage::NONE,

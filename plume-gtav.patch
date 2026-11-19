@@ -209,7 +209,7 @@ index ad63e0e..2ad1ad4 100644
          RenderFramebufferDesc() = default;
  
 diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
-index 4fdc4bf..fe25401 100644
+index 4fdc4bf..47b3e08 100644
 --- a/plume_vulkan.cpp
 +++ b/plume_vulkan.cpp
 @@ -11,7 +11,16 @@
@@ -879,7 +879,16 @@ index 4fdc4bf..fe25401 100644
  
          res = vmaCreateAllocator(&allocatorInfo, &allocator);
          if (res != VK_SUCCESS) {
-@@ -4203,12 +4544,22 @@ namespace plume {
+@@ -4198,3 +4539,7 @@ namespace plume {
+     std::unique_ptr<RenderShader> VulkanDevice::createShader(const void *data, uint64_t size, const char *entryPointName, RenderShaderFormat format) {
+-        return std::make_unique<VulkanShader>(this, data, size, entryPointName, format);
++        auto shader = std::make_unique<VulkanShader>(this, data, size, entryPointName, format);
++        if (shader->vk == VK_NULL_HANDLE) {
++            return nullptr;
++        }
++        return shader;
+     }
+@@ -4203,12 +4548,22 @@ namespace plume {
          return std::make_unique<VulkanSampler>(this, desc);
      }
  
@@ -904,7 +913,26 @@ index 4fdc4bf..fe25401 100644
      }
  
      std::unique_ptr<RenderPipeline> VulkanDevice::createRaytracingPipeline(const RenderRaytracingPipelineDesc &desc, const RenderPipeline *previousPipeline) {
-@@ -4255,6 +4606,10 @@ namespace plume {
+@@ -4226,3 +4581,8 @@ namespace plume {
+     std::unique_ptr<RenderTexture> VulkanDevice::createTexture(const RenderTextureDesc &desc) {
+-        return std::make_unique<VulkanTexture>(this, nullptr, desc);
++        auto texture = std::make_unique<VulkanTexture>(this, nullptr, desc);
++        // An optional post-process should be able to fall back on allocation failure.
++        if (texture->vk == VK_NULL_HANDLE || texture->imageView == VK_NULL_HANDLE) {
++            return nullptr;
++        }
++        return texture;
+     }
+@@ -4250,3 +4610,7 @@ namespace plume {
+     std::unique_ptr<RenderFramebuffer> VulkanDevice::createFramebuffer(const RenderFramebufferDesc &desc) {
+-        return std::make_unique<VulkanFramebuffer>(this, desc);
++        auto framebuffer = std::make_unique<VulkanFramebuffer>(this, desc);
++        if (framebuffer->vk == VK_NULL_HANDLE) {
++            return nullptr;
++        }
++        return framebuffer;
+     }
+@@ -4255,6 +4619,10 @@ namespace plume {
          return std::make_unique<VulkanQueryPool>(this, queryCount);
      }
  
@@ -915,7 +943,7 @@ index 4fdc4bf..fe25401 100644
      void VulkanDevice::setBottomLevelASBuildInfo(RenderBottomLevelASBuildInfo &buildInfo, const RenderBottomLevelASMesh *meshes, uint32_t meshCount, bool preferFastBuild, bool preferFastTrace) {
          assert(meshes != nullptr);
          assert(meshCount > 0);
-@@ -4463,6 +4818,11 @@ namespace plume {
+@@ -4463,6 +4831,11 @@ namespace plume {
      void VulkanDevice::release() {
          nullBuffer = nullptr; // force destruction before destroying allocator
  
@@ -927,7 +955,7 @@ index 4fdc4bf..fe25401 100644
          if (allocator != VK_NULL_HANDLE) {
              vmaDestroyAllocator(allocator);
              allocator = VK_NULL_HANDLE;
-@@ -4495,7 +4855,27 @@ namespace plume {
+@@ -4495,7 +4868,27 @@ namespace plume {
  #else
      VulkanInterface::VulkanInterface() {
  #endif
@@ -955,7 +983,7 @@ index 4fdc4bf..fe25401 100644
          if (res != VK_SUCCESS) {
              fprintf(stderr, "volkInitialize failed with error code 0x%X.\n", res);
              return;
-@@ -4666,6 +5046,26 @@ namespace plume {
+@@ -4666,6 +5059,26 @@ namespace plume {
          return instance != nullptr;
      }
  

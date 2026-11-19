@@ -18,3 +18,5 @@
 LICENSE text eol=lf
 *.cmd text eol=crlf
 *.bat text eol=crlf
+# Keep AMD's pinned source headers byte-for-byte, including upstream whitespace.
+gtav/src/native/shaders/fsr1/ffx_*.h -text -whitespace

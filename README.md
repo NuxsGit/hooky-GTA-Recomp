@@ -194,6 +194,8 @@ AZERTY. The mouse steers the right stick, not the PC version's native camera.
 **Native settings overlay.** **F1** opens or closes it and frees the mouse when open. **Esc** closes
 it when open; otherwise Esc pauses the game. On an SDL gamepad press **RB + Back** together;
 use the D-pad and A to navigate and B to close. Touch controls keep their Menu button.
+On Windows, **Display** offers 1080p, 1440p, 4K and borderless desktop output, a separate internal
+render scale, and optional AMD FSR 1. See [Windows graphics settings](docs/WINDOWS_GRAPHICS.md).
 
 **Desktop debug overlay (native renderer).** Press **F2** (**Fn + F2** if required by your keyboard)
 for live logs and the experimental **Story tools** tab. In offline free roam, explicitly enable the

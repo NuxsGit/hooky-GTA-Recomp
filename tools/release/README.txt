@@ -83,6 +83,9 @@ Default bindings (physical positions):
 - 1 or Mouse4 = LB; 3 or Mouse5 = RB; arrows = D-pad; Tab = Back; Esc = Start.
 F1 opens/closes the native settings overlay. Esc closes it when open. On an SDL gamepad use
 RB + Back to toggle it, D-pad and A to navigate, and B to close.
+F1 > Display (Windows native renderer): choose 1080p, 1440p, 4K or your desktop resolution.
+Restart after changing Output or Scene scale. Output size is not native scene rendering size.
+AMD FSR 1 spatial upscaling can be toggled live, or left on Linear for less GPU work.
 F2 (Fn + F2 on some keyboards) opens Debug: live logs and experimental offline story tools.
 Use a spare save. Closing it releases the camera and stops fly mode.
 If a pad isn't mapped, try the community gamecontrollerdb.txt from
