@@ -116,7 +116,7 @@ def selector_fixture(host, scratch):
         f"/I{REPO / 'rexglue-sdk/include'}", REPO / "loader/tests/package_stub.cpp",
         "/link", f"/DEF:{definition}", f"/OUT:{host / 'gtav_game.dll'}", cwd=scratch, timeout=45)
     try:
-        run(REPO / "build-launcher/gtav_windows_update_tests.exe", "--verify-host-selector", host, timeout=80)
+        run(REPO / "build-launcher/gtav_windows_update_tests.exe", "--verify-host-selector", host, timeout=100)
     finally:
         (host / "gtav_game.dll").unlink()
 

@@ -71,7 +71,7 @@ set(GTAV_SOURCES
 )
 
 if(WIN32)
-    add_executable(gtav WIN32 ${GTAV_SOURCES})
+    add_executable(gtav WIN32 ${GTAV_SOURCES} src/desktop.manifest)
 elseif(ANDROID)
     # Android: the game is libmain.so, which SDL's SDLActivity loads and whose SDL_main it calls
     # (tools/android). A shared library exports the rex_skip_rendering_* hooks by default.

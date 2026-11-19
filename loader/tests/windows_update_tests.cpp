@@ -120,13 +120,13 @@ HWND WaitWindow(WindowQuery query, HANDLE process = nullptr, std::wstring_view l
   return nullptr;
 }
 
-void WaitExit(HANDLE process, DWORD timeout) {
+void WaitExit(HANDLE process, DWORD timeout, DWORD expected = 0) {
   std::wstring error;
   CHECK(WaitForSingleObject(process, timeout) == WAIT_OBJECT_0);
   DWORD exit = 1;
   CHECK(GetExitCodeProcess(process, &exit));
-  if (exit) error = L"Process exit status: " + std::to_wstring(exit);
-  CHECK(exit == 0);
+  if (exit != expected) error = L"Process exit status: " + std::to_wstring(exit);
+  CHECK(exit == expected);
 }
 
 // The previous launcher reads a fixture feed instead of GitHub; everything from discovery and
@@ -218,7 +218,11 @@ void VerifyHostSelector(const fs::path& root) {
   const auto host = root / "gtav_fast.exe";
   // The fixture DLL satisfies the imports, and traps any attempt to run a guest function. A missing
   // install must be recognized before the title runs. No GPU or original game material is needed.
-  for (bool enter : {false, true}) {
+  const auto workspace = root / "data/user/sandbox";
+  enum class Case { Close, MissingInstall, UnicodeHome };
+  for (auto test : {Case::Close, Case::MissingInstall, Case::UnicodeHome}) {
+    const bool enter = test != Case::Close, have_partitions = test == Case::UnicodeHome;
+    if (have_partitions) fs::create_directories(root / "data/user/0000000000000000/545408A7/00000002");
     TestProcess process;
     const auto command = Quote(host) + L" --gtav_mode=menu --gtav_native=on --headless=true " +
         Quote(L"--user_data_root=" + (root / "data/user").wstring()) + L" " +
@@ -244,12 +248,18 @@ void VerifyHostSelector(const fs::path& root) {
       key(VK_RIGHT);
       key(VK_UP);
       key(VK_RETURN);  // Sandbox solo routes through Workshop's original validation
-      auto missing = WaitWindow({L"GTA V Recomp | Workshop", L"#32770", pid, {}}, process.handle.Get());
-      CHECK(missing && HasLabel(missing, L"Installed TU27 game data is missing. Install the game with the launcher first."));
+      // The third pass supplies only the installed-content directory, not the game or even
+      // --game_data_root. The hub must mount the exact Workshop path (including the accented
+      // name in the launcher fixture) and the SDK must then reject the missing game root.
+      auto missing = WaitWindow({have_partitions ? L"ReXGlue" : L"GTA V Recomp | Workshop", L"#32770", pid, {}},
+          process.handle.Get(), have_partitions ? L"--game_data_root was not provided." :
+          L"Installed TU27 game data is missing. Install the game with the launcher first.");
+      CHECK(missing);
       CHECK(PostMessageW(missing, WM_COMMAND, IDCANCEL, 0));
     }
-    WaitExit(process.handle.Get(), 10'000);
-    CHECK(!fs::exists(root / "data/user/sandbox"));
+    WaitExit(process.handle.Get(), 10'000, have_partitions ? 1 : 0);
+    CHECK(fs::is_directory(workspace / "profile") == have_partitions);
+    CHECK(fs::is_directory(workspace / "courses") == have_partitions);
   }
   std::cout << "Packaged host rendered the mode hub, blocked campaign co-op and routed Sandbox without running the title\n";
 }
