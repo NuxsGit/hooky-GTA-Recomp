@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
+#include <numbers>
 #include <utility>
 
 namespace gtav::sandbox {
@@ -40,13 +42,56 @@ int64_t DistanceSquared(Point a, Point b) {
   return x * x + y * y + z * z;  // points have already passed Valid()
 }
 
+uint16_t HeadingFromDegrees(float degrees) {
+  if (!std::isfinite(degrees)) return 0;
+  const double normalized = std::fmod(double(degrees), 360.0) + 360.0;
+  return uint16_t(std::lround(normalized * 10) % kFullTurn);
+}
+
+bool Presence::Valid() const {
+  return position.Valid() && heading < kFullTurn && vehicle < Vehicle::Count;
+}
+
+bool Prop::Valid() const {
+  return position.Valid() && heading < kFullTurn && kind < PropKind::Count;
+}
+
+std::optional<Prop> PlaceProp(Presence origin, PropKind kind, int rotation, int height_cm) {
+  if (!origin.Valid() || origin.vehicle != Vehicle::Foot || kind >= PropKind::Count ||
+      rotation < -180 || rotation > 180 || height_cm < -200 || height_cm > 200) return std::nullopt;
+  const double angle = origin.heading * std::numbers::pi / 1800.0;
+  auto position = origin.position;
+  position.x -= int32_t(std::lround(300 * std::sin(angle)));
+  position.y += int32_t(std::lround(300 * std::cos(angle)));
+  position.z += height_cm;
+  const auto yaw = uint16_t((int(origin.heading) + 10 * rotation + kFullTurn) % kFullTurn);
+  return position.Valid() ? std::optional(Prop{position, yaw, kind}) : std::nullopt;
+}
+
 bool Course::Valid() const {
-  if (!ValidName(name, 32) || points.size() > kMaxCheckpoints) return false;
+  if (!ValidName(name, 32) || points.size() > kMaxCheckpoints || props.size() > kMaxProps ||
+      game >= Minigame::Count || !std::all_of(props.begin(), props.end(), [](const Prop& p) { return p.Valid(); }))
+    return false;
   for (size_t i = 0; i < points.size(); ++i) {
-    if (!points[i].Valid() || (i && DistanceSquared(points[i - 1], points[i]) < kMinSpacingCm * kMinSpacingCm))
-      return false;
+    if (!points[i].Valid()) return false;
+    const size_t first = game == Minigame::Hunt || !i ? 0 : i - 1;
+    for (size_t j = first; j < i; ++j)
+      if (DistanceSquared(points[j], points[i]) < kMinSpacingCm * kMinSpacingCm) return false;
   }
   return true;
+}
+
+std::optional<size_t> NextCheckpoint(const Course& course, const Player& player) {
+  if (!player.racing || player.finish_ms) return std::nullopt;
+  std::optional<size_t> chosen;
+  int64_t best = std::numeric_limits<int64_t>::max();
+  for (size_t i = 0; i < course.points.size(); ++i) {
+    if (player.checkpoints & (uint32_t{1} << i)) continue;
+    if (course.game == Minigame::Race || !player.pose) return i;
+    const auto distance = DistanceSquared(course.points[i], player.pose->position);
+    if (distance < best) { best = distance; chosen = i; }
+  }
+  return chosen;
 }
 
 Room::Room(std::string owner) { Add(std::move(owner)); }
@@ -62,18 +107,20 @@ void Room::Remove(uint32_t id) {
   if (id != 1) std::erase_if(players_, [id](const Entry& e) { return e.player.id == id; });
 }
 
-void Room::Pose(uint32_t id, std::optional<Point> p, int64_t now) {
+void Room::Pose(uint32_t id, std::optional<Presence> p, int64_t now) {
   if (p && !p->Valid()) return;
   for (auto& entry : players_) {
     auto& player = entry.player;
     if (player.id != id) continue;
     player.pose = p;
     entry.last_pose = now;
-    if (race_ == Race::Running && now >= start_at_ && now - start_at_ < kRaceLimitMs &&
-        p && player.racing && player.passed < course_.points.size() &&
-        DistanceSquared(*p, course_.points[player.passed]) <= kCheckpointRadiusCm * kCheckpointRadiusCm) {
-      if (++player.passed == course_.points.size())
-        player.finish_ms = uint32_t(std::clamp(now - start_at_, int64_t{1}, kRaceLimitMs));
+    if (race_ == Race::Running && now >= start_at_ && now - start_at_ < kRaceLimitMs && p) {
+      const auto next = NextCheckpoint(course_, player);
+      if (next && DistanceSquared(p->position, course_.points[*next]) <= kCheckpointRadiusCm * kCheckpointRadiusCm) {
+        player.checkpoints |= uint32_t{1} << *next;
+        if (player.checkpoints == course_.AllPoints())
+          player.finish_ms = uint32_t(std::clamp(now - start_at_, int64_t{1}, kRaceLimitMs));
+      }
     }
     return;
   }
@@ -103,7 +150,7 @@ void Room::Reset() {
   race_ = Race::Editing;
   for (auto& entry : players_) {
     entry.player.racing = false;
-    entry.player.passed = 0;
+    entry.player.checkpoints = 0;
     entry.player.finish_ms = 0;
   }
 }

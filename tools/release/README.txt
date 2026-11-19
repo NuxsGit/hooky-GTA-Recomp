@@ -43,10 +43,11 @@ Desktop Workshop (experimental)
 Play opens a mode selector before the game starts: Sandbox solo (default), Private multiplayer,
 or Campaign. Sandbox uses a separate profile: data\user\sandbox\profile. On the first sandbox
 run, complete the original game’s first-run screens and prologue before using free-roam tools.
-Press F6 in free roam for local test vehicles and a checkpoint race builder. In Private multiplayer,
-Host here opens a TCP listener (default 30127); friends join with your reachable IPv4, port and code.
-Use a trusted LAN/VPN. No encryption, automatic port forwarding, official GTA Online, synced
-characters or vehicles. This is not a terrain editor. Details: docs/SANDBOX.md in the source.
+Press F6 in free roam: build and save layouts with props, set up checkpoint races or hunts,
+and spawn a test vehicle. In Private multiplayer, Host here opens a TCP listener (default 30127);
+friends with the same Workshop build join with your reachable IPv4, port and code. Nearby friends
+appear as ghost pedestrians or test vehicles. Use a trusted LAN/VPN. No encryption, automatic
+port forwarding, GTA Online, terrain editing or synced world physics. Details: docs/SANDBOX.md.
 Skip the selector for story mode with: gtav_launcher.exe --play -- --gtav_mode=campaign
 
 Recompile and update

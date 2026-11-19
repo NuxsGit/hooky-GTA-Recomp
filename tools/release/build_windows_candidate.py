@@ -100,6 +100,25 @@ def build_sdk(sdk, install, clang, cache_root):
         (cache / ".complete").write_text(key, encoding="ascii")
 
 
+def selector_fixture(host, scratch):
+    exports = (host / "tools/game_dll/interface/gtav_game.def").read_text(encoding="ascii").splitlines()
+    if exports[:2] != ["LIBRARY gtav_game.dll", "EXPORTS"] or "  gtav_game_image_config" not in exports:
+        raise SystemExit("Invalid game interface for selector smoke")
+    symbols = [line.strip() for line in exports[2:] if line.strip() != "gtav_game_image_config"]
+    if not symbols or not all(re.fullmatch(r"(?:__imp__)?sub_[0-9A-F]{8}", name) for name in symbols):
+        raise SystemExit("Unexpected game interface export in selector fixture")
+    definition = scratch / "smoke-game.def"
+    definition.write_text("LIBRARY gtav_game.dll\nEXPORTS\n  gtav_game_image_config\n" + "".join(
+        f"  {symbol}=unexpected_guest_call\n" for symbol in symbols), encoding="ascii")
+    run("cl.exe", "/nologo", "/std:c++latest", "/LD", "/MT", "/O2", "/DNOMINMAX",
+        f"/I{REPO / 'rexglue-sdk/include'}", REPO / "loader/tests/package_stub.cpp",
+        "/link", f"/DEF:{definition}", f"/OUT:{host / 'gtav_game.dll'}", cwd=scratch, timeout=45)
+    try:
+        run(REPO / "build-launcher/gtav_windows_update_tests.exe", "--verify-host-selector", host, timeout=80)
+    finally:
+        (host / "gtav_game.dll").unlink()
+
+
 def smoke_package(archive):
     # Test the extracted download, not the build directory (which could hide missing DLLs).
     with tempfile.TemporaryDirectory(prefix="gtav-win-smoke-") as tmp:
@@ -117,7 +136,8 @@ def smoke_package(archive):
                 digest.update(block)
         version = (REPO / "loader/VERSION").read_text(encoding="ascii").strip()
         run(REPO / "build-launcher/gtav_windows_update_tests.exe", "--verify-package",
-            Path(tmp) / "Update fixture with spaces", archive, version, digest.hexdigest(), timeout=210)
+            Path(tmp) / "Update fixture with spaces", archive, version, digest.hexdigest(),
+            host / "gtav_launcher.exe", timeout=250)
         for exe, args in (
             ("rexgluerd.exe", ("--version",)),
             ("tools/XenosRecomp.exe", ()),
@@ -131,6 +151,7 @@ def smoke_package(archive):
         log = host / "data/logs/unattended.txt"
         if result.returncode != 1 or not log.is_file() or "launcher.ini needs three lines" not in log.read_text():
             raise SystemExit(f"Unpacked launcher did not report missing launcher.ini (exit {result.returncode})")
+        selector_fixture(host, Path(tmp))
 
 
 def main():

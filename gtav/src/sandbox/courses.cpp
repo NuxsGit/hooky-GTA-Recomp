@@ -11,8 +11,8 @@
 namespace gtav::sandbox {
 namespace fs = std::filesystem;
 namespace {
-constexpr auto kMagic = "GTAV-COURSE-1";
-constexpr size_t kMaxFileBytes = 2048;
+constexpr auto kMagic = "GTAV-COURSE-2", kLegacyMagic = "GTAV-COURSE-1";
+constexpr size_t kMaxFileBytes = 4096;
 fs::path CoursePath(const fs::path& folder, std::string_view name) { return folder / ("course-" + std::string(name) + ".gtcourse"); }
 }
 
@@ -32,6 +32,9 @@ bool SaveCourse(const fs::path& folder, const Course& course) {
   out.imbue(std::locale::classic());
   out << kMagic << '\n' << course.name << '\n' << course.points.size() << '\n';
   for (auto p : course.points) out << p.x << ' ' << p.y << ' ' << p.z << '\n';
+  out << unsigned(course.game) << ' ' << course.props.size() << '\n';
+  for (const auto& p : course.props)
+    out << unsigned(p.kind) << ' ' << p.heading << ' ' << p.position.x << ' ' << p.position.y << ' ' << p.position.z << '\n';
   out.close();
   if (out) {
 #ifdef _WIN32
@@ -61,12 +64,26 @@ std::optional<Course> LoadCourse(const fs::path& folder, std::string_view name) 
   std::string magic;
   Course course;
   unsigned count;
-  if (!std::getline(lines, magic) || magic != kMagic || !std::getline(lines, course.name) ||
+  if (!std::getline(lines, magic) || (magic != kMagic && magic != kLegacyMagic) || !std::getline(lines, course.name) ||
       course.name != name || !(lines >> count) || count > kMaxCheckpoints) return std::nullopt;
   for (unsigned i = 0; i < count; ++i) {
     Point p;
     if (!(lines >> p.x >> p.y >> p.z)) return std::nullopt;
     course.points.push_back(p);
+  }
+  if (magic == kMagic) {
+    unsigned game, props;
+    if (!(lines >> game >> props) || game >= unsigned(Minigame::Count) || props > kMaxProps) return std::nullopt;
+    course.game = Minigame(game);
+    for (unsigned i = 0; i < props; ++i) {
+      unsigned kind, heading;
+      Prop p;
+      if (!(lines >> kind >> heading >> p.position.x >> p.position.y >> p.position.z) ||
+          kind >= unsigned(PropKind::Count) || heading >= kFullTurn) return std::nullopt;
+      p.kind = PropKind(kind);
+      p.heading = uint16_t(heading);
+      course.props.push_back(p);
+    }
   }
   lines >> std::ws;
   return lines.eof() && course.Valid() ? std::optional(std::move(course)) : std::nullopt;

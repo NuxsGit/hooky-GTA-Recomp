@@ -9,6 +9,7 @@ namespace {
 struct Writer {
   Bytes bytes{0, 0, kVersion, 0};
   void U8(uint8_t val) { bytes.push_back(val); }
+  void U16(uint16_t val) { U8(uint8_t(val >> 8)); U8(uint8_t(val)); }
   void U32(uint32_t val) {
     for (int i = 24; i >= 0; i -= 8) U8(uint8_t(val >> i));
   }
@@ -17,7 +18,10 @@ struct Writer {
     bytes.insert(bytes.end(), text.begin(), text.end());
   }
   void Coord(Point p) { U32(uint32_t(p.x)); U32(uint32_t(p.y)); U32(uint32_t(p.z)); }
-  void OptionalPoint(std::optional<Point> p) { U8(p.has_value()); if (p) Coord(*p); }
+  void Observation(std::optional<Presence> p) {
+    U8(p.has_value());
+    if (p) { Coord(p->position); U16(p->heading); U8(uint8_t(p->vehicle)); }
+  }
   Bytes Finish(Kind kind) {
     if (bytes.size() > kMaxPacket) return {};
     const auto size = bytes.size() - 2;
@@ -37,6 +41,7 @@ struct Reader {
     bytes = bytes.subspan(1);
     return val;
   }
+  uint16_t U16() { const uint16_t hi = U8(); return uint16_t((hi << 8) | U8()); }
   uint32_t U32() {
     uint32_t val = 0;
     for (int i = 0; i < 4; ++i) val = (val << 8) | U8();
@@ -60,7 +65,12 @@ struct Reader {
     if (!point.Valid()) ok = false;
     return point;
   }
-  std::optional<Point> OptionalPoint() { return Bool() ? std::optional(Coord()) : std::nullopt; }
+  std::optional<Presence> Observation() {
+    if (!Bool()) return std::nullopt;
+    Presence p{Coord(), U16(), Vehicle(U8())};
+    if (!p.Valid()) ok = false;
+    return p;
+  }
   bool Done() const { return ok && bytes.empty(); }
 };
 }  // namespace
@@ -102,17 +112,17 @@ bool ReadHello(const Frame& f, Invite& invite, std::string& name) {
   return r.Done();
 }
 
-Bytes Pose(std::optional<Point> point) {
+Bytes Pose(std::optional<Presence> point) {
   if (point && !point->Valid()) return {};
   Writer w;
-  w.OptionalPoint(point);
+  w.Observation(point);
   return w.Finish(Kind::Pose);
 }
 
-bool ReadPose(const Frame& f, std::optional<Point>& point) {
+bool ReadPose(const Frame& f, std::optional<Presence>& point) {
   if (f.kind != Kind::Pose) return false;
   Reader r{f.payload};
-  point = r.OptionalPoint();
+  point = r.Observation();
   return r.Done();
 }
 
@@ -125,14 +135,17 @@ Bytes Snapshot(const World& world) {
   w.Text(world.course.name);
   w.U8(uint8_t(world.course.points.size()));
   for (auto p : world.course.points) w.Coord(p);
+  w.U8(uint8_t(world.course.game));
+  w.U8(uint8_t(world.course.props.size()));
+  for (const auto& p : world.course.props) { w.Coord(p.position); w.U16(p.heading); w.U8(uint8_t(p.kind)); }
   w.U8(uint8_t(world.players.size()));
   for (const auto& player : world.players) {
     if (!ValidName(player.name) || (player.pose && !player.pose->Valid())) return {};
     w.U32(player.id);
     w.Text(player.name);
-    w.OptionalPoint(player.pose);
+    w.Observation(player.pose);
     w.U8(player.racing);
-    w.U8(player.passed);
+    w.U32(player.checkpoints);
     w.U32(player.finish_ms);
   }
   return w.Finish(Kind::World);
@@ -152,14 +165,23 @@ std::optional<World> ReadSnapshot(const Frame& f) {
   const auto points = r.U8();
   if (points > kMaxCheckpoints || (w.race != Race::Editing && points < 2)) return std::nullopt;
   for (unsigned i = 0; i < points; ++i) w.course.points.push_back(r.Coord());
+  w.course.game = Minigame(r.U8());
+  const auto props = r.U8();
+  if (props > kMaxProps) return std::nullopt;
+  for (unsigned i = 0; i < props; ++i) w.course.props.push_back({r.Coord(), r.U16(), PropKind(r.U8())});
   if (!w.course.Valid()) return std::nullopt;
   const auto players = r.U8();
   if (!players || players > kMaxPlayers) return std::nullopt;
   bool self = false, owner = false;
   for (unsigned i = 0; i < players; ++i) {
-    Player p{r.U32(), r.Name(20), r.OptionalPoint(), r.Bool(), r.U8(), r.U32()};
-    if (!r.ok || !p.id || p.passed > points || (p.finish_ms && (p.passed != points || p.finish_ms > w.clock_ms)) ||
-        (!p.racing && (p.passed || p.finish_ms)) || (w.race == Race::Editing && p.racing) ||
+    Player p{r.U32(), r.Name(20), r.Observation(), r.Bool(), r.U32(), r.U32()};
+    const auto mask = w.course.AllPoints();
+    if (!r.ok || !p.id || (p.checkpoints & ~mask) ||
+        (w.course.game == Minigame::Race && (p.checkpoints & (p.checkpoints + 1))) ||
+        (p.finish_ms && (p.checkpoints != mask || p.finish_ms > w.clock_ms)) ||
+        (p.racing && mask && p.checkpoints == mask && !p.finish_ms) ||
+        (!p.racing && (p.checkpoints || p.finish_ms)) || (w.race == Race::Editing && p.racing) ||
+        (w.race == Race::Countdown && (p.checkpoints || p.finish_ms)) ||
         std::any_of(w.players.begin(), w.players.end(), [&](const Player& old) { return old.id == p.id; })) return std::nullopt;
     self |= p.id == w.self;
     owner |= p.id == 1;

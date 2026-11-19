@@ -15,31 +15,41 @@ contact Rockstar. They currently use the original GTA free-roam world, including
 screens and prologue when there is no free-roam save yet. Play through those screens on the sandbox
 profile first. The Workshop does not skip the prologue, import saves, or interrupt missions.
 
-## Building and playing a checkpoint race
+## Building a layout and playing
 
-1. In free roam, press **F6** for **Workshop**. Use the keyboard and mouse for text fields.
-2. In **Course builder**, name the course and use **Add checkpoint here**. Close the panel with
-   **F6** or **Esc**, move to another point, and add the next checkpoint. Use at least 15 m between
-   consecutive checkpoints. The course can contain 2 to 24 points for a race.
-3. **Save course** saves that layout by name. **Load course** reads a local layout with that exact
-   name. **Undo last** or **Clear layout** edits the active course without deleting a saved file.
-   Names use letters A–Z, digits, spaces, hyphens and underscores (max 32 characters).
-4. **Start checkpoint race** closes the host’s panel, gives a three-second countdown, and starts
-   timing. Close F6 on any joining PCs to drive. Follow the yellow marker in checkpoint order;
-   approach each point within 6 m. The HUD shows progress and distance; **Race results** shows times.
-5. In **Test drive**, select a stock vehicle and request it nearby while on foot in free roam.
-   Model streaming is time-limited. Only the local test vehicle is spawned, not copies on other PCs.
+1. In free roam, press **F6 → Map builder**. Use the keyboard and mouse for the editor. Type a
+   layout name (A–Z, digits, spaces, hyphens and underscores, up to 32 characters).
+2. On foot, use **Place props** to choose a cone, barrier, crate or ramp. **Place 3 m ahead** places
+   it in the direction you're facing using the rotation and height sliders. Ground height is not
+   snapped automatically; use **Undo prop** and adjust the height if needed. Up to 24 placed props
+   are stored per layout. Props are fixed local scenery, not shared moving physics objects.
+3. **Add checkpoint here** records your position. Close F6, move, and repeat. A minigame needs 2–24
+   checkpoints. Keep consecutive points at least 15 m apart for **Checkpoint race**; for
+   **Checkpoint hunt**, all pairs must be at least 15 m apart.
+4. **Save layout** keeps the props, checkpoints and selected minigame on this PC. **Load layout**
+   reads a saved layout by its exact name. Undo buttons, **Clear layout** and **Return to editing**
+   don't delete any saved files. Earlier checkpoint-only saves still load.
+5. **Start minigame** closes the host's panel and starts a three-second countdown. Close F6 on any
+   joining PCs to drive. For a race, visit the points in order; for a hunt, visit them in any order
+   (the yellow marker points to the nearest unvisited one). Approach a point within 6 m to collect
+   it. A round ends once every racer completes it or after 20 minutes. See times in **Results**.
+6. In **Test drive**, choose a stock vehicle and spawn it nearby from free roam while on foot.
+   Model streaming is time-limited, and only your local test vehicle is driveable.
 
-The host owns the course and starts/resets the race. Clients see the host's layout without it being
-written to their disks. Players still loading, past the freshness limit, or joining after the
-countdown starts are spectators until the next race. Blue map markers show the last fresh position
-of friends. This is a checkpoint layout and one minigame on the existing map, not an editor for
-terrain, props or scripts. This version does not render remote avatars or synchronize NPCs, damage,
-vehicle physics or world changes. The race relies on positions reported by clients, not anticheat.
+The host owns the layout and controls the minigame. The layout is shared in the room; a guest's
+saved files aren't modified. Players whose positions are stale, who are still loading, or who join
+after countdown begins are spectators until the next round. Blue map markers show friends' fresh
+positions. Within 150 m, the game also attempts to stream their local translucent ghosts. On foot
+or in an unrecognized vehicle, that is a stock pedestrian. For one of the test vehicles it is a
+matching ghost vehicle. The ghosts show position and heading, not appearance, animations, collision,
+damage, occupants or driving physics. If the scene natives cannot be used, markers and minigames
+remain available. This is not a terrain or script editor, and it does not synchronize NPCs, weather
+or traffic. Progress relies on client-reported positions, not anticheat.
 
 ## Hosting for friends
 
-1. Everyone needs their own verified TU27 installation and a compatible Workshop build. Choose
+1. Everyone needs their own verified TU27 installation and a compatible Workshop build (protocol v2;
+   it won't connect to earlier Workshop builds). Choose
    **Private multiplayer** at launch. The host opens **F6 → Session**, enters a nickname, chooses a
    **TCP** port (default **30127**), and presses **Host here**. Leave **This PC only** unchecked for LAN
    play. The listener shows the bound port and a random 32-character invite code.
@@ -62,7 +72,7 @@ No discovery, relay, updates, accounts, or asset transfers use this protocol.
 ## Storage and launch flags
 
 - The Workshop profile, including guest saves and achievements, is under `data/user/sandbox/profile/`.
-  Named checkpoint layouts are under `data/user/sandbox/courses/`. There is no automatic save import.
+  Named layouts are under `data/user/sandbox/courses/`. There is no automatic save import.
 - The Disc 1 installation remains in `data/user/0000000000000000/545408A7/00000002/`. The patched SDK
   mounts GTA V's common packages from there read-only in Workshop sessions. Other content paths use
   the selected profile. Game/update data and the shader cache can be reused without copying gigabytes.
@@ -71,6 +81,8 @@ No discovery, relay, updates, accounts, or asset transfers use this protocol.
   runs keep the campaign default; use `--gtav_mode=menu --gtav_native=on` with the usual game paths
   to opt into the selector, or specify a mode directly. `--headless=true` still applies only to
   guest XAM prompts, not the startup selector. Use an explicit mode for automated runs.
+- To turn off live props and ghosts if streaming causes trouble, pass `--gtav_workshop_scene=false`
+  after the launcher's `--` separator. Checkpoints, map markers, layouts and test vehicles remain.
 - **F1** settings and **F2** debug still work (**Fn+F2** on media-key keyboards). Story cheat actions
   are disabled in private multiplayer. Intentional mission-failure slow motion is unchanged.
 
@@ -82,13 +94,19 @@ cmake --build build-launcher
 ctest --test-dir build-launcher --output-on-failure
 ```
 
-The assets-free `sandbox_loopback` test exercises the codec, bounded course I/O, storage layout,
-countdown and ordered checkpoints, local server with two clients, capacity, invalid invites,
-stale positions, disconnection and restart. The Linux launcher fixture checks the normal startup
-flag and its explicit campaign override. These are not retail-game tests.
+The asset-free `sandbox_loopback` test covers both minigames, old/new layout files, bounds, scene
+selection by distance and pose freshness, and TCP rooms with multiple clients, capacity, refused
+edits, bad invites, disconnect and restart. The Linux launcher fixture checks the startup flag and
+its explicit campaign override. The Windows packaging smoke checks verified ZIP application,
+helper handoff, dashboard relaunch and preservation of player data. It separately starts the
+packaged host with a temporary no-game DLL to verify the actual selector and Solo default. Neither
+test boots the retail title.
 
-For a retail validation, use two installations with their own TU27 data. Check keyboard and mouse
-navigation and quitting from the selector, then boot all three modes and confirm the campaign saves
-remain unchanged after saving in Workshop. In free roam, host and join, drive through a round, test
-vehicle spawn, switch in and out of missions/pause, and verify markers are removed on disconnect.
-Test the F2 panel and a deliberate campaign mission failure as separate regression checks.
+Before publishing, test the same Windows ZIP on a PC with the original discs and TU27. Check the
+selector and boot all three modes into the game. Play through the prologue on a fresh Workshop
+profile, or use an existing Workshop free-roam save. Save in Workshop and confirm the campaign
+saves are unchanged. In free roam, place/rotate/remove each prop, save and reload the layout, spawn
+and drive each test vehicle, and test F6, pause and mission transitions. With a second TU27 PC, host
+and join, follow another player on foot and in a test vehicle, drive out of range and back, play
+both minigames, then disconnect and check that remote actors disappear. Check F2 and deliberate
+mission failure in Campaign separately. Check the physical controller over USB and Bluetooth.

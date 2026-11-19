@@ -272,7 +272,7 @@ SessionView Session::View() const {
   return {link_, port_, {}, error_, std::move(world)};
 }
 
-void Session::Publish(std::optional<Point> point) {
+void Session::Publish(std::optional<Presence> point) {
   if (point && !point->Valid()) return;
   const auto now = NowMs();
   std::lock_guard lock(mutex_);
@@ -369,7 +369,7 @@ void Session::RunHost(std::stop_token stop, uint16_t port, bool loopback_only) {
           peer.pipe.Queue(wire::Snapshot(room_.View(peer.id, NowMs())), now);
           return true;
         }
-        std::optional<Point> point;
+        std::optional<Presence> point;
         if (!wire::ReadPose(frame, point)) return false;
         std::lock_guard lock(mutex_);
         room_.Pose(peer.id, point, NowMs());

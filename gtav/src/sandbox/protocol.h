@@ -11,8 +11,8 @@ namespace gtav::sandbox::wire {
 // The server accepts only Hello and Pose. It never reads files or executes guest calls.
 using Bytes = std::vector<uint8_t>;
 using Invite = std::array<uint8_t, 16>;
-inline constexpr uint8_t kVersion = 1;
-inline constexpr size_t kMaxPacket = 1024;
+inline constexpr uint8_t kVersion = 2;
+inline constexpr size_t kMaxPacket = 2048;
 
 enum class Kind : uint8_t { Hello = 1, Pose, World };
 struct Frame { Kind kind; Bytes payload; };
@@ -30,8 +30,8 @@ class Framing {
 
 Bytes Hello(const Invite& invite, std::string_view name);
 bool ReadHello(const Frame& f, Invite& invite, std::string& name);
-Bytes Pose(std::optional<Point> point);
-bool ReadPose(const Frame& f, std::optional<Point>& point);
+Bytes Pose(std::optional<Presence> point);
+bool ReadPose(const Frame& f, std::optional<Presence>& point);
 Bytes Snapshot(const World& world);
 std::optional<World> ReadSnapshot(const Frame& f);
 

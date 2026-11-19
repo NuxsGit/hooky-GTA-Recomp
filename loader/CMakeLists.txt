@@ -107,7 +107,7 @@ if(GTAV_LAUNCHER_TESTS)
     set(_workshop ../gtav/src/sandbox)
     add_executable(gtav_sandbox_tests tests/sandbox_tests.cpp
         ${_workshop}/world.cpp ${_workshop}/protocol.cpp ${_workshop}/session.cpp
-        ${_workshop}/courses.cpp ${_workshop}/paths.cpp)
+        ${_workshop}/courses.cpp ${_workshop}/paths.cpp ${_workshop}/scene.cpp)
     target_include_directories(gtav_sandbox_tests PRIVATE ${_workshop})
     target_link_libraries(gtav_sandbox_tests PRIVATE Threads::Threads)
     if(WIN32)

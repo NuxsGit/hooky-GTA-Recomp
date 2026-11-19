@@ -111,7 +111,7 @@ if(NOT ANDROID AND NOT GTAV_IOS)
     target_link_libraries(gtav PRIVATE Threads::Threads)
     target_compile_definitions(gtav PRIVATE GTAV_DESKTOP_WORKSHOP=1)
     target_sources(gtav PRIVATE src/sandbox/desktop.cpp src/sandbox/world.cpp
-        src/sandbox/protocol.cpp src/sandbox/session.cpp src/sandbox/courses.cpp src/sandbox/paths.cpp)
+        src/sandbox/protocol.cpp src/sandbox/session.cpp src/sandbox/courses.cpp src/sandbox/paths.cpp src/sandbox/scene.cpp)
     if(WIN32)
         target_link_libraries(gtav PRIVATE ws2_32 bcrypt)
     endif()

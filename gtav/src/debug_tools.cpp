@@ -85,6 +85,11 @@ enum Native : uint32_t {
   kRequestModel = 0x82CF0CC0, kModelLoaded = 0x82CF0A90, kReleaseModel = 0x82CF0AE0,
   kIsVehicleModel = 0x82CF0C48, kModelOnDisc = 0x82CF0B50,
   kCreateVehicle = 0x82D5CBC8, kDeleteVehicle = 0x82D4E058, kGroundVehicle = 0x82D4E168,
+  kEntityType = 0x82C9B4E8, kDeleteEntity = 0x82C9BC50, kNoCollision = 0x82C9BFA8,
+  kDynamic = 0x82C9C048, kSetHeading = 0x82C9C068, kInvincible = 0x82C9C088,
+  kGravity = 0x82C9C2B0, kAlpha = 0x82C9C320, kPedVehicle = 0x82D0C510,
+  kBlockPed = 0x82D1CD70, kCreatePed = 0x82CE60F0, kCreateObject = 0x82D1E4B0,
+  kLockDoors = 0x82D4E510,
 #endif
 };
 
@@ -104,6 +109,9 @@ class NativeCall {
       : context_(context), base_(base), memory_(memory), dispatcher_(dispatcher), sp_(context.r1.u32) {}
 
   bool SafeStack() const { return sp_ > 0x800 && Readable(memory_, sp_ - 0x800, 0x800, true); }
+  bool Supports(std::initializer_list<Native> natives) const {
+    return std::all_of(natives.begin(), natives.end(), [this](Native n) { return dispatcher_.GetFunction(n) != nullptr; });
+  }
 
   bool Invoke(Native native, std::initializer_list<uint32_t> args = {}, PPCFunc* original = nullptr,
               std::optional<uint32_t> reference = std::nullopt) {
@@ -323,10 +331,163 @@ struct Cheats {
 };
 
 #ifdef GTAV_DESKTOP_WORKSHOP
+// Models come from two small local palettes, not from peer-supplied hashes. A local view is
+// reconciled on the already guarded guest script thread. No physics, tasks, or damage packets.
+struct WorkshopScene {
+  struct Instance { sandbox::Actor actor; uint32_t handle; };
+  std::vector<Instance> entities;
+  std::array<int64_t, sandbox::kPropModels.size() + sandbox::kVehicleModels.size() + 1> retry{};
+  size_t model_slot = 0;
+  uint32_t loading = 0;
+  int64_t load_by = 0;
+  bool checked = false, disabled = false;
+
+  static size_t Slot(const sandbox::Actor& actor) {
+    switch (actor.kind) {
+      case sandbox::Visual::Prop: return actor.model;
+      case sandbox::Visual::Vehicle: return sandbox::kPropModels.size() + actor.model;
+      default: return sandbox::kPropModels.size() + sandbox::kVehicleModels.size();
+    }
+  }
+  static uint32_t Model(const sandbox::Actor& a) {
+    switch (a.kind) {
+      case sandbox::Visual::Prop: return HashName(sandbox::kPropModels[a.model]);
+      case sandbox::Visual::Vehicle: return HashName(sandbox::kVehicleModels[a.model]);
+      default: return HashName("a_m_y_skater_01");
+    }
+  }
+  static uint32_t Type(sandbox::Visual kind) {
+    return kind == sandbox::Visual::Ped ? 1 : kind == sandbox::Visual::Vehicle ? 2 : 3;
+  }
+  static bool SameModel(const sandbox::Actor& a, const sandbox::Actor& b) {
+    return a.kind == b.kind && a.model == b.model;
+  }
+  static bool Present(NativeCall& call, const Instance& e) {
+    return call.Flag(kExists, {e.handle}) && call.Read(kEntityType, {e.handle}) == Type(e.actor.kind) && call.Okay();
+  }
+  static bool Remove(NativeCall& call, const Instance& e) {
+    auto cleanup = call.CleanupCall();
+    if (Present(cleanup, e)) {
+      cleanup.Invoke(kDeleteEntity, {}, nullptr, e.handle);
+      if (Present(cleanup, e)) return false;
+    }
+    return cleanup.Okay();
+  }
+  void Release(NativeCall& call) {
+    if (!loading) return;
+    auto cleanup = call.CleanupCall();
+    cleanup.Invoke(kReleaseModel, {loading});
+    loading = 0;
+  }
+
+  uint32_t Spawn(NativeCall& call, const sandbox::Actor& a, uint32_t hash) {
+    const auto x = F(a.position.x / 100.f), y = F(a.position.y / 100.f), z = F(a.position.z / 100.f);
+    const auto heading = F(a.heading / 10.f);
+    uint32_t entity = 0;
+    switch (a.kind) {
+      case sandbox::Visual::Prop:
+        entity = call.Read(kCreateObject, {hash, x, y, z, 0, 0, 0});
+        break;
+      case sandbox::Visual::Ped:
+        entity = call.Read(kCreatePed, {4, hash, x, y, z, heading, 0, 1});
+        break;
+      case sandbox::Visual::Vehicle:
+        entity = call.Read(kCreateVehicle, {hash, x, y, z, heading, 0, 1});
+        break;
+    }
+    if (!entity || entity == UINT32_MAX) return 0;
+    if (!Present(call, {a, entity})) return 0;
+    if (a.kind == sandbox::Visual::Ped) call.Invoke(kBlockPed, {entity, 1});
+    if (a.kind == sandbox::Visual::Vehicle) call.Invoke(kLockDoors, {entity, 2});
+    if (a.kind != sandbox::Visual::Prop) {
+      call.Invoke(kNoCollision, {entity, 0, 0});
+      call.Invoke(kAlpha, {entity, 150, 0});
+    }
+    call.Invoke(kInvincible, {entity, 1});
+    call.Invoke(kDynamic, {entity, 0});
+    call.Invoke(kGravity, {entity, 0});
+    call.Invoke(kSetHeading, {entity, heading});
+    if (call.Okay()) return entity;
+    Remove(call, {a, entity});
+    return 0;
+  }
+
+  void Update(NativeCall& call, std::vector<sandbox::Actor> wanted, int64_t now, bool streaming_allowed) {
+    if (!checked && !wanted.empty()) {
+      checked = true;
+      // Fail before creating anything if the installed mapping can't configure or delete it.
+      if (!call.Supports({kExists, kEntityType, kDeleteEntity, kModelOnDisc, kRequestModel, kModelLoaded,
+                          kReleaseModel, kCreateObject, kCreatePed, kCreateVehicle, kDynamic, kGravity,
+                          kInvincible, kBlockPed, kNoCollision, kAlpha, kLockDoors, kSetCoords, kSetHeading}))
+        Disable();
+    }
+    if (disabled) wanted.clear();
+    for (auto it = entities.begin(); it != entities.end();) {
+      const auto target = std::find_if(wanted.begin(), wanted.end(), [&](const sandbox::Actor& a) {
+        return a.key == it->actor.key && SameModel(a, it->actor);
+      });
+      if (target == wanted.end()) {
+        if (Remove(call, *it)) it = entities.erase(it);
+        else { Disable(); ++it; }
+        continue;
+      }
+      if (!Present(call, *it)) {
+        if (!call.Okay()) break;  // keep the tracked handle for cleanup with fresh scratch
+        it = entities.erase(it);
+        continue;
+      }
+      const auto& a = *target;
+      const auto h = it->handle;
+      if (a.position != it->actor.position)
+        call.Invoke(kSetCoords, {h, F(a.position.x / 100.f), F(a.position.y / 100.f), F(a.position.z / 100.f), 0, 0, 0});
+      if (a.heading != it->actor.heading) call.Invoke(kSetHeading, {h, F(a.heading / 10.f)});
+      if (!call.Okay()) break;
+      it->actor = a;
+      wanted.erase(target);
+      ++it;
+    }
+    if (call.Okay() && !disabled && streaming_allowed) {
+      // One outstanding model and at most one spawn per tick. Prefer finishing a pending load
+      // over requesting another model when the scene changes underneath it.
+      const auto next = std::find_if(wanted.begin(), wanted.end(), [&](const sandbox::Actor& a) {
+        const auto slot = Slot(a);
+        return loading ? slot == model_slot : now >= retry[slot];
+      });
+      if (next == wanted.end()) {
+        Release(call);
+      } else if (!loading) {
+        model_slot = Slot(*next);
+        const auto hash = Model(*next);
+        if (call.Flag(kModelOnDisc, {hash}) && call.Invoke(kRequestModel, {hash})) {
+          loading = hash;
+          load_by = now + 3'000;
+        } else retry[model_slot] = now + 30'000;
+      } else if (now >= load_by) {
+        retry[model_slot] = now + 30'000;
+        Release(call);
+      } else if (call.Flag(kModelLoaded, {loading})) {
+        const auto handle = Spawn(call, *next, loading);
+        if (handle) entities.push_back({*next, handle});
+        else retry[model_slot] = now + 30'000;
+        Release(call);
+      }
+    } else Release(call);
+    if (!call.Okay()) Disable();
+  }
+  void Disable() {
+    if (disabled) return;
+    disabled = true;
+    REXLOG_WARN("[workshop] live props/ghosts disabled: TU27 scene native failed or is unavailable");
+    sandbox::ReportSceneUnavailable();
+  }
+};
+
 struct WorkshopWorld {
   struct Marker { uint64_t key; uint32_t handle; sandbox::Point point; };
   std::vector<Marker> markers;
+  WorkshopScene scene;
   uint32_t requested_model = 0, car = 0, requesting_ped = 0;
+  sandbox::Vehicle test_vehicle = sandbox::Vehicle::Other, requested_vehicle = sandbox::Vehicle::Other;
   int64_t model_by = 0;
 
   static float Meters(int32_t cm) { return cm / 100.f; }
@@ -338,9 +499,10 @@ struct WorkshopWorld {
     std::vector<Target> want;
     if (visible) {
       for (const auto& p : world.players) {
-        if (p.id != world.self && p.pose) want.push_back({p.id, *p.pose, 3});
-        if (p.id == world.self && p.racing && !p.finish_ms && p.passed < world.course.points.size()) {
-          want.push_back({0x100000000ull, world.course.points[p.passed], 5});
+        if (p.id != world.self && p.pose) want.push_back({p.id, p.pose->position, 3});
+        if (p.id == world.self) {
+          if (const auto next = sandbox::NextCheckpoint(world.course, p))
+            want.push_back({0x100000000ull, world.course.points[*next], 5});
         }
       }
       if (world.race == sandbox::Race::Editing) {
@@ -395,12 +557,14 @@ struct WorkshopWorld {
       return;
     }
     if (request && request->deadline >= now) {
-      if (const auto* model = sandbox::VehicleModel(request->preset)) {
+      if (request->preset < sandbox::kVehicleModels.size()) {
         Release(call);
-        const auto hash = HashName(model);
+        scene.Release(call);
+        const auto hash = HashName(sandbox::kVehicleModels[request->preset]);
         if (call.Flag(kModelOnDisc, {hash}) && call.Flag(kIsVehicleModel, {hash}) &&
             call.Invoke(kRequestModel, {hash})) {
           requested_model = hash;
+          requested_vehicle = sandbox::Vehicle(request->preset + 1);
           requesting_ped = ped;
           model_by = now + 5'000;
           sandbox::ReportVehicle("Streaming test vehicle...");
@@ -430,6 +594,7 @@ struct WorkshopWorld {
     car = call.Read(kCreateVehicle, {requested_model, F(target.x), F(target.y), F(target.z), F(heading), 0, 0});
     Release(call);
     if (car && car != UINT32_MAX && call.Flag(kExists, {car}) && call.Okay()) {
+      test_vehicle = requested_vehicle;
       call.Invoke(kGroundVehicle, {car});
       sandbox::ReportVehicle("Local test vehicle spawned nearby.");
     } else {
@@ -440,16 +605,38 @@ struct WorkshopWorld {
 
   void Tick(NativeCall& call, int64_t now) {
     const auto ped = PlayablePed(call);
-    const Vec coords = ped ? call.Vector(kCoords, {ped, 1}) : Vec{};
-    const auto point = ped && call.Okay() ? sandbox::Point::FromMeters(coords.x, coords.y, coords.z) : std::nullopt;
-    sandbox::Party().Publish(point);
-    sandbox::ReportGuest((!call.Okay() || (ped && !point)) ? sandbox::Guest::Unavailable :
-                          point ? sandbox::Guest::Ready : sandbox::Guest::Busy);
-    // Cleanup uses a fresh call state, so a rejected getter doesn't leave a stale peer blip.
+    auto pose_call = call.CleanupCall();
+    std::optional<sandbox::Presence> pose;
+    Vec coords{};
+    if (ped && call.Okay()) {
+      const bool driving = pose_call.Flag(kInVehicle, {ped, 0});
+      uint32_t entity = ped;
+      if (driving) {
+        // If this optional getter isn't available, keep checkpoint/radar poses on the ped.
+        auto vehicle_call = call.CleanupCall();
+        const auto in_car = vehicle_call.Read(kPedVehicle, {ped, 0});  // not the last vehicle
+        if (in_car && vehicle_call.Flag(kExists, {in_car}) && vehicle_call.Okay()) entity = in_car;
+      }
+      coords = pose_call.Vector(kCoords, {entity, 1});
+      const float heading = pose_call.Float(kHeading, {entity});
+      auto point = sandbox::Point::FromMeters(coords.x, coords.y, coords.z);
+      if (point && pose_call.Okay() && std::isfinite(heading)) {
+        const auto vehicle = !driving ? sandbox::Vehicle::Foot : entity == car ? test_vehicle : sandbox::Vehicle::Other;
+        pose = sandbox::Presence{*point, sandbox::HeadingFromDegrees(heading), vehicle};
+      }
+    }
+    sandbox::Party().Publish(pose);
+    sandbox::ReportGuest((!call.Okay() || (ped && !pose)) ? sandbox::Guest::Unavailable :
+                          pose ? sandbox::Guest::Ready : sandbox::Guest::Busy);
+    const auto world = sandbox::Party().View().world;
+    // Cleanup uses a fresh call state, so a rejected getter doesn't leave stale actors/blips.
     auto map_call = call.CleanupCall();
-    Markers(map_call, sandbox::Party().View().world, point.has_value());
+    Markers(map_call, world, pose.has_value());
     auto vehicle_call = call.CleanupCall();
-    Vehicles(vehicle_call, point ? ped : 0, coords, now);
+    Vehicles(vehicle_call, pose ? ped : 0, coords, now);
+    auto scene_call = call.CleanupCall();
+    scene.Update(scene_call, sandbox::SceneTargets(world, sandbox::SceneEnabled() ? pose : std::nullopt),
+                 now, !requested_model);
   }
 };
 #endif

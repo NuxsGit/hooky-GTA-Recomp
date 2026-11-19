@@ -16,6 +16,7 @@
 #include <utility>
 
 REXCVAR_DEFINE_STRING(gtav_mode, "campaign", "GTAV", "Desktop startup mode: menu | solo | multiplayer | campaign");
+REXCVAR_DEFINE_BOOL(gtav_workshop_scene, true, "GTAV", "Workshop: show local props and remote ghosts in free roam");
 
 namespace gtav::sandbox {
 namespace {
@@ -26,8 +27,8 @@ std::atomic<int64_t> guest_at{0};
 std::mutex vehicle_mutex;
 std::optional<VehicleRequest> vehicle_request;
 std::atomic<const char*> vehicle_status{"Select a local test vehicle."};
-constexpr std::array<const char*, 5> kVehicleModels = {"blista", "sultan", "adder", "bati", "bmx"};
-constexpr std::array<const char*, 5> kVehicleNames = {"Blista", "Sultan", "Adder", "Bati 801", "BMX"};
+std::atomic<bool> scene_available{true};
+constexpr const char* kGameNames[] = {"Checkpoint race", "Checkpoint hunt"};
 
 bool Error(const char* message) {
   REXLOG_ERROR("[workshop] {}", message);
@@ -70,46 +71,66 @@ void EditCourse(const SessionView& view, const Player* local) {
   const auto& world = view.world;
   static char name[33] = "Untitled";
   static std::string notice;
+  static int prop = 0, rotation = 0, height = -50;
   const bool racing = world.race == Race::Countdown || world.race == Race::Running;
-  ImGui::Text("Active course: %s | %zu / %u checkpoints", world.course.name.c_str(), world.course.points.size(), kMaxCheckpoints);
+  ImGui::Text("%s | %zu/%u checkpoints | %zu/%u props", world.course.name.c_str(), world.course.points.size(),
+              kMaxCheckpoints, world.course.props.size(), kMaxProps);
   if (!view.Owner()) {
-    ImGui::TextDisabled("The host owns the layout and race. You can play it, not edit it.");
+    ImGui::Text("%s", kGameNames[unsigned(world.course.game)]);
+    ImGui::TextDisabled("The host owns the layout and minigame. You can play it, not edit it.");
     return;
   }
-  ImGui::BeginDisabled(racing);
-  ImGui::InputText("Course name", name, sizeof(name));
-  ImGui::BeginDisabled(!local || !local->pose || GuestState() != Guest::Ready);
-  if (ImGui::Button("Add checkpoint here") && local && local->pose) {
+  auto edit = [&](auto change, const char* success) {
     auto course = world.course;
     course.name = name;
-    course.points.push_back(*local->pose);
-    notice = Party().SetCourse(std::move(course)) ? "Checkpoint added." :
-        "Use a valid name, up to 24 checkpoints and at least 15 m between consecutive points.";
-  }
+    change(course);
+    notice = Party().SetCourse(std::move(course)) ? success :
+        "Edit rejected. Check the layout name and the 15 m spacing rule.";
+  };
+  const bool at_player = local && local->pose && GuestState() == Guest::Ready;
+  ImGui::BeginDisabled(racing);
+  ImGui::InputText("Layout name", name, sizeof(name));
+  int game = int(world.course.game);
+  if (ImGui::Combo("Minigame", &game, kGameNames, int(std::size(kGameNames))))
+    edit([&](Course& c) { c.game = Minigame(game); }, "Minigame changed.");
+  ImGui::BeginDisabled(!at_player || world.course.points.size() >= kMaxCheckpoints);
+  if (ImGui::Button("Add checkpoint here") && at_player)
+    edit([&](Course& c) { c.points.push_back(local->pose->position); }, "Checkpoint added.");
   ImGui::EndDisabled();
   ImGui::SameLine();
-  if (ImGui::Button("Undo last") && !world.course.points.empty()) {
+  if (ImGui::Button("Undo checkpoint") && !world.course.points.empty())
+    edit([](Course& c) { c.points.pop_back(); }, "Checkpoint removed.");
+
+  if (ImGui::CollapsingHeader("Place props", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Combo("Prop", &prop, kPropNames.data(), int(kPropNames.size()));
+    ImGui::SliderInt("Rotation", &rotation, -180, 180, "%d deg");
+    ImGui::SliderInt("Height offset", &height, -200, 200, "%d cm");
+    const auto placement = at_player ? PlaceProp(*local->pose, PropKind(prop), rotation, height) : std::nullopt;
+    ImGui::BeginDisabled(!placement || world.course.props.size() >= kMaxProps);
+    if (ImGui::Button("Place 3 m ahead (on foot)") && placement)
+      edit([&](Course& c) { c.props.push_back(*placement); }, "Prop placed.");
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Undo prop") && !world.course.props.empty())
+      edit([](Course& c) { c.props.pop_back(); }, "Prop removed.");
+  }
+  if (ImGui::Button("Save layout")) {
     auto course = world.course;
-    course.points.pop_back();
-    Party().SetCourse(std::move(course));
+    course.name = name;
+    notice = SaveCourse(courses, course) ? "Layout saved on this PC." : "Could not save layout. Check name and write access.";
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Load layout")) {
+    auto course = LoadCourse(courses, name);
+    notice = course && Party().SetCourse(std::move(*course)) ? "Layout loaded." : "No valid local layout with that name.";
   }
   ImGui::SameLine();
   if (ImGui::Button("Clear layout"))
-    notice = Party().SetCourse(Course{name, {}}) ? "Layout cleared (saved files are unchanged)." : "Use a valid course name.";
-  if (ImGui::Button("Save course")) {
-    auto course = world.course;
-    course.name = name;
-    notice = SaveCourse(courses, course) ? "Course saved on this PC." : "Could not save course. Check name and write access.";
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Load course")) {
-    auto course = LoadCourse(courses, name);
-    notice = course && Party().SetCourse(std::move(*course)) ? "Course loaded." : "No valid local course with that name.";
-  }
+    edit([](Course& c) { c.props.clear(); c.points.clear(); }, "Layout cleared (saved files unchanged).");
   ImGui::EndDisabled();
   ImGui::Separator();
   if (!racing) {
-    if (ImGui::Button("Start checkpoint race")) {
+    if (ImGui::Button("Start minigame")) {
       if (Party().StartRace()) native::menu::Close();
       else notice = "Add two checkpoints and enter free roam first.";
     }
@@ -120,7 +141,6 @@ void EditCourse(const SessionView& view, const Player* local) {
     notice.clear();
   }
   ImGui::TextWrapped("%s", notice.c_str());
-  ImGui::TextDisabled("Course files store checkpoint layouts on the existing GTA map, not terrain or scripts.");
 }
 
 void ShowNetwork(const SessionView& view) {
@@ -177,7 +197,7 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
     const SDL_MessageBoxButtonData choices[] = {
         {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Sandbox solo"},
         {0, 2, "Private multiplayer"}, {0, 3, "Campaign"}, {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Quit"}};
-    const SDL_MessageBoxData menu{SDL_MESSAGEBOX_INFORMATION, SDL_GetKeyboardFocus(), "GTA V Recomp | Play",
+    const SDL_MessageBoxData menu{SDL_MESSAGEBOX_INFORMATION | SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT, SDL_GetKeyboardFocus(), "GTA V Recomp | Play",
         "Choose how to play.\n\nSandbox modes use a separate local profile. Multiplayer lets you host or join a friend's PC.\n"
         "Campaign opens your existing story saves.", int(std::size(choices)), choices, nullptr};
     int id = -1;
@@ -212,7 +232,8 @@ void ReportGuest(Guest state) {
   guest_at.store(NowMs(), std::memory_order_relaxed);
   guest.store(state);
 }
-const char* VehicleModel(unsigned preset) { return preset < kVehicleModels.size() ? kVehicleModels[preset] : nullptr; }
+bool SceneEnabled() { return REXCVAR_GET(gtav_workshop_scene); }
+void ReportSceneUnavailable() { scene_available.store(false); }
 void ReportVehicle(const char* message) { vehicle_status.store(message, std::memory_order_relaxed); }
 
 std::optional<VehicleRequest> TakeVehicleRequest() {
@@ -226,6 +247,7 @@ void DrawWorkshop() {
   const auto* local = Myself(view.world);
   ImGui::TextUnformatted(CurrentMode() == Mode::Solo ? "SANDBOX SOLO" : "PRIVATE MULTIPLAYER");
   ImGui::TextWrapped("%s", GuestLabel());
+  if (!SceneEnabled() || !scene_available.load()) ImGui::TextDisabled("Local props and ghost actors are disabled; map markers still work.");
   if (!ImGui::BeginTabBar("workshop-tabs")) return;
   if (CurrentMode() == Mode::Multiplayer && ImGui::BeginTabItem("Session")) {
     ShowNetwork(view);
@@ -236,7 +258,7 @@ void DrawWorkshop() {
                         p.pose ? "" : " | loading / absent");
     ImGui::EndTabItem();
   }
-  if (ImGui::BeginTabItem("Course builder")) {
+  if (ImGui::BeginTabItem("Map builder")) {
     EditCourse(view, local);
     ImGui::EndTabItem();
   }
@@ -251,18 +273,18 @@ void DrawWorkshop() {
     }
     ImGui::EndDisabled();
     ImGui::TextWrapped("%s", vehicle_status.load());
-    ImGui::TextDisabled("One local test vehicle at a time. Vehicle physics are not replicated.");
+    ImGui::TextWrapped("One driveable test vehicle per PC. Friends nearby see a ghost of that vehicle, not its physics.");
     ImGui::EndTabItem();
   }
-  if (ImGui::BeginTabItem("Race results")) {
+  if (ImGui::BeginTabItem("Results")) {
     auto rankings = view.world.players;
     std::stable_sort(rankings.begin(), rankings.end(), [](const Player& a, const Player& b) {
       if (bool(a.finish_ms) != bool(b.finish_ms)) return bool(a.finish_ms);
-      return a.finish_ms && b.finish_ms ? a.finish_ms < b.finish_ms : a.passed > b.passed;
+      return a.finish_ms && b.finish_ms ? a.finish_ms < b.finish_ms : a.Passed() > b.Passed();
     });
     for (const auto& p : rankings) {
       if (p.finish_ms) ImGui::BulletText("%s | %.2f seconds", p.name.c_str(), p.finish_ms / 1000.0);
-      else ImGui::BulletText("%s | %u / %zu checkpoints%s", p.name.c_str(), unsigned(p.passed),
+      else ImGui::BulletText("%s | %u / %zu checkpoints%s", p.name.c_str(), p.Passed(),
                              view.world.course.points.size(), p.racing ? "" : " (not racing)");
     }
     ImGui::EndTabItem();
@@ -284,14 +306,15 @@ void DrawHud() {
     if (world.race == Race::Countdown)
       ImGui::Text("%s | Starts in %u", world.course.name.c_str(), (world.clock_ms + 999) / 1000);
     else if (world.race == Race::Running || world.race == Race::Finished)
-      ImGui::Text("%s | %u/%zu | %.2f s%s", world.course.name.c_str(), unsigned(local->passed), world.course.points.size(),
+      ImGui::Text("%s | %u/%zu | %.2f s%s", world.course.name.c_str(), local->Passed(), world.course.points.size(),
                   (local->finish_ms ? local->finish_ms : world.clock_ms) / 1000.0, local->finish_ms ? "  FINISHED" : "");
     else ImGui::Text("%s | %zu player%s  [F6]", CurrentMode() == Mode::Solo ? "SANDBOX" : LinkLabel(view.link),
                      world.players.size(), world.players.size() == 1 ? "" : "s");
-    if (world.race == Race::Running && local->pose && local->racing && local->passed < world.course.points.size()) {
-      const auto p = world.course.points[local->passed];
-      const auto distance = std::sqrt(double(DistanceSquared(p, *local->pose))) / 100;
-      ImGui::Text("Checkpoint %u: %.0f m away (yellow map marker)", unsigned(local->passed + 1), distance);
+    if (world.race == Race::Running && local->pose) {
+      if (auto next = NextCheckpoint(world.course, *local)) {
+        const auto distance = std::sqrt(double(DistanceSquared(world.course.points[*next], local->pose->position))) / 100;
+        ImGui::Text("%s | Checkpoint %zu: %.0f m (yellow marker)", kGameNames[unsigned(world.course.game)], *next + 1, distance);
+      }
     }
   }
   ImGui::End();

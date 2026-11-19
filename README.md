@@ -148,8 +148,9 @@ or your local game library. Use **Install & build** with your originals if data 
 
 **Play** opens a game-startup choice: **Sandbox solo** (default), **Private multiplayer**, or
 **Campaign**. The two sandbox modes have a separate local profile. Press **F6** in free roam to
-build and save checkpoint races on the GTA map, test a local vehicle, or host/join a private room
-by IPv4, TCP port and invite code. It is not GTA Online or full world synchronization.
+build and save layouts with props and checkpoints, run a race or checkpoint hunt, and test a local
+vehicle. In a private room (IPv4, TCP port, invite code), friends see nearby ghost actors. This is
+not GTA Online or full world synchronization.
 See [Workshop setup, limitations, and testing](docs/SANDBOX.md).
 
 ## Controls

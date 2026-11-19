@@ -31,7 +31,7 @@ class Session {
   bool Join(std::string ipv4, uint16_t port, std::string name, std::string_view invite);
   void Stop();
   SessionView View() const;
-  void Publish(std::optional<Point> point);
+  void Publish(std::optional<Presence> point);
   bool SetCourse(Course course);
   bool StartRace();
   void ResetRace();
@@ -52,7 +52,7 @@ class Session {
   Course local_course_;
   Room room_{"Player"};
   World remote_;
-  std::optional<Point> local_pose_;
+  std::optional<Presence> local_pose_;
   int64_t last_pose_ms_ = 0, last_snapshot_ms_ = 0;
   std::jthread worker_;  // joined before the fields a worker uses are destroyed
 };
