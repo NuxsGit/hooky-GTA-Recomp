@@ -43,23 +43,65 @@ for it. Draws that actually request **no** pixel shader still run as before. Thi
 failure mode (especially with a cold shader cache); it is not a confirmed reproduction of all
 occlusion artifacts. No global change to depth comparisons or draw order was made.
 
-To reproduce, try the same camera angle with **Linear**, **100%** scene scale and **Best image**.
-Note the mission/location, game mode (Campaign or Workshop) and whether the overlap persists when
-standing still. **F9** dumps the next frame; `logs/native_dump/frame_*/commands.txt` has attachment,
-depth and shader state. **F10** captures the unfiltered front buffer. The renderer diagnostics are
-relative to the game executable; the Windows launcher's main log is `data/logs/gtav.log`.
-If the overlap is intermittent while streaming, compare with `--gtav_native_fence_wait=true` on a
-fresh launch; the more conservative fence policy can also reduce throughput. Share the log and
-repro steps, not game images, discs or saves.
+### Compare the same scene with a text-only F9 capture
+
+Start with **Linear**, **100%** scene scale and **Best image**. Note the mission/location, game
+mode (Campaign or Workshop), GPU and driver, and whether the overlap persists when standing still.
+From the extracted Windows package directory:
+
+```powershell
+.\gtav_launcher.exe --play -- --gtav_native_trace_only=true
+```
+
+Press **F9** with the artifact on screen. Share `logs/native_trace/frame_*.txt` (relative to the
+**game executable**) and the repro steps. With this flag, F9 does not export pixels, geometry,
+shaders or saves. The trace includes command order, render targets, depth/stencil state, shader
+IDs, bound 2D fetch slots, and directly identifiable GPU copy registers. `recorded=true` means the
+host recorded a command, not that a GPU result was verified. Bound slots alone don't tell us what
+a shader reads. The launcher's main log is `data/logs/gtav.log`.
+
+For an A/B at exactly the same angle, quit, relaunch with both flags, and capture again:
+
+```powershell
+.\gtav_launcher.exe --play -- --gtav_native_trace_only=true --gtav_native_resolve_depth_clear=true
+```
+
+This **opt-in experiment** can apply the depth/stencil clear after a color copy, or preserve the
+requested stencil value after a depth copy. It requires a supported, single-sampled copy with
+matching `RB_COPY_CONTROL`/`RB_DEPTH_CLEAR` evidence and stable depth attachment state. If the call
+emits no directly recognizable copy (for example indirect or predicated work), the experiment
+leaves it alone. `cleared_depth` in the trace shows what the native renderer actually recorded.
+This is not a confirmed fix for any particular prop. Omit the experiment flag to restore the old
+clear policy. If the issue occurs only while streaming, try a separate A/B with
+`--gtav_native_fence_wait=true`; that changes waiting behavior and can reduce throughput.
+
+Without `--gtav_native_trace_only=true`, F9 still creates the full GPU dump in
+`logs/native_dump/frame_*` (about 350 MB per frame). F10 captures the unfiltered front buffer.
+Use text-only capture for sharing by default. Diagnostics are not a performance benchmark.
 
 ## Scope and validation
 
-FSR 1 is spatial. DLSS and frame generation are not exposed by these settings. Before integrating
-a temporal provider, the renderer needs validated pre-HUD color, depth, motion vectors, camera
-jitter and reset/timing information from the game, plus a supported SDK/device. Extra presentations
-of the same image are not frame generation.
+FSR 1 is spatial. DLSS and frame generation are not integrated. Extra presentations of the same
+image are not frame generation. The front buffer already contains GTA's HUD; use the text-only
+F9 trace to look for separate inputs rather than feeding the final image to a temporal SDK.
 
-Run the asset-free output tests with:
+For input discovery, use `--gtav_native_trace_only=true --gtav_native_dump_frames=3` (one F9
+captures three consecutive guest frames). Capture the **same** scene stationary, with camera-only
+motion, and with a moving actor and a stationary camera. Repeat with GTA's HUD off. Compare the
+last writers and first consumers by shader ID, RT/texture identity, size and format. A matching
+address or a two-channel texture is only a lead: Xbox memory aliases and unused bindings are
+common. A local full F9 dump at 100% scene scale and shader disassembly can verify the candidate
+texels and shader reads/writes. If the image is modified in place, locate the last scene draw
+before the first HUD draw, not merely the last resolve.
+
+Before enabling a provider: verify color/depth alignment and depth convention, that vectors
+encode both camera and object motion (direction, units, jitter and coverage), and where to obtain
+unjittered camera transforms, reset flags and frame timing. For frame generation, identify the
+postprocessed scene before HUD and keep HUD composition separate. Check supported features and
+multipliers on the actual adapter/driver and validate pacing, input latency, and resets in-game.
+No DLSS/FG multiplier is claimed by the current build.
+
+Run the asset-free presentation and resolve replay tests with:
 
 ```sh
 cmake -S gtav/tests -B build/graphics-tests

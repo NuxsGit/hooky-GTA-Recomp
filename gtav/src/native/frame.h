@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "resolve_pm4.h"
+
 #include <atomic>
 #include <algorithm>
 #include <cstdint>
@@ -134,6 +136,7 @@ struct ResolveCommand {
   float clear_z = 0.0f;       // for D3DRESOLVE_CLEARDEPTHSTENCIL
   uint32_t dest_level = 0, dest_face = 0;  // mip level and cube face / array slice
   uint32_t dest_words[13] = {};  // dest texture object header + fetch constant (layout check)
+  ResolveProbe probe;  // opt-in: evidence of the copy and the attachment state at/after the call
 };
 
 // D3D occlusion query Issue(BEGIN / END). The native renderer counts the samples the draws between

@@ -84,6 +84,8 @@ REXCVAR_DEFINE_STRING(gtav_native_device, "NVIDIA", "GTAV",
 REXCVAR_DEFINE_STRING(gtav_native_spirv_dir, "", "GTAV",
                       "Directory of precompiled shaders (<vs|ps>_<hash>.spv); default derive/native/census1/spirv");
 
+REXCVAR_DECLARE(bool, gtav_native_trace_only);
+
 namespace plume {
 std::unique_ptr<RenderInterface> CreateVulkanInterface();  // SDL3 build: window comes later
 void SetVulkanPipelineCacheData(std::vector<uint8_t> data);  // plume-gtav.patch
@@ -1065,7 +1067,7 @@ class Renderer {
       }
     }
     if (backend_ok_ && key_dump_.exchange(false)) {
-      if (REXCVAR_GET(gtav_native) == "shadow") {
+      if (!REXCVAR_GET(gtav_native_trace_only) && REXCVAR_GET(gtav_native) == "shadow") {
         // The emulated renderer dumps a window of frames from now on (logs/emu_dump, SDK patch;
         // its resolves are only readable with readback on, switched on around the dump). The native
         // dump is taken a few frames later so that it falls inside that window: the tools then find

@@ -86,6 +86,9 @@ RB + Back to toggle it, D-pad and A to navigate, and B to close.
 F1 > Display (Windows native renderer): choose 1080p, 1440p, 4K or your desktop resolution.
 Restart after changing Output or Scene scale. Output size is not native scene rendering size.
 AMD FSR 1 spatial upscaling can be toggled live, or left on Linear for less GPU work.
+To report a rendering problem without dumping textures, start from PowerShell with:
+  .\gtav_launcher.exe --play -- --gtav_native_trace_only=true
+Press F9 when the problem appears; share logs\native_trace\frame_*.txt and the scene/settings.
 F2 (Fn + F2 on some keyboards) opens Debug: live logs and experimental offline story tools.
 Use a spare save. Closing it releases the camera and stops fly mode.
 If a pad isn't mapped, try the community gamecontrollerdb.txt from

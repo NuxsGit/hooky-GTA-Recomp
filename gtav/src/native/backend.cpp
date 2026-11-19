@@ -4,6 +4,7 @@
 
 #include "capture.h"
 #include "frame.h"
+#include "frame_trace.h"
 #include "textures.h"
 #include "shaders.h"
 #include "write_watch.h"
@@ -33,6 +34,7 @@
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <tuple>
 #include <chrono>
 #if defined(__APPLE__)
@@ -276,7 +278,11 @@ REXCVAR_DECLARE(std::string, gtav_native);
 REXCVAR_DEFINE_INT32(gtav_native_dump_frame, 0, "GTAV",
                      "Dump every resolve of this guest frame to logs/native_dump/ as PNG");
 REXCVAR_DEFINE_INT32(gtav_native_dump_frames, 1, "GTAV",
-                     "Frame dumps: one request (F9) dumps this many consecutive frames (~350 MB each)");
+                     "Frame dumps: one request (F9) dumps this many consecutive frames (~350 MB each in full mode)");
+REXCVAR_DEFINE_BOOL(gtav_native_trace_only, false, "GTAV",
+                    "F9 captures ordered draw/resolve metadata only (no textures, geometry, or GPU readback)");
+REXCVAR_DEFINE_BOOL(gtav_native_resolve_depth_clear, false, "GTAV",
+                    "Experiment: apply the depth/stencil clear confirmed by a supported Resolve's GPU packets");
 REXCVAR_DEFINE_BOOL(gtav_native_scissor, true, "GTAV",
                     "Apply the guest's scissor rectangle to draws (off: draws cover the whole target)");
 REXCVAR_DEFINE_BOOL(gtav_native_write_watch_verify, false, "GTAV",
@@ -1906,22 +1912,21 @@ struct Backend::Impl {
 
   void DumpResolve(RenderCommandList* list, const ResolvedTexture& t, uint32_t address, uint32_t flags,
                    const uint32_t words[6]) {
-    uint32_t slot = uint32_t(dump_infos.size());
-    DumpTexture(list, t.descriptor, uint32_t(t.format), t.width, t.height, address, flags, words);
-    uint32_t bpt = BytesPerTexel(t.format);
-    if (!bpt || !t.texture || t.width > 2048 || t.height > kMaxTargetRows) return;
-    uint32_t row = (t.width + 63) & ~63u;
-    uint64_t size = uint64_t(row) * t.height * bpt;
+    const uint32_t slot = uint32_t(dump_infos.size()), w = Sz(t.width, t.scale), h = Sz(t.height, t.scale);
+    DumpTexture(list, t.descriptor, uint32_t(t.format), w, h, address, flags, words);
+    const uint32_t bpt = BytesPerTexel(t.format);
+    if (!bpt || !t.texture || w > 2048 || h > kMaxTargetRows || slot >= dump_infos.size()) return;
+    const uint32_t row = (w + 63) & ~63u;
+    const uint64_t size = uint64_t(row) * h * bpt;
     uint64_t offset = (dump_raw_used + 255) & ~255ull;
     if (offset + size > kRawDumpSize) return;
     if (!dump_raw_readback) dump_raw_readback = device->createBuffer(RenderBufferDesc::ReadbackBuffer(kRawDumpSize));
     dump_raw_used = offset + size;
     Transition(list, t.texture.get(), RenderTextureLayout::COPY_SOURCE);
-    list->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(dump_raw_readback.get(), t.format, t.width,
-                                                                       t.height, 1, row, offset),
+    list->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(dump_raw_readback.get(), t.format, w, h, 1, row, offset),
                             RenderTextureCopyLocation::Subresource(t.texture.get()));
     Transition(list, t.texture.get(), RenderTextureLayout::SHADER_READ);
-    dump_raw.push_back({slot, uint32_t(t.format), t.width, t.height, row, offset, size});
+    dump_raw.push_back({slot, uint32_t(t.format), w, h, row, offset, size});
   }
 
   // Snapshot of a bound render target (flags 0xF00000 + index), for checking a pass before resolves.
@@ -5049,7 +5054,7 @@ struct Backend::Impl {
   // The depth resolve as the raw D24S8 word (see PSDepthPack), a second variant at the same
   // address for guests that fetch it through an 8888 view (GTA V's SSAO reads the stencil so).
   void WriteDepthPack(RenderCommandList* list, RenderTarget* src, uint32_t base, const uint32_t* words, uint32_t dw,
-                      uint32_t dh, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, uint32_t px, uint32_t py) {
+                      uint32_t dh, const ResolveRegion& host) {
     const float s = src->scale;
     uint64_t variant = uint64_t(base) | uint64_t(uint32_t(RenderFormat::R8G8B8A8_UNORM) & 0xFF) << 32 |
                        uint64_t(1) << 40 | uint64_t(Hash(&dw, 4, dh) & 0x3FFFFF) << 41 | uint64_t(s != 1.0f) << 63;
@@ -5079,8 +5084,8 @@ struct Backend::Impl {
     PassStamp(list, "depth resolve copy");
     pass_end = "depth resolve copy";
     bound_fb = nullptr;
-    const int32_t sx1 = Sc(int32_t(x1), s), sy1 = Sc(int32_t(y1), s), sx2 = Sc(int32_t(x2), s),
-                  sy2 = Sc(int32_t(y2), s), spx = Sc(int32_t(px), s), spy = Sc(int32_t(py), s);
+    const int32_t sx1 = int32_t(host.left), sy1 = int32_t(host.top), sx2 = int32_t(host.right),
+                  sy2 = int32_t(host.bottom), spx = int32_t(host.dest_x), spy = int32_t(host.dest_y);
     list->setViewports(RenderViewport(float(spx), float(spy), float(sx2 - sx1), float(sy2 - sy1)));
     list->setScissors(RenderRect(spx, spy, spx + sx2 - sx1, spy + sy2 - sy1));
     list->setGraphicsPipelineLayout(layout.get());
@@ -5097,7 +5102,8 @@ struct Backend::Impl {
     list->drawInstanced(3, 1, 0, 0);
     if (dumping && dump_small_readback && dump_small.size() < kSmallSlots) {
       // Centre texels of the packed word, to compare the stencil byte with the emulator's.
-      uint32_t bw = std::min(dw, 4u), bh = std::min(dh, 4u), bx = (dw - bw) / 2, by = (dh - bh) / 2;
+      const uint32_t w = Sz(dw, s), h = Sz(dh, s);
+      const uint32_t bw = std::min(w, 4u), bh = std::min(h, 4u), bx = (w - bw) / 2, by = (h - bh) / 2;
       Transition(list, dst.texture.get(), RenderTextureLayout::COPY_SOURCE);
       RenderBox box{int32_t(bx), int32_t(by), int32_t(bx + bw), int32_t(by + bh), 0, 1};
       list->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(dump_small_readback.get(),
@@ -5671,7 +5677,25 @@ struct Backend::Impl {
     return target.second.get();
   }
 
-  void Resolve(RenderCommandList* list, const FramePacket& f, const ResolveCommand& rc) {
+  void ClearResolvedColor(RenderCommandList* list, RenderTarget* src, const RenderRect& rect,
+                          const RenderColor& color, bool in_pass) {
+    if (in_pass && bound_fb) {
+      for (uint32_t i = 0; i < 4; i++)
+        if (bound_color[i] == src) {
+          ClearAttachment(list, i, color, &rect, 1);
+          return;
+        }
+    }
+    if (defer_clears && !dumping) {
+      pending_clears[src].push_back({rect, color});
+      return;
+    }
+    RenderTarget* targets[4] = {src};
+    BindTargets(list, targets, 1, nullptr);
+    list->clearColor(0, color, &rect, 1);
+  }
+
+  ResolveReplay Resolve(RenderCommandList* list, const FramePacket& f, const ResolveCommand& rc) {
     ScopedMs timer{t_resolve};
     fetch_cache.valid = false;
     slot_generation++;
@@ -5680,12 +5704,13 @@ struct Backend::Impl {
     // Destination: the texture object's fetch constant (header 24 bytes + MipFlush).
     const uint32_t* words = rc.dest_words + 7;
     uint32_t base = FetchBaseAddress(words) & 0x1FFFFFFF;
-    if (!base) return;
-    uint32_t dw = (words[2] & 0x1FFF) + 1, dh = ((words[2] >> 13) & 0x1FFF) + 1;
-    uint32_t source = rc.flags & 7;
-    auto surface = regs::Surface(r);
+    if (!base) return {};
+    const uint32_t dw = (words[2] & 0x1FFF) + 1, dh = ((words[2] >> 13) & 0x1FFF) + 1;
+    const auto ops = DecodeResolve(rc.flags);
+    const uint32_t source = ops.source;
+    const bool depth_resolve = ops.copy_depth;
+    const auto surface = regs::Surface(r);
     RenderTarget* src = nullptr;
-    bool depth_resolve = source >= 4;
     if (!depth_resolve) {
       auto c = regs::Color(r, int(source));
       src = Target(c.base, uint32_t(c.format), false, surface.pitch, surface.msaa, dh);
@@ -5693,7 +5718,7 @@ struct Backend::Impl {
     } else {
       auto d = regs::Depth(r);
       src = Target(d.base, d.float24, true, surface.pitch, surface.msaa, dh);
-      if (src->msaa || !src->descriptor) return;  // TODO: multisampled depth resolves
+      if (src->msaa || !src->descriptor) return {};  // TODO: multisampled depth resolves
     }
     RenderFormat guest_dst = ResolveDestFormat(words[1] & 0x3F);
     RenderFormat dst_format = depth_resolve                         ? RenderFormat::R32_FLOAT
@@ -5704,8 +5729,11 @@ struct Backend::Impl {
     // Cube destinations get six faces, mip-chained ones their mips. These are written by the
     // copy shader; a multisampled source is first resolved into a single-sampled scratch target.
     bool cube = ((words[5] >> 9) & 3) == 3 && dw == dh;
+    const float s = src->scale;  // the destination keeps the source's render scale
+    const uint32_t host_w = Sz(dw, s), host_h = Sz(dh, s);
     uint32_t mips = ((words[4] >> 6) & 0xF) + 1;
-    mips = std::min(mips, 32u - uint32_t(std::countl_zero(std::max(dw, dh))));
+    mips = std::min({mips, uint32_t(std::bit_width(std::max(dw, dh))),
+                     uint32_t(std::bit_width(std::max(host_w, host_h)))});
     uint32_t layers = cube ? 6 : 1;
     bool subresources = mips > 1 || layers > 1;
     bool shader_copy = depth_resolve || !src->msaa || subresources;
@@ -5714,10 +5742,17 @@ struct Backend::Impl {
       if (dumping)
         dump_log += fmt::format("resolve skipped -> {:08X} level {} face {} (mips {} layers {}) words5 {:08X}\n", base,
                                 rc.dest_level, rc.dest_face, mips, layers, words[5]);
-      return;
+      return {};
     }
+    const auto region = ResolveCopyRegion(src->width, src->height, std::max(1u, dw >> rc.dest_level),
+                                          std::max(1u, dh >> rc.dest_level), rc.has_rect ? rc.source_rect : nullptr,
+                                          rc.has_point ? rc.dest_point : nullptr);
+    if (region.Empty()) return {};
+    const auto host = ScaleResolveRegion(region, s, std::max(1u, host_w >> rc.dest_level),
+                                         std::max(1u, host_h >> rc.dest_level));
+    if (host.Empty()) return {};
+    const auto [x1, y1, x2, y2, px, py] = region;
     uint32_t shape[3] = {dh, mips, layers};
-    const float s = src->scale;  // the destination keeps the source's render scale
     uint64_t variant = uint64_t(base) | uint64_t(uint32_t(dst_format) & 0xFF) << 32 | uint64_t(shader_copy) << 40 |
                        uint64_t(Hash(shape, sizeof(shape), dw) & 0x3FFFFF) << 41 | uint64_t(s != 1.0f) << 63;
     auto& dst = resolved[variant];
@@ -5776,15 +5811,6 @@ struct Backend::Impl {
       dst.descriptor = AllocDescriptor();
       texture_set->setTexture(dst.descriptor, dst.texture.get(), RenderTextureLayout::SHADER_READ, dst.view.get());
     }
-    uint32_t x1 = 0, y1 = 0, x2 = std::min(dw, src->width), y2 = std::min(dh, src->height);
-    if (rc.has_rect) {
-      x1 = rc.source_rect[0], y1 = rc.source_rect[1];
-      x2 = std::min(rc.source_rect[2], src->width), y2 = std::min(rc.source_rect[3], src->height);
-    }
-    uint32_t px = rc.has_point ? rc.dest_point[0] : x1, py = rc.has_point ? rc.dest_point[1] : y1;
-    x2 = std::min(x2, x1 + (dw > px ? dw - px : 0));
-    y2 = std::min(y2, y1 + (dh > py ? dh - py : 0));
-    if (x2 <= x1 || y2 <= y1) return;
     if (rc.has_rect && rc.has_point) {
       if (!depth_resolve) {
         auto c = regs::Color(r, int(source));
@@ -5810,6 +5836,7 @@ struct Backend::Impl {
       Transition(list, scratch.texture.get(), RenderTextureLayout::SHADER_READ);
       src_descriptor = scratch.descriptor;
     }
+    ResolveReplay replay{true, false};
     bool in_pass = false;
     if (shader_copy && !depth_resolve && s == 1.0f &&
         FetchResolve(list, r, src, int(source), dst, dst_format, x1, y1, x2, y2, px, py)) {
@@ -5831,22 +5858,24 @@ struct Backend::Impl {
     } else if (shader_copy && !depth_resolve && REXCVAR_GET(gtav_native_skip_resolves) > 0 &&
                (x2 - x1) * (y2 - y1) >= uint32_t(REXCVAR_GET(gtav_native_skip_resolves))) {
       // timing experiment only: the destination keeps stale contents
+      replay.copied = false;
     } else if (shader_copy) {
       if (src_descriptor == src->descriptor)
         Transition(list, src->texture.get(),
                  depth_resolve ? RenderTextureLayout::DEPTH_READ : RenderTextureLayout::SHADER_READ);
       Transition(list, dst.texture.get(), RenderTextureLayout::COLOR_WRITE);
       // A copy over the whole destination need not load its old contents first.
-      const bool whole = px == 0 && py == 0 && x2 - x1 >= dw && y2 - y1 >= dh && rc.dest_face == 0 &&
-                         rc.dest_level == 0 && dst.discard_framebuffer && REXCVAR_GET(gtav_native_resolve_discard);
+      const bool whole = host.dest_x == 0 && host.dest_y == 0 && host.right - host.left == host_w &&
+                         host.bottom - host.top == host_h && rc.dest_face == 0 && rc.dest_level == 0 &&
+                         dst.discard_framebuffer && REXCVAR_GET(gtav_native_resolve_discard);
       list->setFramebuffer(whole ? dst.discard_framebuffer.get() : ResolveFramebuffer(dst, rc.dest_face, rc.dest_level));
       PassBegin("resolve copy");
       if (pass_times) PassStamp(list, fmt::format("resolve copy {}x{}", x2 - x1, y2 - y1));
       pass_end = "resolve copy";
       bound_fb = nullptr;
       // Host texels: source and destination share the scale, so the copy stays 1:1.
-      const int32_t sx1 = Sc(int32_t(x1), s), sy1 = Sc(int32_t(y1), s), sx2 = Sc(int32_t(x2), s),
-                    sy2 = Sc(int32_t(y2), s), spx = Sc(int32_t(px), s), spy = Sc(int32_t(py), s);
+      const int32_t sx1 = int32_t(host.left), sy1 = int32_t(host.top), sx2 = int32_t(host.right),
+                    sy2 = int32_t(host.bottom), spx = int32_t(host.dest_x), spy = int32_t(host.dest_y);
       list->setViewports(RenderViewport(float(spx), float(spy), float(sx2 - sx1), float(sy2 - sy1)));
       list->setScissors(RenderRect(spx, spy, spx + sx2 - sx1, spy + sy2 - sy1));
       list->setGraphicsPipelineLayout(layout.get());
@@ -5889,11 +5918,12 @@ struct Backend::Impl {
                               rc.dest_face, dw, dh, rc.has_rect, rc.source_rect[0],
                               rc.source_rect[1], rc.source_rect[2], rc.source_rect[3], rc.has_point, rc.dest_point[0],
                               rc.dest_point[1], x1, y1, x2, y2, px, py, src->width, src->height);
-      if (dump_small.size() < kSmallSlots) {
-        // Raw values of the centre (up to) 4x4 texels, for numeric comparison with the emulator.
+      if (rc.dest_level == 0 && rc.dest_face == 0 && dump_small.size() < kSmallSlots) {
+        // Raw values of the centre (up to) 4x4 host texels. Samples refer to the base subresource.
         if (!dump_small_readback)
           dump_small_readback = device->createBuffer(RenderBufferDesc::ReadbackBuffer(kSmallSlots * kSmallBytes));
-        uint32_t bw = std::min(dw, 4u), bh = std::min(dh, 4u), bx = (dw - bw) / 2, by = (dh - bh) / 2;
+        const uint32_t bw = std::min(host_w, 4u), bh = std::min(host_h, 4u);
+        const uint32_t bx = (host_w - bw) / 2, by = (host_h - bh) / 2;
         Transition(list, dst.texture.get(), RenderTextureLayout::COPY_SOURCE);
         RenderBox box{int32_t(bx), int32_t(by), int32_t(bx + bw), int32_t(by + bh), 0, 1};
         list->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(dump_small_readback.get(), dst_format, bw,
@@ -5903,9 +5933,10 @@ struct Backend::Impl {
         dump_small.push_back({uint32_t(dump_infos.size()), uint32_t(dst_format), bw, bh, bx, by});
         // ...and the same texels of the source target, before any conversion.
         // (destination texel -> source texel: minus the destination point, plus the source rect origin)
-        int32_t sx = int32_t(bx) - int32_t(px) + int32_t(x1), sy = int32_t(by) - int32_t(py) + int32_t(y1);
-        bool in_source = sx >= int32_t(x1) && sy >= int32_t(y1) && sx + int32_t(bw) <= int32_t(x2) &&
-                         sy + int32_t(bh) <= int32_t(y2);
+        const int32_t sx = int32_t(bx) - int32_t(host.dest_x) + int32_t(host.left);
+        const int32_t sy = int32_t(by) - int32_t(host.dest_y) + int32_t(host.top);
+        const bool in_source = sx >= int32_t(host.left) && sy >= int32_t(host.top) &&
+                               sx + int32_t(bw) <= int32_t(host.right) && sy + int32_t(bh) <= int32_t(host.bottom);
         if (!depth_resolve && !src->msaa && in_source && dump_small.size() < kSmallSlots) {
           Transition(list, src->texture.get(), RenderTextureLayout::COPY_SOURCE);
           RenderBox sbox{sx, sy, sx + int32_t(bw), sy + int32_t(bh), 0, 1};
@@ -5918,38 +5949,32 @@ struct Backend::Impl {
       }
       DumpResolve(list, dst, base, rc.flags, words);
     }
-    if (depth_resolve && src->stencil_descriptor) WriteDepthPack(list, src, base, words, dw, dh, x1, y1, x2, y2, px, py);
-    // D3DRESOLVE_CLEARRENDERTARGET: clear what was just resolved. Under predicated tiling the
-    // guest resolves one tile at a time, so this must stay inside the resolved rectangle.
-    if (depth_resolve) {
-      // D3DRESOLVE_CLEARDEPTHSTENCIL: clear the resolved rectangle of the depth target.
-      if (rc.flags & 0x200) {
-        BindTargets(list, nullptr, 0, src);
-        RenderRect rect = ScaleRect(RenderRect{int32_t(x1), int32_t(y1), int32_t(x2), int32_t(y2)}, s);
-        list->clearDepthStencil(true, true, rc.clear_z, 0, &rect, 1);
+    if (depth_resolve && src->stencil_descriptor && rc.dest_level == 0 && rc.dest_face == 0)
+      WriteDepthPack(list, src, base, words, dw, dh, host);
+    // The guest copies first (including the packed stencil view above). Clear the source region,
+    // never the destination point: for tiled resolves the adjacent regions must survive.
+    const RenderRect source_rect(int32_t(host.left), int32_t(host.top), int32_t(host.right), int32_t(host.bottom));
+    if (ops.clear_color)
+      ClearResolvedColor(list, src, source_rect,
+                         RenderColor(rc.clear_color[0], rc.clear_color[1], rc.clear_color[2], rc.clear_color[3]), in_pass);
+    if (ops.clear_depth && replay.copied) {
+      const bool experiment = !subresources && REXCVAR_GET(gtav_native_resolve_depth_clear);
+      if (auto clear = ReplayResolveDepthClear(rc.flags, rc.clear_z, regs::Read(r, regs::RB_SURFACE_INFO),
+                                               regs::Read(r, regs::RB_DEPTH_INFO), rc.probe, experiment)) {
+        const auto d = regs::Depth(r);
+        RenderTarget* depth = depth_resolve ? src : Target(d.base, d.float24, true, surface.pitch, surface.msaa, y2);
+        if (!bound_fb || bound_depth != depth) BindTargets(list, nullptr, 0, depth);
+        list->clearDepthStencil(true, true, clear->z, clear->stencil, &source_rect, 1);
+        replay.cleared_depth = true;
+        replay.applied_z = clear->z;
+        replay.applied_stencil = clear->stencil;
+        if (dumping)
+          dump_log += fmt::format("  after resolve: clear depth {:03X} rect {},{}-{},{} z={} stencil={}\n",
+                                   d.base, source_rect.left, source_rect.top, source_rect.right, source_rect.bottom,
+                                   clear->z, clear->stencil);
       }
-      return;
     }
-    if (rc.flags & 0x100) {
-      RenderRect rect = ScaleRect(RenderRect{int32_t(x1), int32_t(y1), int32_t(x2), int32_t(y2)}, s);
-      if (in_pass && bound_fb) {  // the source's pass is still open: clear there
-        for (uint32_t i = 0; i < 4; i++)
-          if (bound_color[i] == src) {
-            ClearAttachment(list, i, RenderColor(rc.clear_color[0], rc.clear_color[1], rc.clear_color[2], rc.clear_color[3]),
-                             &rect, 1);
-            return;
-          }
-      }
-      if (defer_clears && !dumping) {
-        pending_clears[src].push_back(
-            {rect, RenderColor(rc.clear_color[0], rc.clear_color[1], rc.clear_color[2], rc.clear_color[3])});
-        return;
-      }
-      RenderTarget* targets[4] = {src};
-      BindTargets(list, targets, 1, nullptr);
-      list->clearColor(0, RenderColor(rc.clear_color[0], rc.clear_color[1], rc.clear_color[2], rc.clear_color[3]),
-                       &rect, 1);
-    }
+    return replay;
   }
 };
 
@@ -5994,7 +6019,11 @@ FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
   s.prof.on = f.index % 8 == 0;
   int32_t dump_at = REXCVAR_GET(gtav_native_dump_frame);
   bool requested = s.dump_request.exchange(false);
-  if (requested) s.dump_frames_left = std::max(1, REXCVAR_GET(gtav_native_dump_frames));
+  const bool trace_only = REXCVAR_GET(gtav_native_trace_only);
+  if (requested) {
+    s.dump_frames_left = std::max(1, REXCVAR_GET(gtav_native_dump_frames));
+    if (trace_only) s.dump_frames_left = std::min(s.dump_frames_left, 8);
+  }
   if (s.dump_frames_left > 0) {
     requested = true;
     s.dump_frames_left--;
@@ -6002,9 +6031,14 @@ FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
   s.far_snapshot_done = false;
   s.per_draw_budget = std::max(0, REXCVAR_GET(gtav_native_dump_rt_count));
   s.rt_draws_seen = 0;
-  s.dumping = requested || (dump_at > 0 && f.index >= uint64_t(dump_at) && s.dump_frame == 0);
-  if (s.dumping) {
+  const bool capture = requested || (dump_at > 0 && f.index >= uint64_t(dump_at) && s.dump_frame == 0);
+  std::optional<FrameTrace> trace;
+  if (capture) {
     s.dump_frame = f.index;
+    if (trace_only) trace.emplace(f, s.rs, REXCVAR_GET(gtav_native_resolve_depth_clear));
+  }
+  s.dumping = capture && !trace_only;
+  if (s.dumping) {
     s.dump_infos.clear();
     s.dump_log.clear();
     s.dump_draws.clear();
@@ -6028,26 +6062,41 @@ FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
   };
   for (const auto& c : f.commands) {
     switch (c.kind) {
-      case CommandKind::kDraw:
-        s.Draw(list, f, f.draws[c.index]);
+      case CommandKind::kDraw: {
+        const auto& draw = f.draws[c.index];
+        const uint32_t drawn = s.stat_draws;
+        s.Draw(list, f, draw);
         s.pass_draws++;
         DrawsRecorded(c.index + 1);
+        if (trace) trace->Draw(draw, s.stat_draws != drawn);
         if (s.seqdiag) {
           if (!s.seq_passes.empty()) flush_draws(), seq += s.seq_passes, s.seq_passes.clear();
           seq_draws++;
         }
         break;
+      }
       case CommandKind::kClear:
         s.Clear(list, f, f.clears[c.index]);
+        if (trace) trace->Clear(f.clears[c.index]);
         if (s.seqdiag) flush_draws(), seq += "  clear\n";
         break;
-      case CommandKind::kResolve:
+      case CommandKind::kResolve: {
+        const auto& resolve = f.resolves[c.index];
         s.seq_note.clear();
-        s.Resolve(list, f, f.resolves[c.index]);
+        const auto replay = s.Resolve(list, f, resolve);
+        if (trace) trace->Resolve(resolve, replay);
         if (s.seqdiag) flush_draws(), seq += s.seq_passes + "  " + s.seq_note + "\n", s.seq_passes.clear();
         break;
-      case CommandKind::kQuery: s.Query(list, f.queries[c.index]); break;
+      }
+      case CommandKind::kQuery:
+        s.Query(list, f.queries[c.index]);
+        if (trace) trace->Query(f.queries[c.index]);
+        break;
     }
+  }
+  if (trace) {
+    if (trace->Write()) REXLOG_INFO("[native] trace: logs/native_trace/frame_{}.txt", f.index);
+    else REXLOG_WARN("[native] could not write logs/native_trace/frame_{}.txt", f.index);
   }
   if (s.seqdiag) {
     flush_draws();

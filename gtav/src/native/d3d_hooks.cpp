@@ -192,9 +192,11 @@ REX_HOOK_RAW(sub_8380BCD8) {
 // clear Z (f1), clear stencil, parameters)
 REX_EXTERN(__imp__sub_838045E0);
 REX_HOOK_RAW(sub_838045E0) {
-  OnResolve(ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r10.u32, float(ctx.f1.f64), ctx.r8.u32,
-            ctx.r9.u32);
+  const uint32_t device = ctx.r3.u32;
+  auto capture = OnResolve(device, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r10.u32,
+                           float(ctx.f1.f64), ctx.r8.u32, ctx.r9.u32);
   __imp__sub_838045E0(ctx, base);
+  if (capture.index != UINT32_MAX) OnResolveEnd(device, capture);
 }
 
 // D3DDevice_Swap(dev, ...)
