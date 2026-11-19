@@ -4,6 +4,7 @@
 #include "debug_tools.h"
 
 #include "frame_pacing.h"
+#include "sandbox/desktop.h"
 
 #include <imgui.h>
 #include <rex/hook.h>
@@ -78,6 +79,13 @@ enum Native : uint32_t {
   kNetworkSession = 0x82CDBB28, kPlayerControl = 0x82CE9818, kPlayer = 0x82CE9A20,
   kPlayerPed = 0x82CE9CA8, kSwitching = 0x82CF1220, kInVehicle = 0x82D0BF30,
   kGive = 0x82D575F0,
+#ifdef GTAV_DESKTOP_WORKSHOP
+  kAddBlip = 0x82C81950, kBlipCoords = 0x82C81A10, kBlipColor = 0x82C81CC8,
+  kRemoveBlip = 0x82C82248, kBlipExists = 0x82C824D8,
+  kRequestModel = 0x82CF0CC0, kModelLoaded = 0x82CF0A90, kReleaseModel = 0x82CF0AE0,
+  kIsVehicleModel = 0x82CF0C48, kModelOnDisc = 0x82CF0B50,
+  kCreateVehicle = 0x82D5CBC8, kDeleteVehicle = 0x82D4E058, kGroundVehicle = 0x82D4E168,
+#endif
 };
 
 struct Vec {
@@ -97,10 +105,11 @@ class NativeCall {
 
   bool SafeStack() const { return sp_ > 0x800 && Readable(memory_, sp_ - 0x800, 0x800, true); }
 
-  bool Invoke(Native native, std::initializer_list<uint32_t> args = {}, PPCFunc* original = nullptr) {
+  bool Invoke(Native native, std::initializer_list<uint32_t> args = {}, PPCFunc* original = nullptr,
+              std::optional<uint32_t> reference = std::nullopt) {
     if (!ok_) return false;
     auto* fn = original ? original : dispatcher_.GetFunction(native);
-    if (!fn || args.size() > 16) { ok_ = false; return false; }
+    if (!fn || args.size() > 16 || (reference && args.size())) { ok_ = false; return false; }
     const uint32_t call = sp_ - 0x100;
     result_ = call + 0x10;
     const uint32_t arguments = call + 0x30;
@@ -111,6 +120,13 @@ class NativeCall {
     for (uint32_t i = 0; i < 4; ++i) Store(result_ + i * 4, kUnset);
     uint32_t offset = arguments;
     for (const auto value : args) { Store(offset, value); offset += 4; }
+    if (reference) {
+      // Pointer natives such as REMOVE_BLIP and DELETE_VEHICLE may zero the caller's handle.
+      // Give them a writable guest word in scratch, never a host pointer or real VM slot.
+      Store(call + 0x20, *reference);
+      Store(arguments, call + 0x20);
+      Store(call + 4, 1);
+    }
     PPCContext side = context_;
     side.r1.u32 -= 0x200;  // linkage/argument-save area below the native-call scratch
     side.r3.u64 = call;
@@ -173,6 +189,16 @@ Vec Horizontal(float yaw, float forward, float right, float up) {
   return {-s * forward + c * right, c * forward + s * right, up};
 }
 
+uint32_t PlayablePed(NativeCall& call) {
+  if (gtav::InFailureEffect() || call.Flag(kNetworkGame) || call.Flag(kNetworkSession) ||
+      call.Flag(kMission) || call.Flag(kCutscene) || call.Flag(kPaused) ||
+      call.Flag(kSwitching) || !call.Flag(kFadedIn) || !call.Okay()) return 0;
+  const auto player = call.Read(kPlayer);
+  if (!call.Okay() || player >= 32 || !call.Flag(kPlayerControl, {player})) return 0;
+  const auto ped = call.Read(kPlayerPed);
+  return ped && call.Flag(kExists, {ped}) && !call.Flag(kDead, {ped, 0}) && call.Okay() ? ped : 0;
+}
+
 // Only touched by the one guest script thread which passed the runtime ABI check.
 struct Cheats {
   uint64_t epoch = 0;
@@ -208,21 +234,8 @@ struct Cheats {
 
     // Do not invoke actions from boot, a mission/cutscene, pause/load, or a network session.
     // Do not reapply a toggle when the world becomes playable again.
-    if (InFailureEffect() || call.Flag(kNetworkGame) || call.Flag(kNetworkSession) ||
-        call.Flag(kMission) || call.Flag(kCutscene) || call.Flag(kPaused) ||
-        call.Flag(kSwitching) || !call.Flag(kFadedIn) || !call.Okay()) {
-      Stop(call);
-      status = Status::Blocked;
-      return;
-    }
-    const auto player = call.Read(kPlayer);
-    if (!call.Okay() || player >= 32 || !call.Flag(kPlayerControl, {player})) {
-      Stop(call);
-      status = Status::Blocked;
-      return;
-    }
-    const auto ped = call.Read(kPlayerPed);
-    if (!ped || !call.Flag(kExists, {ped}) || call.Flag(kDead, {ped, 0}) || !call.Okay()) {
+    const auto ped = PlayablePed(call);
+    if (!ped) {
       Stop(call);
       status = Status::Blocked;
       return;
@@ -309,10 +322,142 @@ struct Cheats {
   }
 };
 
+#ifdef GTAV_DESKTOP_WORKSHOP
+struct WorkshopWorld {
+  struct Marker { uint64_t key; uint32_t handle; sandbox::Point point; };
+  std::vector<Marker> markers;
+  uint32_t requested_model = 0, car = 0, requesting_ped = 0;
+  int64_t model_by = 0;
+
+  static float Meters(int32_t cm) { return cm / 100.f; }
+
+  void Markers(NativeCall& call, const sandbox::World& world, bool visible) {
+    // Protocol IDs are only keys for *our* blip handles. They never become guest pointers,
+    // entity IDs, executable names, file paths, or native hashes.
+    struct Target { uint64_t key; sandbox::Point point; uint32_t color; };
+    std::vector<Target> want;
+    if (visible) {
+      for (const auto& p : world.players) {
+        if (p.id != world.self && p.pose) want.push_back({p.id, *p.pose, 3});
+        if (p.id == world.self && p.racing && !p.finish_ms && p.passed < world.course.points.size()) {
+          want.push_back({0x100000000ull, world.course.points[p.passed], 5});
+        }
+      }
+      if (world.race == sandbox::Race::Editing) {
+        for (size_t i = 0; i < world.course.points.size(); ++i)
+          want.push_back({0x200000000ull + i, world.course.points[i], 5});
+      }
+    }
+    for (auto it = markers.begin(); it != markers.end();) {
+      if (std::any_of(want.begin(), want.end(), [&](const Target& t) { return t.key == it->key; })) {
+        ++it;
+        continue;
+      }
+      if (call.Flag(kBlipExists, {it->handle})) call.Invoke(kRemoveBlip, {}, nullptr, it->handle);
+      if (!call.Okay()) return;
+      it = markers.erase(it);
+    }
+    for (const auto& t : want) {
+      const float x = Meters(t.point.x), y = Meters(t.point.y), z = Meters(t.point.z);
+      auto it = std::find_if(markers.begin(), markers.end(), [&](const Marker& m) { return m.key == t.key; });
+      if (it != markers.end() && !call.Flag(kBlipExists, {it->handle})) {
+        if (!call.Okay()) return;
+        markers.erase(it);
+        it = markers.end();
+      }
+      if (it == markers.end()) {
+        const auto handle = call.Read(kAddBlip, {F(x), F(y), F(z)});
+        if (!call.Okay()) return;
+        if (!handle || handle == UINT32_MAX) continue;
+        markers.push_back({t.key, handle, t.point});
+        call.Invoke(kBlipColor, {handle, t.color});
+      } else if (t.point != it->point && call.Invoke(kBlipCoords, {it->handle, F(x), F(y), F(z)})) {
+        it->point = t.point;
+      }
+      if (!call.Okay()) return;
+    }
+  }
+
+  void Release(NativeCall& call) {
+    if (requested_model) {
+      auto cleanup = call.CleanupCall();
+      cleanup.Invoke(kReleaseModel, {requested_model});
+      requested_model = 0;
+    }
+  }
+
+  void Vehicles(NativeCall& call, uint32_t ped, const Vec& position, int64_t now) {
+    const auto request = sandbox::TakeVehicleRequest();
+    if (!requested_model && !request) return;
+    if (!ped || call.Flag(kInVehicle, {ped, 0}) || !call.Okay() || (requested_model && ped != requesting_ped)) {
+      Release(call);
+      sandbox::ReportVehicle("Load free roam and stand on foot before spawning a car.");
+      return;
+    }
+    if (request && request->deadline >= now) {
+      if (const auto* model = sandbox::VehicleModel(request->preset)) {
+        Release(call);
+        const auto hash = HashName(model);
+        if (call.Flag(kModelOnDisc, {hash}) && call.Flag(kIsVehicleModel, {hash}) &&
+            call.Invoke(kRequestModel, {hash})) {
+          requested_model = hash;
+          requesting_ped = ped;
+          model_by = now + 5'000;
+          sandbox::ReportVehicle("Streaming test vehicle...");
+        } else sandbox::ReportVehicle("That vehicle model is unavailable in the loaded game.");
+      }
+    }
+    if (!requested_model) return;
+    if (now >= model_by || !call.Okay()) {
+      Release(call);
+      sandbox::ReportVehicle("Vehicle streaming timed out.");
+      return;
+    }
+    if (!call.Flag(kModelLoaded, {requested_model})) return;
+    const float heading = call.Float(kHeading, {ped});
+    if (!std::isfinite(heading) || !call.Okay()) { Release(call); return; }
+    const auto offset = Horizontal(heading, 6.f, 0.f, 1.f);
+    const Vec target{position.x + offset.x, position.y + offset.y, position.z + offset.z};
+    if (!target.Valid(20'000.f)) { Release(call); return; }
+    if (car && call.Flag(kExists, {car})) {
+      call.Invoke(kDeleteVehicle, {}, nullptr, car);
+      if (!call.Okay() || call.Flag(kExists, {car})) {
+        Release(call);
+        sandbox::ReportVehicle("Couldn't remove the previous test vehicle.");
+        return;
+      }
+    }
+    car = call.Read(kCreateVehicle, {requested_model, F(target.x), F(target.y), F(target.z), F(heading), 0, 0});
+    Release(call);
+    if (car && car != UINT32_MAX && call.Flag(kExists, {car}) && call.Okay()) {
+      call.Invoke(kGroundVehicle, {car});
+      sandbox::ReportVehicle("Local test vehicle spawned nearby.");
+    } else {
+      car = 0;
+      sandbox::ReportVehicle("The game did not create the requested vehicle.");
+    }
+  }
+
+  void Tick(NativeCall& call, int64_t now) {
+    const auto ped = PlayablePed(call);
+    const Vec coords = ped ? call.Vector(kCoords, {ped, 1}) : Vec{};
+    const auto point = ped && call.Okay() ? sandbox::Point::FromMeters(coords.x, coords.y, coords.z) : std::nullopt;
+    sandbox::Party().Publish(point);
+    sandbox::ReportGuest((!call.Okay() || (ped && !point)) ? sandbox::Guest::Unavailable :
+                          point ? sandbox::Guest::Ready : sandbox::Guest::Busy);
+    // Cleanup uses a fresh call state, so a rejected getter doesn't leave a stale peer blip.
+    auto map_call = call.CleanupCall();
+    Markers(map_call, sandbox::Party().View().world, point.has_value());
+    auto vehicle_call = call.CleanupCall();
+    Vehicles(vehicle_call, point ? ped : 0, coords, now);
+  }
+};
+#endif
+
 void GuestTick(PPCContext& ctx, uint8_t* base, rex::runtime::ThreadState& thread,
                uint32_t timer, PPCFunc* original, int64_t now) {
   // Do not run synthetic natives just to view logs. Serialize the tick (including recursive
-  // timer calls) and only bind to a VM thread while a tool is armed or needs cleanup.
+  // timer calls) and bind to a VM thread only for an armed tool or a selected Workshop mode.
   static std::atomic_flag busy;
   if (busy.test_and_set(std::memory_order_acquire)) return;
   struct ReleaseTick {
@@ -324,12 +469,22 @@ void GuestTick(PPCContext& ctx, uint8_t* base, rex::runtime::ThreadState& thread
   static bool verified = false, failed = false;
   last_script_ms = now;
   last_game_timer = timer;
-  if (!controls.Armed() && !cheats.Active()) {
+#ifdef GTAV_DESKTOP_WORKSHOP
+  static WorkshopWorld workshop;
+  static int64_t next_workshop = 0;
+  const bool workshop_active = sandbox::Active();
+  const bool workshop_tick = workshop_active && now >= next_workshop;
+  const bool allow_cheats = sandbox::CurrentMode() != sandbox::Mode::Multiplayer;
+#else
+  constexpr bool workshop_active = false, workshop_tick = false, allow_cheats = true;
+#endif
+  const bool cheat_tick = ((allow_cheats && controls.Armed()) || cheats.Active()) && now - cheats.last_tick >= 16;
+  if (!workshop_active && !controls.Armed() && !cheats.Active()) {
     script_thread = 0;
     if (!failed) status = Status::Ready;
     return;
   }
-  if (failed || now - cheats.last_tick < 16) return;
+  if (failed || (!cheat_tick && !workshop_tick)) return;
   const auto id = thread.thread_id();
   if (!id || (script_thread && script_thread != id)) return;
   auto* kernel = rex::system::kernel_state();
@@ -338,6 +493,9 @@ void GuestTick(PPCContext& ctx, uint8_t* base, rex::runtime::ThreadState& thread
   if (!call.SafeStack()) {
     controls.Reset();
     status = Status::Unavailable;
+#ifdef GTAV_DESKTOP_WORKSHOP
+    if (workshop_active) sandbox::ReportGuest(sandbox::Guest::Unavailable);
+#endif
     return;
   }
   if (!verified) {
@@ -347,6 +505,9 @@ void GuestTick(PPCContext& ctx, uint8_t* base, rex::runtime::ThreadState& thread
       controls.Reset();
       status = Status::Unavailable;
       failed = true;
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (workshop_active) sandbox::ReportGuest(sandbox::Guest::Unavailable);
+#endif
       REXLOG_WARN("[debug] TU27 script native ABI check failed; cheats disabled");
       return;
     }
@@ -354,10 +515,21 @@ void GuestTick(PPCContext& ctx, uint8_t* base, rex::runtime::ThreadState& thread
     verified = true;
   }
   script_thread = id;
-  const auto in = controls.Consume(now);
-  if (in.action) REXLOG_INFO("[debug] story action {} requested", static_cast<unsigned>(*in.action));
-  cheats.Tick(call, in, now);
-  mode_running = cheats.Active();
+  if (cheat_tick) {
+    const auto in = controls.Consume(now);
+    if (allow_cheats) {
+      if (in.action) REXLOG_INFO("[debug] story action {} requested", static_cast<unsigned>(*in.action));
+      cheats.Tick(call, in, now);
+    } else cheats.Stop(call);
+    mode_running = cheats.Active();
+  }
+#ifdef GTAV_DESKTOP_WORKSHOP
+  if (workshop_tick) {
+    next_workshop = now + 100;
+    auto workshop_call = call.CleanupCall();
+    workshop.Tick(workshop_call, now);
+  }
+#endif
 }
 #endif
 
@@ -445,7 +617,13 @@ void DrawPanel(unsigned fps, double frame_ms, float scale) {
     const auto state = status.load();
     ImGui::TextDisabled("%s", alive || state == Status::Unavailable ? StatusText(state) : StatusText(Status::Waiting));
     bool armed = controls.Armed();
-    ImGui::BeginDisabled(!alive || state == Status::Unavailable);
+#ifdef GTAV_DESKTOP_WORKSHOP
+    const bool multiplayer = sandbox::CurrentMode() == sandbox::Mode::Multiplayer;
+    if (multiplayer) ImGui::TextDisabled("Story cheats are disabled in multiplayer. Use F6 for the Workshop.");
+#else
+    constexpr bool multiplayer = false;
+#endif
+    ImGui::BeginDisabled(multiplayer || !alive || state == Status::Unavailable);
     if (ImGui::Checkbox("Enable story-mode actions for this panel", &armed)) controls.Arm(armed);
     ImGui::BeginDisabled(!armed || state == Status::Blocked);
     if (ImGui::Button("Give pistol + ammo")) controls.Queue(Action::Give, now);
@@ -502,7 +680,11 @@ REX_EXTERN(__imp__sub_82C87678);
 REX_HOOK_RAW(sub_82C87678) {  // GET_GAME_TIMER(), in the real game's VM
   using namespace gtav::debug;
   // The original wrapper may clobber r3. Read its actual result slot before dispatch.
-  const bool panel_or_mode = controls.Open() || mode_running.load(std::memory_order_relaxed);
+  const bool panel_or_mode = controls.Open() || mode_running.load(std::memory_order_relaxed)
+#ifdef GTAV_DESKTOP_WORKSHOP
+      || gtav::sandbox::Active()
+#endif
+      ;
   const bool interested = panel_or_mode || gtav::InFailureEffect();
   auto* thread = interested ? rex::runtime::ThreadState::Get() : nullptr;
   auto result = thread ? ScriptSlot(ctx, *thread->memory(), 0, true) : std::nullopt;

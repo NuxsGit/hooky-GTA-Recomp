@@ -38,6 +38,17 @@ First run
 Later runs open the Overview dashboard, with Play, updates, setup and an activity log.
 Use --play in a shortcut if you prefer to start the game directly.
 
+Desktop Workshop (experimental)
+--------------------------------
+Play opens a mode selector before the game starts: Sandbox solo (default), Private multiplayer,
+or Campaign. Sandbox uses a separate profile: data\user\sandbox\profile. On the first sandbox
+run, complete the original game’s first-run screens and prologue before using free-roam tools.
+Press F6 in free roam for local test vehicles and a checkpoint race builder. In Private multiplayer,
+Host here opens a TCP listener (default 30127); friends join with your reachable IPv4, port and code.
+Use a trusted LAN/VPN. No encryption, automatic port forwarding, official GTA Online, synced
+characters or vehicles. This is not a terrain editor. Details: docs/SANDBOX.md in the source.
+Skip the selector for story mode with: gtav_launcher.exe --play -- --gtav_mode=campaign
+
 Recompile and update
 --------------------
 Choose Recompile (or run the launcher with --rebuild) to check the existing game data and build

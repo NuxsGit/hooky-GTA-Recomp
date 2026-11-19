@@ -2460,6 +2460,10 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
 #endif
                L"--gtav_native=on", L"--gtav_fps_limit=30", L"--gpu_skip_rendering=true",
                L"--gpu_skip_rendering_lag_ms=4", L"--vsync=false", L"--gtav_native_vsync=false"};
+  // SDK value options cannot be repeated. Supply the mode chooser only when not overridden.
+  if (std::none_of(extra.begin(), extra.end(), [](const auto& opt) {
+        return opt == L"--gtav_mode" || opt.starts_with(L"--gtav_mode=");
+      })) args.push_back(L"--gtav_mode=menu");
   args.insert(args.end(), extra.begin(), extra.end());
 #ifdef __APPLE__
   // The launcher app quits; the game runs on in its own session, its output in data/logs.

@@ -76,7 +76,13 @@ def create_fixture(root, inputs):
         put(game_tools / f, b"fixture build input\n")
     put(root / "librexruntime.so", b"")
     put(root / "librexgpu-xenos.so", b"")
-    executable(root / "gtav_fast", "import sys\nassert '--fixture-game-arg' in sys.argv\nprint('fake game started')\n")
+    executable(root / "gtav_fast", """import sys
+assert '--fixture-game-arg' in sys.argv
+modes = [arg for arg in sys.argv if arg.startswith('--gtav_mode=')]
+assert len(modes) == 1, sys.argv
+assert '--headless=true' in sys.argv
+print('fake game started:', modes[0])
+""")
     executable(root / "rexglue", """import json, os
 from pathlib import Path
 root = Path(__file__).resolve().parent
@@ -279,7 +285,8 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
         change_build_input(lld.relative_to(root), lld.read_bytes() + b"\n# new linker fixture\n")
         run("--rebuild", contains="5 reused, 0 to compile")
         invokes("link")
-        run("--", "--fixture-game-arg", contains="fake game started")
+        run("--", "--fixture-game-arg", contains="fake game started: --gtav_mode=menu")
+        run("--", "--fixture-game-arg", "--gtav_mode=campaign", contains="fake game started: --gtav_mode=campaign")
 
         # A changed non-code asset is checked without disc re-import; matching receipt entries
         # for large, untouched assets don't need a full rehash.

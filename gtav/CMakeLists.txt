@@ -106,6 +106,17 @@ else()
     endif()
 endif()
 
+if(NOT ANDROID AND NOT GTAV_IOS)
+    find_package(Threads REQUIRED)
+    target_link_libraries(gtav PRIVATE Threads::Threads)
+    target_compile_definitions(gtav PRIVATE GTAV_DESKTOP_WORKSHOP=1)
+    target_sources(gtav PRIVATE src/sandbox/desktop.cpp src/sandbox/world.cpp
+        src/sandbox/protocol.cpp src/sandbox/session.cpp src/sandbox/courses.cpp src/sandbox/paths.cpp)
+    if(WIN32)
+        target_link_libraries(gtav PRIVATE ws2_32 bcrypt)
+    endif()
+endif()
+
 if(GTAV_GAME_DLL)
     target_sources(gtav PRIVATE src/game_bridge.cpp)
     target_compile_definitions(gtav PRIVATE GTAV_GAME_DLL=1)

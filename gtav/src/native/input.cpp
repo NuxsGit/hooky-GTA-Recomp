@@ -273,6 +273,9 @@ float MenuPixelDensity(SDL_WindowID id) {
 }
 
 void Keyboard(SDL_Scancode scan, bool down, bool repeat) {
+#ifdef GTAV_DESKTOP_WORKSHOP
+  if (scan == SDL_SCANCODE_F6 && down && !repeat && menu::ToggleWorkshop()) return;
+#endif
   if (scan == SDL_SCANCODE_F1 || scan == SDL_SCANCODE_AC_BACK || (kDesktop && scan == SDL_SCANCODE_F2)) {
     if (down && !repeat) {
       if (scan == SDL_SCANCODE_F2) menu::ToggleDebug();
@@ -281,6 +284,25 @@ void Keyboard(SDL_Scancode scan, bool down, bool repeat) {
     return;
   }
   if (menu::IsOpen()) {
+#ifdef GTAV_DESKTOP_WORKSHOP
+    if (menu::WorkshopOpen()) {
+      using K = menu::Key;
+      switch (scan) {
+        case SDL_SCANCODE_BACKSPACE: menu::OnKey(K::kBackspace, down); break;
+        case SDL_SCANCODE_DELETE: menu::OnKey(K::kDelete, down); break;
+        case SDL_SCANCODE_HOME: menu::OnKey(K::kHome, down); break;
+        case SDL_SCANCODE_END: menu::OnKey(K::kEnd, down); break;
+        case SDL_SCANCODE_LCTRL: case SDL_SCANCODE_RCTRL: menu::OnKey(K::kCtrl, down); break;
+        case SDL_SCANCODE_LSHIFT: case SDL_SCANCODE_RSHIFT: menu::OnKey(K::kShift, down); break;
+        case SDL_SCANCODE_LGUI: case SDL_SCANCODE_RGUI: menu::OnKey(K::kSuper, down); break;
+        case SDL_SCANCODE_A: menu::OnKey(K::kA, down); break;
+        case SDL_SCANCODE_C: menu::OnKey(K::kC, down); break;
+        case SDL_SCANCODE_V: menu::OnKey(K::kV, down); break;
+        case SDL_SCANCODE_X: menu::OnKey(K::kX, down); break;
+        default: break;
+      }
+    }
+#endif
     if (kDesktop && !repeat) DebugKey(rex::ui::TranslateSDLScancode(scan), down);
     switch (scan) {
       case SDL_SCANCODE_ESCAPE: if (down && !repeat) menu::Close(); break;
@@ -319,6 +341,12 @@ bool SDLCALL WindowEvent(void*, SDL_Event* event) {
           (!kDesktop && event->key.windowID == 0 && event->key.scancode == SDL_SCANCODE_AC_BACK))
         Keyboard(event->key.scancode, event->key.down, event->key.repeat);
       break;
+#ifdef GTAV_DESKTOP_WORKSHOP
+    case SDL_EVENT_TEXT_INPUT:
+      if (event->text.windowID == id && event->text.text && menu::WorkshopOpen())
+        for (const auto* c = event->text.text; *c; ++c) menu::OnText(uint8_t(*c));
+      break;
+#endif
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP: {
       if (event->button.windowID != id) break;
@@ -556,11 +584,24 @@ void AttachWindow(SDL_Window* window) {
 void UpdateMouseCapture() {
   if (!kDesktop || !window_id) return;
   const bool wanted = sdl_focused && WantsMouse();
-  if (capture_requested.exchange(wanted) == wanted || capture_queued.exchange(true)) return;
+  const bool capture_changed = capture_requested.exchange(wanted) != wanted;
+#ifdef GTAV_DESKTOP_WORKSHOP
+  static std::atomic<bool> text_requested{false};
+  const bool text_wanted = sdl_focused && menu::WorkshopOpen();
+  const bool text_changed = text_requested.exchange(text_wanted) != text_wanted;
+#else
+  constexpr bool text_changed = false;
+#endif
+  if ((!capture_changed && !text_changed) || capture_queued.exchange(true)) return;
   // Outside the SDL event watch: changing relative mode can flush and produce events itself.
   if (!SDL_RunOnMainThread([](void*) {
         capture_queued = false;
         if (auto* window = SDL_GetWindowFromID(window_id.load())) {
+#ifdef GTAV_DESKTOP_WORKSHOP
+          const bool text = menu::WorkshopOpen() && SDL_GetKeyboardFocus() == window;
+          if (text && !SDL_TextInputActive(window)) SDL_StartTextInput(window);
+          else if (!text && SDL_TextInputActive(window)) SDL_StopTextInput(window);
+#endif
           const bool capture = capture_requested && WantsMouse() && SDL_GetKeyboardFocus() == window;
           if (SDL_GetWindowRelativeMouseMode(window) != capture) {
             if (!SDL_SetWindowRelativeMouseMode(window, capture))

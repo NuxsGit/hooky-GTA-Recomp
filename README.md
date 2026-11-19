@@ -29,6 +29,7 @@ not include this fork's changes.
 - [What you need](#what-you-need)
 - [Windows](#windows) · [Linux](#linux) · [macOS](#macos)
 - [Recompiling and updating](#recompiling-and-updating)
+- [Desktop Workshop](#desktop-workshop-experimental)
 - [iPhone](#iphone) · [Android](#android)
 - [Performance](#performance)
 - [Troubleshooting](#troubleshooting)
@@ -142,6 +143,14 @@ objects. First migration from a launcher that discarded its cache may need one f
 delete `data/build/` to reclaim its space (at the cost of a full build next time), or remove
 `data/verified-assets.txt` before rebuilding to force a full asset check. Never distribute either cache
 or your local game library. Use **Install & build** with your originals if data is missing or damaged.
+
+## Desktop Workshop (experimental)
+
+**Play** opens a game-startup choice: **Sandbox solo** (default), **Private multiplayer**, or
+**Campaign**. The two sandbox modes have a separate local profile. Press **F6** in free roam to
+build and save checkpoint races on the GTA map, test a local vehicle, or host/join a private room
+by IPv4, TCP port and invite code. It is not GTA Online or full world synchronization.
+See [Workshop setup, limitations, and testing](docs/SANDBOX.md).
 
 ## Controls
 

@@ -261,9 +261,35 @@ class Renderer {
       case WM_LBUTTONDOWN: case WM_LBUTTONUP: menu::OnMouseButton(0, msg == WM_LBUTTONDOWN); break;
       case WM_RBUTTONDOWN: case WM_RBUTTONUP: menu::OnMouseButton(1, msg == WM_RBUTTONDOWN); break;
       case WM_MOUSEWHEEL: menu::OnMouseWheel(float(GET_WHEEL_DELTA_WPARAM(wp)) / WHEEL_DELTA); break;
+#ifdef GTAV_DESKTOP_WORKSHOP
+      case WM_CHAR:
+        if (menu::WorkshopOpen()) { menu::OnText(uint32_t(wp)); return 0; }
+        break;
+#endif
       case WM_KEYDOWN:
       case WM_KEYUP: {
         bool down = msg == WM_KEYDOWN;
+#ifdef GTAV_DESKTOP_WORKSHOP
+        if (wp == VK_F6 && down && !(lp & (1L << 30)) && menu::ToggleWorkshop()) {
+          input::UpdateMouseCapture(hwnd);
+          return 0;
+        }
+        if (menu::WorkshopOpen()) {
+          using K = menu::Key;
+          switch (wp) {
+            case VK_BACK: menu::OnKey(K::kBackspace, down); break;
+            case VK_DELETE: menu::OnKey(K::kDelete, down); break;
+            case VK_HOME: menu::OnKey(K::kHome, down); break;
+            case VK_END: menu::OnKey(K::kEnd, down); break;
+            case VK_CONTROL: menu::OnKey(K::kCtrl, down); break;
+            case VK_SHIFT: menu::OnKey(K::kShift, down); break;
+            case 'A': menu::OnKey(K::kA, down); break;
+            case 'C': menu::OnKey(K::kC, down); break;
+            case 'V': menu::OnKey(K::kV, down); break;
+            case 'X': menu::OnKey(K::kX, down); break;
+          }
+        }
+#endif
         if (wp == VK_F1 || wp == VK_F2 || (wp == VK_ESCAPE && menu::IsOpen())) {
           if (down && !(lp & (1L << 30))) {
             if (wp == VK_F1) menu::Toggle();

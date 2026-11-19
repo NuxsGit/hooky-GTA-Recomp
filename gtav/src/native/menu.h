@@ -13,12 +13,21 @@ namespace gtav::native::menu {
 // Window thread. Coordinates are window pixels; buttons 0 left, 1 right, 2 middle.
 void Toggle();  // Settings (F1 / controller)
 void ToggleDebug();  // F2 (Fn + F2 on media-key keyboards)
+#ifdef GTAV_DESKTOP_WORKSHOP
+void OpenWorkshop();  // startup, before the native window appears
+bool ToggleWorkshop();  // F6, sandbox modes only
+bool WorkshopOpen();
+void OnText(uint32_t ascii);
+#endif
 void Close();
 bool IsOpen();
 void OnMouseMove(float x, float y);
 void OnMouseButton(int button, bool down);
 void OnMouseWheel(float dy);
-enum class Key { kUp, kDown, kLeft, kRight, kEnter, kSpace, kTab };
+enum class Key {
+  kUp, kDown, kLeft, kRight, kEnter, kSpace, kTab,
+  kBackspace, kDelete, kHome, kEnd, kCtrl, kShift, kSuper, kA, kC, kV, kX
+};
 void OnKey(Key key, bool down);
 
 // Applies gtav_settings.ini (next to the exe) over the command line. Once, before the first frame.

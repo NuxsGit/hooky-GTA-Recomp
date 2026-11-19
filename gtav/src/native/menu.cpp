@@ -1,6 +1,11 @@
 #include "menu.h"
 
 #include "../debug_tools.h"
+#include "../sandbox/desktop.h"
+
+#ifdef GTAV_DESKTOP_WORKSHOP
+#include <SDL3/SDL.h>
+#endif
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -27,7 +32,7 @@ namespace gtav::native::menu {
 namespace {
 
 struct Input {
-  enum Type { kMove, kButton, kWheel, kKey } type;
+  enum Type { kMove, kButton, kWheel, kKey, kText } type;
   float x = 0, y = 0;
   int code = 0;
   bool down = false;
@@ -112,6 +117,30 @@ void EnsureContext(uint32_t h) {
   io.IniFilename = nullptr;
   io.LogFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+#ifdef GTAV_DESKTOP_WORKSHOP
+  auto& platform = ImGui::GetPlatformIO();
+#ifndef _WIN32
+  platform.Platform_GetClipboardTextFn = [](ImGuiContext*) -> const char* {
+    static std::string clipboard;
+    clipboard.clear();
+    SDL_RunOnMainThread([](void* opaque) {
+      char* text = SDL_GetClipboardText();
+      if (!text) return;
+      auto& output = *static_cast<std::string*>(opaque);
+      output.assign(text, std::min(std::char_traits<char>::length(text), size_t{256}));
+      SDL_free(text);
+    }, &clipboard, true);
+    return clipboard.c_str();
+  };
+#endif
+  platform.Platform_SetClipboardTextFn = [](ImGuiContext*, const char* text) {
+    char* copy = SDL_strdup(text);
+    if (copy && !SDL_RunOnMainThread([](void* opaque) {
+          SDL_SetClipboardText(static_cast<const char*>(opaque));
+          SDL_free(opaque);
+        }, copy, false)) SDL_free(copy);
+  };
+#endif
   g_scale = std::max(1.0f, float(h) / 720.0f);
 #if defined(__APPLE__) && TARGET_OS_IPHONE
   g_scale *= 1.6f;  // a 5.4-inch screen driven by fingers: larger text and controls
@@ -142,6 +171,17 @@ ImGuiKey ToImGui(Key key) {
     case Key::kEnter: return ImGuiKey_Enter;
     case Key::kSpace: return ImGuiKey_Space;
     case Key::kTab: return ImGuiKey_Tab;
+    case Key::kBackspace: return ImGuiKey_Backspace;
+    case Key::kDelete: return ImGuiKey_Delete;
+    case Key::kHome: return ImGuiKey_Home;
+    case Key::kEnd: return ImGuiKey_End;
+    case Key::kCtrl: return ImGuiMod_Ctrl;
+    case Key::kShift: return ImGuiMod_Shift;
+    case Key::kSuper: return ImGuiMod_Super;
+    case Key::kA: return ImGuiKey_A;
+    case Key::kC: return ImGuiKey_C;
+    case Key::kV: return ImGuiKey_V;
+    case Key::kX: return ImGuiKey_X;
   }
   return ImGuiKey_None;
 }
@@ -244,6 +284,19 @@ void BuildDebug(uint32_t fps, double frame_ms) {
   if (!open && g_panel == Panel::Debug) Close();
 }
 
+#ifdef GTAV_DESKTOP_WORKSHOP
+void BuildWorkshop() {
+  const auto screen = ImGui::GetIO().DisplaySize;
+  ImGui::SetNextWindowPos(ImVec2(screen.x * .5f, screen.y * .5f), ImGuiCond_Appearing, ImVec2(.5f, .5f));
+  ImGui::SetNextWindowSize(ImVec2(std::min(760.f * g_scale, screen.x - 16), std::min(545.f * g_scale, screen.y - 16)),
+                           ImGuiCond_FirstUseEver);
+  bool open = true;
+  if (ImGui::Begin("GTA V Recomp | Workshop (F6 / Esc)", &open, ImGuiWindowFlags_NoCollapse)) sandbox::DrawWorkshop();
+  ImGui::End();
+  if (!open && g_panel == Panel::Workshop) Close();
+}
+#endif
+
 void SwitchPanel(Panel wanted) {
   std::lock_guard lock(g_input_mutex);
   const auto next = debug::TogglePanel(g_panel.load(), wanted);
@@ -258,6 +311,18 @@ void SwitchPanel(Panel wanted) {
 
 void Toggle() { SwitchPanel(Panel::Settings); }
 void ToggleDebug() { SwitchPanel(Panel::Debug); }
+#ifdef GTAV_DESKTOP_WORKSHOP
+void OpenWorkshop() { if (!WorkshopOpen() && sandbox::Active()) SwitchPanel(Panel::Workshop); }
+bool ToggleWorkshop() {
+  if (!sandbox::Active()) return false;
+  SwitchPanel(Panel::Workshop);
+  return true;
+}
+bool WorkshopOpen() { return g_panel.load() == Panel::Workshop; }
+void OnText(uint32_t ascii) {
+  if (ascii >= 32 && ascii < 127 && WorkshopOpen()) Push({Input::kText, 0, 0, int(ascii)});
+}
+#endif
 void Close() { SwitchPanel(Panel::Closed); }
 bool IsOpen() { return g_panel.load() != Panel::Closed; }
 void OnMouseMove(float x, float y) { Push({Input::kMove, x, y}); }
@@ -293,7 +358,12 @@ void LoadSettings() {
 
 ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms) {
   const bool touch_overlay = touch::Visible();
-  if (!IsOpen() && !touch_overlay) return nullptr;
+#ifdef GTAV_DESKTOP_WORKSHOP
+  const bool workshop_hud = sandbox::Active();
+#else
+  const bool workshop_hud = false;
+#endif
+  if (!IsOpen() && !touch_overlay && !workshop_hud) return nullptr;
   EnsureContext(h);
   ImGuiContext* previous = ImGui::GetCurrentContext();
   ImGui::SetCurrentContext(g_context);
@@ -314,6 +384,7 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms) {
         case Input::kButton: io.AddMouseButtonEvent(in.code, in.down); break;
         case Input::kWheel: io.AddMouseWheelEvent(0.0f, in.y); break;
         case Input::kKey: io.AddKeyEvent(ToImGui(Key(in.code)), in.down); break;
+        case Input::kText: io.AddInputCharacter(unsigned(in.code)); break;
       }
     }
     g_input.clear();
@@ -327,7 +398,16 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms) {
   switch (g_panel.load()) {
     case Panel::Settings: BuildSettings(fps, frame_ms); break;
     case Panel::Debug: BuildDebug(fps, frame_ms); break;
-    case Panel::Closed: break;
+    case Panel::Workshop:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      BuildWorkshop();
+#endif
+      break;
+    case Panel::Closed:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (workshop_hud) sandbox::DrawHud();
+#endif
+      break;
   }
   if (touch_overlay) touch::Draw(ImGui::GetForegroundDrawList(), float(w), float(h));
   ImGui::Render();
