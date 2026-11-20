@@ -1,4 +1,5 @@
 #include "graphics_preferences.h"
+#include "graphics_policy.h"
 
 #include <charconv>
 #include <chrono>
@@ -99,9 +100,16 @@ std::string CanonicalValue(Key key, std::string_view value) {
     case Key::FrameLimit: return Range(value, 0, 1000);
     case Key::GuestGpuLag: return Range(value, 0, 64);
     case Key::TextureRecheck: return Range(value, 1, 30);
+    case Key::ContactRays: return Range(value, 0, 3);
+    case Key::ContactStrength: return Range(value, 0, 100);
+    case Key::MaterialAnisotropy: {
+      const auto n = Int(value);
+      if (n == 0 || n == 1 || n == 2 || n == 4 || n == 8 || n == 16) return std::to_string(*n);
+      return {};
+    }
     case Key::Output: {
       const auto n = Int(value);
-      if (n == 0 || n == 720 || n == 1080 || n == 1440 || n == 2160) return std::to_string(*n);
+      if (n == -1 || n == 0 || n == 540 || n == 720 || n == 1080 || n == 1440 || n == 2160) return std::to_string(*n);
       return {};
     }
     case Key::SceneScale: {
@@ -109,7 +117,7 @@ std::string CanonicalValue(Key key, std::string_view value) {
       std::istringstream in{std::string(value)};
       in.imbue(std::locale::classic());
       double scale;
-      if (!(in >> std::noskipws >> scale) || !in.eof() || !std::isfinite(scale) || scale < 0.5 || scale > 1.0)
+      if (!(in >> std::noskipws >> scale) || !in.eof() || !std::isfinite(scale) || scale < 0.5 || scale > kUltraSceneScale)
         return {};
       std::ostringstream out;
       out.imbue(std::locale::classic());
@@ -124,9 +132,9 @@ std::string CanonicalValue(Key key, std::string_view value) {
   }
 }
 
-Preferences::Preferences(fs::path path, fs::path legacy, bool ignore_file, bool windows,
+Preferences::Preferences(fs::path path, fs::path legacy, bool ignore_file, Platform platform,
                          Locks forced, Get get, Set set)
-    : path_(std::move(path)), legacy_(std::move(legacy)), ignored_(ignore_file), windows_(windows),
+    : path_(std::move(path)), legacy_(std::move(legacy)), ignored_(ignore_file), platform_(platform),
       forced_(forced), get_(std::move(get)), set_(std::move(set)) {}
 
 void Preferences::Load() {
@@ -172,7 +180,7 @@ void Preferences::BeginRun() {
     if (Available(Key(i)) && Spec(Key(i)).restart) boot_[i] = CanonicalValue(Key(i), get_(Key(i)));
 }
 
-bool Preferences::Available(Key key) const { return windows_ || !Spec(key).windows_only; }
+bool Preferences::Available(Key key) const { return platform_ >= Spec(key).minimum; }
 
 bool Preferences::CanEdit(Key key) const {
   return Available(key) && !Forced(key) && !(ignored_ && running_ && Spec(key).restart);

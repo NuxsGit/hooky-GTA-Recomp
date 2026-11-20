@@ -3,19 +3,28 @@
 #include "backend.h"
 
 #include "capture.h"
+#include "contact_rays.h"
+#include "fog_filter.h"
 #include "frame.h"
 #include "frame_trace.h"
 #include "textures.h"
 #include "shaders.h"
+#include "upload_arena.h"
 #include "write_watch.h"
 #include "vertex_layout.h"
 #include "xenos_regs.h"
 #include "replay_shader.h"
 #include "paths.h"
+#include "pipeline_cache_io.h"
+#include "pipeline_completion.h"
 #include "shader_compiler.h"
 
 #include "menu.h"
 #include "native_blit_shaders.h"
+#ifdef GTAV_CONTACT_RAYS_SHADER
+#include "contact_rays_pass.h"
+#include "native_contact_rays_ps.h"
+#endif
 #ifdef _WIN32
 #include "native_fsr_easu_ps.h"
 #include "native_fsr_rcas_ps.h"
@@ -146,6 +155,8 @@ REXCVAR_DEFINE_DOUBLE(gtav_native_depth_slope_scale, 1.0, "GTAV",
                       "Native renderer (diagnostic, live): multiplier on the slope part of the guest polygon offset");
 REXCVAR_DEFINE_DOUBLE(gtav_native_farpin_scale, 1.0, "GTAV",
                       "Experiment: scale for far-pinned viewports (min == max depth, e.g. the sky dome at 2^-24)");
+REXCVAR_DEFINE_BOOL(gtav_native_reduce_fog, false, "GTAV",
+                    "Desktop experiment: omit the TU27 distant fog strip (live; keep other weather effects)");
 REXCVAR_DEFINE_STRING(gtav_native_skip_ps, "", "GTAV", "Diagnostic: drop draws with these pixel shader hashes");
 REXCVAR_DEFINE_INT32(gtav_native_texture_budget_mb, 1024, "GTAV",
                      "Decoded texture cache budget: textures idle for 2 s are released above it (unified memory)");
@@ -204,8 +215,16 @@ REXCVAR_DEFINE_BOOL(gtav_native_point_float32, GTAV_POINT_FLOAT32_DEFAULT, "GTAV
 #define GTAV_RENDER_SCALE_DEFAULT 1.0
 #endif
 REXCVAR_DEFINE_DOUBLE(gtav_native_render_scale, GTAV_RENDER_SCALE_DEFAULT, "GTAV",
-                      "Native renderer: render the full-width (1280) targets at this fraction of their size "
-                      "(0.5-1; read at start). Needs SPIR-V made with the pixel scale constant (make_spirv.sh)");
+                      "Native renderer: scale full-width single-sampled targets (0.5-1.5 on desktop, 0.5-1 on mobile; "
+                      "restart). Needs SPIR-V with the pixel scale specialization constant");
+REXCVAR_DEFINE_BOOL(gtav_native_material_filtering, false, "GTAV",
+                    "Desktop native renderer: improve anisotropy on eligible mipmapped material textures (restart)");
+REXCVAR_DEFINE_INT32(gtav_native_material_anisotropy, 0, "GTAV",
+                     "Material filtering (restart): 0 follows preset, 1 game filtering, 2/4/8/16 minimum on eligible textures");
+REXCVAR_DEFINE_INT32(gtav_native_contact_rays, 0, "GTAV",
+                     "Experimental contact occlusion in screen space: 0 off, 1 low, 2 medium, 3 high (live)");
+REXCVAR_DEFINE_INT32(gtav_native_contact_strength, 50, "GTAV",
+                     "Screen-space contact occlusion strength in percent (0-100, live)");
 REXCVAR_DEFINE_BOOL(gtav_native_zero_new_targets, true, "GTAV",
                     "Native renderer: new render targets and resolve destinations start zeroed (Adreno hands out "
                     "recycled memory: grey blocks where the game never writes)");
@@ -304,6 +323,10 @@ namespace regs = xenos_regs;
 
 namespace {
 
+std::span<const uint8_t> GuestTextureMemory() {
+  return {REX_KERNEL_MEMORY()->physical_membase(), kGuestTextureAddressSpace};
+}
+
 // Tree-orb diagnostic (F11 cycles, logs/diag_mode sets): on the draws picked by
 // GTAV_NATIVE_DIAG_PS / GTAV_NATIVE_DIAG_VS=hash,hash or ALL (default: VS 49CD0CC3ED116BB1),
 // override one pipeline stage to find the one that drops the leaf pixels.
@@ -333,15 +356,6 @@ constexpr uint32_t kSamplerDescriptors = 1024;
 // kOverflow: where a resource goes when the heap is full even after evicting (never sampled on
 // purpose; it used to land on kNull2D, so every "no texture" slot showed the newest texture).
 constexpr uint32_t kNull2D = 0, kNull3D = 1, kNullCube = 2, kOverflow = 3, kFirstTextureDescriptor = 4;
-// Smaller chunks on the phone: three frames in flight each kept 64 MB chunks mostly empty.
-#if defined(__APPLE__) && TARGET_OS_IPHONE
-constexpr uint64_t kUploadChunk = 32ull << 20;
-#else
-constexpr uint64_t kUploadChunk = 64ull << 20;
-#endif
-// Tallest render target: GTA V stacks its four 640x640 sun shadow cascades in one 640x2560 depth
-// surface, so 2048 rows lost the far cascade (distant scenery shadowed by garbage wedges).
-constexpr uint32_t kMaxTargetRows = 4096;
 constexpr uint32_t kSharedConstantsSize = 1792;  // see shader_common.h + xenosrecomp-gtav.patch
 // Indirect vertex fetch records (vfetchIndirect): 32 bytes per input location from byte 768.
 constexpr uint32_t kIndirectFetchRecords = 768;
@@ -959,12 +973,12 @@ struct PipelineJob {
   RenderSpecConstant spec{0, 0};
   RenderSpecConstant specs[2];
   std::unique_ptr<RenderPipeline> result;
-  std::atomic<bool> done{false};
+  PipelineCompletion completion;
 };
 
 class PipelineCompiler {
  public:
-  void Enqueue(RenderDevice* device, std::shared_ptr<PipelineJob> job) {
+  void Enqueue(RenderDevice* device, std::shared_ptr<PipelineJob> job, bool lean) {
     std::lock_guard lock(mutex_);
     if (!started_) {
       started_ = true;
@@ -975,7 +989,7 @@ class PipelineCompiler {
 #else
       constexpr int kWorkers = 3;
 #endif
-      for (int i = 0; i < kWorkers; i++)
+      for (int i = 0; i < (lean ? 1 : kWorkers); i++)
         std::thread([this, device] {
 #if defined(__APPLE__)
           // Same class as the guest threads (the SDK runs them USER_INTERACTIVE): a lower one
@@ -1001,7 +1015,7 @@ class PipelineCompiler {
       }
       auto t0 = std::chrono::steady_clock::now();
       job->result = device->createGraphicsPipeline(job->desc);
-      job->done.store(true, std::memory_order_release);
+      job->completion.Signal();
       double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
       {
         std::lock_guard lock(mutex_);
@@ -1107,45 +1121,29 @@ void PipelineFields(IO& io, RenderGraphicsPipelineDesc& d, std::vector<RenderInp
 // match the description the renderer builds now, so code changes never pick up stale state.
 class PipelineWarmer {
  public:
-  // "GLP2": GLP1 files could hold pipelines recorded without their pixel shader; they are dropped.
-  static constexpr uint32_t kMagic = 0x32504C47;
-
   void Start(RenderDevice* device, const RenderPipelineLayout* layout, const RenderShader* gs,
              std::filesystem::path file, std::string spirv_dir) {
     device_ = device, layout_ = layout, gs_ = gs, spirv_dir_ = std::move(spirv_dir);
-    std::error_code ec;
-    std::filesystem::create_directories(file.parent_path(), ec);
-    std::vector<uint8_t> data;
-    if (FILE* f = std::fopen(file.string().c_str(), "rb")) {
-      std::fseek(f, 0, SEEK_END);
-      data.resize(size_t(std::max(0L, std::ftell(f))));
-      std::fseek(f, 0, SEEK_SET);
-      if (std::fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
-      std::fclose(f);
+    const auto data = ReadCacheBytes(file, kPipelineJournalLimit);
+    if (!data) {
+      REXLOG_WARN("[native] pipeline journal unreadable or oversized; ignoring it for this run");
+      return;
     }
-    size_t valid = 0;  // bytes of whole records (a crash can leave a partial last one)
-    for (size_t at = 0; at + 32 <= data.size();) {
-      uint32_t magic, size;
-      std::memcpy(&magic, &data[at], 4);
-      std::memcpy(&size, &data[at + 4], 4);
-      if (magic != kMagic || size < 24 || at + 8 + size > data.size()) break;
-      auto rec = std::make_shared<Record>();
-      std::memcpy(&rec->key, &data[at + 8], 8);
-      std::memcpy(&rec->vs, &data[at + 16], 8);
-      std::memcpy(&rec->ps, &data[at + 24], 8);
-      rec->bytes.assign(data.begin() + ptrdiff_t(at + 32), data.begin() + ptrdiff_t(at + 8 + size));
-      at += 8 + size;
-      valid = at;
-      if (!known_.insert(rec->key).second) {  // re-recorded after a description change: the last one wins
-        auto& old = *records_[rec->key];
-        old.vs = rec->vs, old.ps = rec->ps, old.bytes = std::move(rec->bytes);
-        continue;
+    const size_t valid = VisitPipelineRecords(*data, [&](uint64_t key, uint64_t vs, uint64_t ps,
+                                                        std::span<const uint8_t> bytes) {
+      if (!known_.insert(key).second) {  // last description wins
+        auto& old = *records_[key];
+        old.vs = vs, old.ps = ps;
+        old.bytes.assign(bytes.begin(), bytes.end());
+        return;
       }
-      records_[rec->key] = rec;
+      auto rec = std::make_shared<Record>();
+      rec->key = key, rec->vs = vs, rec->ps = ps;
+      rec->bytes.assign(bytes.begin(), bytes.end());
+      records_[key] = rec;
       queue_.push_back(rec);
-    }
-    file_ = std::fopen(file.string().c_str(), valid == data.size() ? "ab" : "wb");
-    if (file_ && valid != data.size() && valid) std::fwrite(data.data(), 1, valid, file_);
+    });
+    writer_.Start(std::move(file), valid, valid != data->size());
     total_ = uint32_t(queue_.size());
     if (queue_.empty()) return;
     remaining_ = total_;
@@ -1155,20 +1153,10 @@ class PipelineWarmer {
     for (int i = 0; i < 4; i++) std::thread([this] { Worker(); }).detach();
   }
 
-  // Appends a pipeline first created this run.
+  // The disk can be busy with the game's streaming reads. Enqueue only; a saturated or
+  // unwritable journal loses a cache entry, never stalls a draw waiting for the disk.
   void Note(uint64_t key, uint64_t vs, uint64_t ps, const std::vector<uint8_t>& bytes) {
-    if (!file_) return;
-    {
-      std::lock_guard lock(mutex_);
-      if (!known_.insert(key).second) return;
-    }
-    uint32_t head[2] = {kMagic, uint32_t(24 + bytes.size())};
-    std::fwrite(head, 4, 2, file_);
-    std::fwrite(&key, 8, 1, file_);
-    std::fwrite(&vs, 8, 1, file_);
-    std::fwrite(&ps, 8, 1, file_);
-    std::fwrite(bytes.data(), 1, bytes.size(), file_);
-    std::fflush(file_);
+    if (!known_.contains(key) && writer_.TryAppend(key, vs, ps, bytes)) known_.insert(key);
   }
 
   bool Active() const { return remaining_.load(std::memory_order_acquire) != 0; }
@@ -1183,12 +1171,15 @@ class PipelineWarmer {
     auto it = records_.find(key);
     if (it == records_.end()) return nullptr;
     auto rec = it->second;
-    if (rec->state == kCompiling) {
-      auto start = std::chrono::steady_clock::now();
-      if (budget_ms > 0)
+    // A stale description is unusable even if the worker finishes within the budget.
+    const bool matches = rec->bytes == bytes;
+    if (matches && rec->state == kCompiling) {
+      if (budget_ms > 0) {
+        const auto start = std::chrono::steady_clock::now();
         cv_.wait_for(lock, std::chrono::duration<double, std::milli>(budget_ms),
                      [&] { return rec->state != kCompiling; });
-      *waited_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        *waited_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+      }
       if (rec->state == kCompiling) {
         *busy = true;
         return nullptr;
@@ -1197,13 +1188,13 @@ class PipelineWarmer {
     records_.erase(it);
     remaining_.store(uint32_t(records_.size()), std::memory_order_release);
     rec->state = kTaken;  // a queued record is skipped by the workers
-    if (rec->bytes != bytes) {
+    if (!matches) {
       if (++mismatched_ <= 5)
         REXLOG_INFO("[native] warmed pipeline {:016X} differs from this run's description: compiled again", key);
       known_.erase(key);  // Note records the current description
       return nullptr;
     }
-    if (++used_ % 100 == 0) REXLOG_INFO("[native] pipeline warm-up: {} warmed pipelines used", used_);
+    if (rec->result && ++used_ % 100 == 0) REXLOG_INFO("[native] pipeline warm-up: {} warmed pipelines used", used_);
     return std::move(rec->result);
   }
 
@@ -1298,10 +1289,10 @@ class PipelineWarmer {
   const RenderPipelineLayout* layout_ = nullptr;
   const RenderShader* gs_ = nullptr;
   std::string spirv_dir_;
-  FILE* file_ = nullptr;
+  PipelineRecordWriter writer_;
   std::mutex mutex_;
   std::condition_variable cv_;
-  std::unordered_set<uint64_t> known_;  // keys in the file
+  std::unordered_set<uint64_t> known_;  // journal keys (render thread only)
   std::unordered_map<uint64_t, std::shared_ptr<Record>> records_;  // warmed, not yet taken
   std::deque<std::shared_ptr<Record>> queue_;
   std::mutex shader_mutex_, names_mutex_;
@@ -1332,42 +1323,36 @@ struct UploadAllocation {
 
 // Per-frame linear allocator over host-visible chunks; reset once the frame's fence passed.
 struct UploadRing {
-  struct Chunk {
-    std::unique_ptr<RenderBuffer> buffer;
-    uint8_t* cpu = nullptr;
-    uint64_t gpu = 0;
+  struct UnmapBuffer {
+    bool mapped;
+    void operator()(RenderBuffer* buffer) const {
+      if (mapped) buffer->unmap();
+      delete buffer;
+    }
+  };
+  struct Mapping {
+    std::unique_ptr<RenderBuffer, UnmapBuffer> buffer;
+    uint8_t* cpu;
+    uint64_t gpu;
   };
   RenderDevice* device = nullptr;
-  std::vector<Chunk> chunks;
-  size_t chunk = 0;
-  uint64_t offset = 0;
+  uint64_t nominal = 64 * kMiB;
+  UploadArena<Mapping> arena;
 
   UploadAllocation Allocate(uint64_t size, uint64_t alignment = 256) {
-    offset = (offset + alignment - 1) & ~(alignment - 1);
-    if (offset + size > kUploadChunk) {
-      chunk++;
-      offset = 0;
-    }
-    if (size > kUploadChunk) size = kUploadChunk;  // callers keep allocations far below this
-    while (chunks.size() <= chunk) {
-      Chunk c;
-      c.buffer = device->createBuffer(RenderBufferDesc::UploadBuffer(
-          kUploadChunk, RenderBufferFlag::CONSTANT | RenderBufferFlag::VERTEX | RenderBufferFlag::INDEX |
-                            RenderBufferFlag::DEVICE_ADDRESSABLE));
-      c.cpu = static_cast<uint8_t*>(c.buffer->map());
-      c.gpu = c.buffer->getDeviceAddress();
-      chunks.push_back(std::move(c));
-    }
-    auto& c = chunks[chunk];
-    UploadAllocation a{c.buffer.get(), offset, c.cpu + offset, c.gpu + offset};
-    offset += size;
-    return a;
+    const auto [mapping, offset] = arena.Allocate(size, alignment, nominal, [this](uint64_t capacity) {
+      auto buffer = device->createBuffer(RenderBufferDesc::UploadBuffer(
+          capacity, RenderBufferFlag::CONSTANT | RenderBufferFlag::VERTEX | RenderBufferFlag::INDEX |
+                        RenderBufferFlag::DEVICE_ADDRESSABLE));
+      auto* cpu = static_cast<uint8_t*>(buffer->map());
+      const uint64_t gpu = buffer->getDeviceAddress();
+      return Mapping{{buffer.release(), UnmapBuffer{cpu != nullptr}}, cpu, gpu};
+    });
+    return {mapping.buffer.get(), offset, mapping.cpu + offset, mapping.gpu + offset};
   }
 
-  void Reset() {
-    chunk = 0;
-    offset = 0;
-  }
+  uint64_t ReservedBytes() const { return arena.ReservedBytes(); }
+  uint64_t AfterFence(bool lean) { return arena.AfterFence(nominal, lean); }
 };
 
 struct RenderTarget {
@@ -1383,6 +1368,10 @@ struct RenderTarget {
   std::unique_ptr<RenderTextureView> view;
   uint32_t stencil_descriptor = 0;  // depth targets: R8_UINT view of the stencil aspect
   std::unique_ptr<RenderTextureView> stencil_view;
+#ifdef GTAV_CONTACT_RAYS_SHADER
+  ContactDepthWriters contact_writers;
+  ContactMaskStamp contact_mask;
+#endif
 };
 
 struct ResolvedTexture {
@@ -1397,6 +1386,10 @@ struct ResolvedTexture {
   bool depth_copy = false;  // R32F copy of a depth resolve (only for depth-format fetches)
   float scale = 1.0f;       // of the source target: the texture is width * scale by height * scale
   uint64_t serial = 0;  // last write order
+#ifdef GTAV_CONTACT_RAYS_SHADER
+  ContactDepthCoverage contact_depth;
+  uint64_t contact_packed_serial = 0;  // R32F sibling written by the very same resolve
+#endif
   // Cube faces and mip levels (resolves with a destination level/face): 6 layers for cubes,
   // the fetch constant's mip count, one render view + framebuffer per written (face, level).
   uint32_t mips = 1, layers = 1;
@@ -1436,11 +1429,15 @@ struct CachedTexture {
   // Hashed ahead on the hash pool at the start of the frame (PreHash): valid for pre_frame.
   uint64_t pre_frame = ~0ull, pre_index = 0, pre_sampled = 0;
   uint32_t pre_words[6] = {};
+  uint8_t material_levels = 0;  // uploaded levels of an eligible compressed 2D material
   bool failed = false;
   bool all_zero = false;  // decoded texels all zero (guest data not streamed in yet?)
 };
 
 struct CachedBuffer {
+  static constexpr uint64_t AllocationSize(uint64_t size) { return std::max<uint64_t>(size, 16); }
+  uint64_t AllocatedBytes() const { return buffer ? AllocationSize(size) : 0; }
+
   std::unique_ptr<RenderBuffer> buffer;
   uint64_t content = 0, size = 0;
   uint64_t checked_frame = ~0ull;
@@ -1567,8 +1564,9 @@ class HashPool {
         if (it.guest) {
           it.raw = XXH3_64bits_withSeed(it.guest, size_t(it.size), 0);
         } else {
-          it.raw = HashGuestTexture(it.words);
-          it.sampled = HashGuestTexture(it.words, true);
+          const auto memory = GuestTextureMemory();
+          it.raw = HashGuestTexture(it.words, memory);
+          it.sampled = HashGuestTexture(it.words, memory, true);
         }
         ready_[i].store(1, std::memory_order_release);
       }
@@ -1774,6 +1772,30 @@ struct Backend::Impl {
   std::vector<std::unique_ptr<RenderBuffer>> dead_buffers;
   std::vector<std::unique_ptr<RenderTextureView>> dead_views;
   std::vector<std::unique_ptr<RenderFramebuffer>> dead_framebuffers;
+  GraphicsMemoryStats memory_stats;
+
+  void RetireTexture(std::unique_ptr<RenderTexture>& texture) {
+    if (!texture) return;
+    // A later allocation can reuse the wrapper's address. Don't inherit its old layout (or
+    // leave an entry behind on every streaming eviction), but keep the object for the fence.
+    layouts.erase(texture.get());
+    dead_textures.push_back(std::move(texture));
+  }
+
+  void RetireCachedTexture(CachedTexture& t) {
+    if (t.descriptor >= kFirstTextureDescriptor) pending_free_descriptors.push_back(t.descriptor);
+    t.descriptor = 0;
+    if (t.view) dead_views.push_back(std::move(t.view));
+    if (t.texture) memory_stats.decoded_textures.Replace(t.bytes, 0);
+    RetireTexture(t.texture);
+    t.bytes = 0;
+  }
+
+  void RetireCachedBuffer(CachedBuffer& b) {
+    if (!b.buffer) return;
+    memory_stats.converted_buffers.Replace(b.AllocatedBytes(), 0);
+    dead_buffers.push_back(std::move(b.buffer));
+  }
 
   void RetireFramebuffers() {
     for (auto& [k, fb] : framebuffers) dead_framebuffers.push_back(std::move(fb));
@@ -1880,7 +1902,44 @@ struct Backend::Impl {
   // Render scale: target sizes and coordinates in host texels (rounded edges, so neighbouring
   // rects stay adjacent). 1 when off.
   float rs = 1.0f;
-  static uint32_t Sz(uint32_t v, float s) { return s == 1.0f ? v : std::max(1u, uint32_t(std::lround(v * s))); }
+  bool oversize_resolve_logged = false;
+  GraphicsMemoryPolicy memory;
+  uint32_t material_filter_floor = 1;
+  uint32_t device_anisotropy = 1;
+  int32_t sampler_anisotropy_cap = 16, sampler_skip_mips = 0;
+  bool skip_material_mip = false;
+  FogFilter fog;
+  ContactRayStatus contact_status = ContactRayStatus::Off;
+#ifdef GTAV_CONTACT_RAYS_SHADER
+  ContactSettings contact_settings;
+  bool contact_pipeline_tried = false;
+  std::unique_ptr<RenderShader> contact_ps;
+  std::unique_ptr<RenderPipeline> contact_pipeline;
+#endif
+
+  void BeginContactFrame() {
+    const auto options = ContactOptions(REXCVAR_GET(gtav_native_contact_rays), REXCVAR_GET(gtav_native_contact_strength));
+#ifdef GTAV_CONTACT_RAYS_SHADER
+    // Don't present a held frame filtered with the previous settings if the next replay loses draws.
+    if (contact_settings.quality != options.quality || contact_settings.strength != options.strength) held_valid = false;
+    contact_settings = options;
+    contact_status = BeginContactStatus(options, !contact_pipeline_tried || contact_pipeline != nullptr);
+#else
+    contact_status = BeginContactStatus(options, false);
+#endif
+  }
+
+  uint32_t AnisotropyCap() const {
+    return std::min(device_anisotropy, uint32_t(std::max(1, sampler_anisotropy_cap)));
+  }
+  static uint32_t Sz(uint32_t v, float s) { return ScaledTexels(v, s); }
+
+  // Keep explicit CLI/ENV/TOML options (and live developer overrides). Potato only replaces
+  // defaults of these individual knobs; it does not rewrite the CVar registry.
+  template <typename T>
+  T MemoryDefault(std::string_view flag, T current, T lean_default) const {
+    return memory.lean && rex::cvar::GetFlagSource(flag) == rex::cvar::Source::kDefault ? lean_default : current;
+  }
   static int32_t Sc(int32_t v, float s) { return s == 1.0f ? v : int32_t(std::lround(v * s)); }
   static RenderRect ScaleRect(const RenderRect& r, float s) {
     return s == 1.0f ? r : RenderRect(Sc(r.left, s), Sc(r.top, s), Sc(r.right, s), Sc(r.bottom, s));
@@ -2296,18 +2355,7 @@ struct Backend::Impl {
   // budget (--gtav_native_pipeline_wait_ms) lasts: a skipped draw is a one-frame hole (a car
   // vanishing, the sky going dark). Only compiles longer than the budget still skip.
   bool WaitForJob(const PipelineJob& job) {
-    if (job.done.load(std::memory_order_acquire)) return true;
-    double budget = REXCVAR_GET(gtav_native_pipeline_wait_ms) - pipeline_wait_ms;
-    if (budget <= 0) return false;
-    auto start = std::chrono::steady_clock::now();
-    bool done = false;
-    for (;;) {
-      if ((done = job.done.load(std::memory_order_acquire))) break;
-      if (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() >= budget) break;
-      std::this_thread::sleep_for(std::chrono::microseconds(200));
-    }
-    pipeline_wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-    return done;
+    return job.completion.Wait(REXCVAR_GET(gtav_native_pipeline_wait_ms) - pipeline_wait_ms, pipeline_wait_ms);
   }
   std::string lost_first;
   double t_shader = 0, t_pipeline = 0, t_texture = 0, t_resolve = 0;
@@ -2456,8 +2504,25 @@ struct Backend::Impl {
   // Texture memory budget (--gtav_native_texture_budget_mb): the descriptor-based eviction below only
   // runs when the heap is nearly full, and the open world reached ~23,000 cached textures (several
   // GB) before that: on a unified-memory Mac with 8 GB the whole system swapped.
+  void UpdateCacheTargets(bool low_memory) {
+    const int32_t texture_mib = MemoryDefault("gtav_native_texture_budget_mb", REXCVAR_GET(gtav_native_texture_budget_mb),
+                                              memory.texture_budget_mib);
+    const int32_t buffer_mib = MemoryDefault("gtav_native_buffer_budget_mb", REXCVAR_GET(gtav_native_buffer_budget_mb),
+                                             memory.buffer_budget_mib);
+    const uint32_t divisor = low_memory ? 2 : 1;
+    memory_stats.decoded_textures.target = uint64_t(std::max(64, texture_mib)) * kMiB / divisor;
+    memory_stats.converted_buffers.target = uint64_t(std::max(0, buffer_mib)) * kMiB / divisor;
+  }
+
+  GraphicsMemoryStats MemoryStats() const {
+    auto stats = memory_stats;
+    stats.upload_reserved = upload.ReservedBytes();
+    for (const auto& p : parked) stats.upload_reserved += p.upload.ReservedBytes();
+    return stats;
+  }
+
   void EvictTexturesOverBudget() {
-    if (frame % 60) return;
+    if (frame % memory.budget_interval) return;
     // Low memory (iOS jetsam headroom): half the budgets, and anything idle for 30 frames may go.
     bool low_memory = false;
 #if GTAV_MOBILE && defined(__APPLE__)
@@ -2466,74 +2531,78 @@ struct Backend::Impl {
 #endif
     if (low_memory && low_memory_logs++ < 20)
       REXLOG_INFO("[native] low memory: caches shrink to half their budgets");
-    const uint64_t min_idle = low_memory ? 30 : 120;
-    uint64_t budget = uint64_t(std::max(64, REXCVAR_GET(gtav_native_texture_budget_mb))) << 20;
-    if (low_memory) budget /= 2;
-    uint64_t total = 0;
-    for (const auto& [key, t] : textures)
-      if (t.texture) total += t.bytes;
-    uint64_t buffer_bytes = 0;
-    for (const auto& [key, b] : buffers) buffer_bytes += b.buffer ? b.size : 0;
-    // Buffers: released entries are erased (169,000 empty ones after an hour of driving) and the
-    // memo in front of the map forgets them; the next use converts the guest data again.
-    if (uint64_t bbudget = uint64_t(std::max(0, REXCVAR_GET(gtav_native_buffer_budget_mb))) << 20;
-        bbudget && buffer_bytes > (low_memory ? bbudget / 2 : bbudget)) {
-      if (low_memory) bbudget /= 2;
+    const uint64_t min_idle = low_memory ? 30 : memory.min_idle;
+    UpdateCacheTargets(low_memory);
+
+    // Account for allocations as they change, so under budget there's no cache walk, even in
+    // Potato where this runs every 15 frames. Scan and sort idle entries only to evict them.
+    const auto& buffer_usage = memory_stats.converted_buffers;
+    if (buffer_usage.OverTarget()) {
       std::vector<std::pair<uint64_t, uint64_t>> idle_buffers;  // checked_frame, key
-      for (auto& [key, b] : buffers)
+      for (const auto& [key, b] : buffers)
         if (!b.buffer || frame - b.checked_frame >= min_idle)
           idle_buffers.emplace_back(b.buffer ? b.checked_frame : 0, key);
       std::sort(idle_buffers.begin(), idle_buffers.end());
-      uint64_t freed = 0;
+      const uint64_t before = buffer_usage.bytes;
       size_t released = 0;
-      for (auto& [used, key] : idle_buffers) {
+      for (const auto& [used, key] : idle_buffers) {
         auto it = buffers.find(key);
         if (it->second.buffer) {
-          if (buffer_bytes - freed <= bbudget * 4 / 5) break;
-          freed += it->second.size;
-          dead_buffers.push_back(std::move(it->second.buffer));  // an in-flight frame may read it
+          if (buffer_usage.Trimmed()) break;
+          RetireCachedBuffer(it->second);
           released++;
         }
         buffers.erase(it);
       }
-      buffer_memo.fill({});
+      if (!idle_buffers.empty()) buffer_memo.fill({});  // memo must forget the erased entries
       if (released && (buffer_budget_logs++ < 20 || buffer_budget_logs % 100 == 0))
-        REXLOG_INFO("[native] buffer budget: released {} buffers ({:.0f} MB), {:.0f} MB cached", released,
-                    freed / 1048576.0, (buffer_bytes - freed) / 1048576.0);
-      buffer_bytes -= freed;
+        REXLOG_INFO("[native] buffer budget: released {} buffers ({:.0f} MiB), {:.0f} MiB cached", released,
+                    (before - buffer_usage.bytes) / double(kMiB), buffer_usage.bytes / double(kMiB));
     }
+
+    const auto& texture_usage = memory_stats.decoded_textures;
+    if (texture_usage.OverTarget()) {
+      std::vector<std::pair<uint64_t, uint64_t>> idle;  // used_frame, key
+      for (const auto& [key, t] : textures)
+        if (frame - t.used_frame >= min_idle && (t.texture || t.failed)) idle.emplace_back(t.used_frame, key);
+      std::sort(idle.begin(), idle.end());
+      const uint64_t before = texture_usage.bytes;
+      uint32_t released = 0;
+      for (const auto& [used, key] : idle) {
+        if (texture_usage.Trimmed()) break;
+        auto it = textures.find(key);
+        RetireCachedTexture(it->second);
+        textures.erase(it);
+        released++;
+      }
+      textures_evicted += released;
+      if (released && (budget_logs++ < 20 || budget_logs % 100 == 0))
+        REXLOG_INFO("[native] texture budget: released {} textures ({:.0f} MiB), {} cached ({:.0f} MiB)", released,
+                    (before - texture_usage.bytes) / double(kMiB), textures.size(), texture_usage.bytes / double(kMiB));
+    }
+
     if (frame % 600 == 0) {
-      size_t upload_chunks = upload.chunks.size();
-      for (const auto& p : parked) upload_chunks += p.upload.chunks.size();
+      const auto stats = MemoryStats();
       uint64_t target_bytes = 0;
-      for (const auto& [key, t] : targets)
-        if (t.texture) target_bytes += uint64_t(t.width) * t.height * std::max(1u, t.msaa) * 4;
-      REXLOG_INFO("[native] caches: {} textures {:.0f} MB (budget {} MB), {} buffers {:.0f} MB; {} upload chunks "
-                  "({} MB), {} render targets (~{} MB at 4 B/px)",
-                  textures.size(), total / 1048576.0, budget >> 20, buffers.size(), buffer_bytes / 1048576.0,
-                  upload_chunks, (upload_chunks * kUploadChunk) >> 20, targets.size(), target_bytes >> 20);
+      size_t target_count = 0;
+      const auto count_targets = [&](const auto& cache) {
+        for (const auto& [key, t] : cache) {
+          if (!t.texture) continue;
+          ++target_count;
+          target_bytes += uint64_t(Sz(t.width, t.scale)) * Sz(t.height, t.scale) * SampleCount(t.msaa) *
+                          (t.depth ? 8u : BytesPerTexel(t.format));
+        }
+      };
+      count_targets(targets);
+      for (const auto& p : parked) count_targets(p.targets);
+      REXLOG_INFO("[native] caches: {} textures {:.1f}/{} MiB, {} buffers {:.1f}/{} MiB (0 = no target); "
+                  "uploads {:.1f} MiB reserved ({:.1f} MiB reclaimed since start), "
+                  "{} render targets (~{} MiB, excludes resolves and driver overhead)",
+                  textures.size(), texture_usage.bytes / double(kMiB), texture_usage.target / kMiB,
+                  buffers.size(), buffer_usage.bytes / double(kMiB), buffer_usage.target / kMiB,
+                  stats.upload_reserved / double(kMiB), stats.upload_reclaimed / double(kMiB),
+                  target_count, target_bytes / kMiB);
     }
-    if (total <= budget) return;
-    std::vector<std::pair<uint64_t, uint64_t>> idle;  // used_frame, key
-    for (const auto& [key, t] : textures)
-      if (frame - t.used_frame >= min_idle && (t.texture || t.failed)) idle.emplace_back(t.used_frame, key);
-    std::sort(idle.begin(), idle.end());
-    uint64_t released = 0, freed_bytes = 0;
-    for (const auto& [used, key] : idle) {
-      if (total - freed_bytes <= budget * 4 / 5) break;
-      auto it = textures.find(key);
-      CachedTexture& t = it->second;
-      if (t.descriptor >= kFirstTextureDescriptor) pending_free_descriptors.push_back(t.descriptor);
-      if (t.texture) freed_bytes += t.bytes;
-      if (t.view) dead_views.push_back(std::move(t.view));
-      if (t.texture) dead_textures.push_back(std::move(t.texture));
-      textures.erase(it);
-      released++;
-    }
-    textures_evicted += released;
-    if (budget_logs++ < 20 || budget_logs % 100 == 0)
-      REXLOG_INFO("[native] texture budget: released {} textures ({:.0f} MB), {} cached ({:.0f} MB)", released,
-                  freed_bytes / 1048576.0, textures.size(), (total - freed_bytes) / 1048576.0);
   }
   uint32_t budget_logs = 0, buffer_budget_logs = 0, low_memory_logs = 0;
 
@@ -2551,12 +2620,8 @@ struct Backend::Impl {
       if (available() + freed >= want) break;
       auto it = textures.find(key);
       CachedTexture& t = it->second;
-      if (t.descriptor >= kFirstTextureDescriptor) {
-        pending_free_descriptors.push_back(t.descriptor);
-        freed++;
-      }
-      if (t.view) dead_views.push_back(std::move(t.view));
-      if (t.texture) dead_textures.push_back(std::move(t.texture));
+      freed += t.descriptor >= kFirstTextureDescriptor;
+      RetireCachedTexture(t);
       textures.erase(it);
       released++;
     }
@@ -2654,14 +2719,29 @@ struct Backend::Impl {
 
   bool fragment_barriers = true;  // --gtav_native_fragment_barriers (live)
 
-  bool Init(RenderDevice* dev) {
+  bool Init(RenderDevice* dev, const GraphicsMemoryPolicy& policy) {
     device = dev;
+    memory = policy;
+    UpdateCacheTargets(false);
+    const auto& caps = dev->getCapabilities();
     const double scale = REXCVAR_GET(gtav_native_render_scale);
-    rs = std::isfinite(scale) ? float(std::clamp(scale, 0.5, 1.0)) : GTAV_RENDER_SCALE_DEFAULT;
+    rs = SceneScale(scale, GTAV_RENDER_SCALE_DEFAULT, !GTAV_MOBILE, caps.maxTextureSize);
+    if (scale > 1.0 && rs == 1.0f && !GTAV_MOBILE)
+      REXLOG_WARN("[graphics] supersampling unavailable at requested scale {}; Vulkan max texture size {}",
+                  scale, caps.maxTextureSize);
     g_pixel_scale_inv = 1.0f / rs;
-    if (rs != 1.0f) REXLOG_INFO("[native] render scale {:.3f} (full-width targets)", rs);
-    upload.device = dev;
-    for (auto& p : parked) p.upload.device = dev;
+    device_anisotropy = caps.maxSamplerAnisotropy;
+    if (!GTAV_MOBILE)
+      material_filter_floor = MaterialFilterFloor(REXCVAR_GET(gtav_native_material_anisotropy),
+                                                  REXCVAR_GET(gtav_native_material_filtering));
+    REXLOG_INFO("[graphics] scene scale {:.3f}, material filter floor {}x (adapter max {}x), GPU slots {}, "
+                "upload chunk {} MiB, shader/pipeline preload {}", rs, material_filter_floor, device_anisotropy,
+                memory.frame_slots, memory.upload_chunk / kMiB, !memory.lean);
+    if (memory.lean) REXLOG_INFO("[graphics] Potato cache defaults: {} MiB textures, {} MiB buffers; "
+                                "soft targets, not a process/VRAM limit", memory.texture_budget_mib, memory.buffer_budget_mib);
+    auto configure_upload = [&](UploadRing& ring) { ring.device = dev; ring.nominal = memory.upload_chunk; };
+    configure_upload(upload);
+    for (auto& p : parked) configure_upload(p.upload);
     RenderDescriptorSetBuilder set;
     set.begin();
     set.addTexture(0, kTextureDescriptors);
@@ -2716,7 +2796,7 @@ struct Backend::Impl {
     texture_set->setTexture(kOverflow, null_textures[0].get(), RenderTextureLayout::SHADER_READ, null_views[0].get());
     writeback_resolves = REXCVAR_GET(gtav_native) == "on";
     if (writeback_resolves)
-      for (auto& pool : query_pools) pool = device->createOcclusionQueryPool(kMaxQueries);
+      for (uint32_t i = 0; i < memory.frame_slots; i++) query_pools[i] = device->createOcclusionQueryPool(kMaxQueries);
     zero_buffer = device->createBuffer(RenderBufferDesc::UploadBuffer(256, RenderBufferFlag::VERTEX));
     std::memset(zero_buffer->map(), 0, 256);
     RenderSamplerDesc linear;
@@ -2842,12 +2922,16 @@ struct Backend::Impl {
     dc.renderTargetFormat[0] = RenderFormat::R32_FLOAT;
     dc.renderTargetBlend[0] = RenderBlendDesc::Copy();
     depth_copy_pipeline = device->createGraphicsPipeline(dc);
-    {
+    const bool ready = blit_vs && blit_ps && rectlist_gs && depth_copy_pipeline;
+    if (ready && !memory.lean) {
       std::string dir = REXCVAR_GET(gtav_native_spirv_dir);
+      if (dir.empty()) dir = DefaultSpirvDir();
+      // Load the existing SPIR-V set alongside the pipeline journal, before replay looks up shaders.
+      g_spirv_preload.Start(dir, device);
       pipeline_warmer.Start(device, layout.get(), rect_gs ? rectlist_gs.get() : nullptr,
-                            ExeDir() / "shader_cache" / "pipelines.bin", dir.empty() ? DefaultSpirvDir() : dir);
+                            ExeDir() / "shader_cache" / "pipelines.bin", std::move(dir));
     }
-    return blit_vs && blit_ps && rectlist_gs && depth_copy_pipeline;
+    return ready;
   }
 
   uint32_t Sampler(const RenderSamplerDesc& desc) {
@@ -2899,7 +2983,6 @@ struct Backend::Impl {
     std::string dir = REXCVAR_GET(gtav_native_spirv_dir);
     if (dir.empty())
       dir = DefaultSpirvDir();
-    g_spirv_preload.Start(dir, device);
     // The tile override is <hash>_tiles2.spv, a variant the shader compiler makes from the game's own
     // shader (shader_compiler.cpp kVariants).
     std::string name = fmt::format("{}_{:016X}{}.spv", pixel ? "ps" : "vs", hash, tile_override ? "_tiles2" : "");
@@ -3004,7 +3087,7 @@ struct Backend::Impl {
     t.height = height;
     t.msaa = msaa;
     t.depth = depth;
-    t.scale = rs != 1.0f && !msaa && pitch >= 1280 ? rs : 1.0f;
+    t.scale = TargetScale(rs, pitch, msaa);
     RenderMultisampling ms(SampleCount(msaa));
     const uint32_t tw = Sz(t.width, t.scale), th = Sz(t.height, t.scale);
     t.texture = device->createTexture(depth ? RenderTextureDesc::DepthTarget(tw, th, t.format, ms)
@@ -3017,12 +3100,8 @@ struct Backend::Impl {
                     int32_t(Sz(std::min(old_height, t.height), t.scale)));
       grow_list->copyTextureRegion(RenderTextureCopyLocation::Subresource(t.texture.get()),
                                    RenderTextureCopyLocation::Subresource(old_texture.get()), 0, 0, 0, &box);
-      layouts.erase(old_texture.get());
     }
-    if (old_texture) {
-      layouts.erase(old_texture.get());
-      dead_textures.push_back(std::move(old_texture));
-    }
+    RetireTexture(old_texture);
     if (msaa == 0) {  // sampled by resolves (depth through its depth aspect)
       t.view = t.texture->createTextureView(RenderTextureViewDesc::Texture2D(t.format));
       t.descriptor = AllocDescriptor();
@@ -3094,20 +3173,24 @@ struct Backend::Impl {
     b.full_frame = frame;
     if (guest_size > kSmallBuffer) b.sampled = SampledHash(guest, guest_size);
     if (!b.buffer || b.content != content || b.size != host_size) {
-      if (b.buffer) dead_buffers.push_back(std::move(b.buffer));  // an in-flight frame may read it
+      RetireCachedBuffer(b);  // an in-flight frame may still read the old allocation
       b.buffer = device->createBuffer(RenderBufferDesc::UploadBuffer(
-          std::max<uint64_t>(host_size, 16), RenderBufferFlag::VERTEX | RenderBufferFlag::INDEX));
+          CachedBuffer::AllocationSize(host_size), RenderBufferFlag::VERTEX | RenderBufferFlag::INDEX));
       ConvertInto(static_cast<uint8_t*>(b.buffer->map()), host_size, convert);
+      b.buffer->unmap();
       conv_bytes[3] += host_size;
       conv_draws[3]++;
       b.content = content;
       b.size = host_size;
+      memory_stats.converted_buffers.Replace(0, b.AllocatedBytes());
     }
     b.checked_frame = frame;
     return b.buffer.get();
   }
 
-  uint32_t TextureDescriptor(RenderCommandList* list, const uint32_t words[6], uint32_t* dimension) {
+  uint32_t TextureDescriptor(RenderCommandList* list, const uint32_t words[6], uint32_t* dimension,
+                             uint32_t* material_levels) {
+    *material_levels = 0;  // native resolves, floats, lookup tables and other non-material bindings
     uint32_t base = FetchBaseAddress(words);
     *dimension = 0;
     if (!base) return kNull2D;
@@ -3134,6 +3217,7 @@ struct Backend::Impl {
     t.used_frame = frame;
     tprof.lookups++;
     if (t.failed) return dim == 2 ? kNull3D : kNull2D;
+    *material_levels = t.material_levels;
     // Guest memory changes under a cached texture, and the emulator's write watches see every
     // change: the CPU rewrites some textures in place (vehicle damage maps, 128x128 32_FLOAT), and
     // streaming recycles same-size slots, so another texture arrives at the same address with the
@@ -3152,7 +3236,7 @@ struct Backend::Impl {
     // lookups (--gtav_native_write_watch_verify).
     if (t.texture && watching && frame - t.full_frame < 64 && t.watch.Clean()) {  // no guest write since
       tprof.watched++;
-      if (REXCVAR_GET(gtav_native_write_watch_verify) && HashGuestTexture(words) != t.raw_hash)
+      if (REXCVAR_GET(gtav_native_write_watch_verify) && HashGuestTexture(words, GuestTextureMemory()) != t.raw_hash)
         (write_watch::Pending(t.watch.ranges[0], t.watch.ranges[1]) ||
                  (t.watch.ranges[3] && write_watch::Pending(t.watch.ranges[2], t.watch.ranges[3]))
              ? watch_late : watch_missed)++;
@@ -3164,7 +3248,7 @@ struct Backend::Impl {
         !REXCVAR_GET(gtav_native_exact_cache)) {
       ScopedMs st{tprof.sampled_ms};
       tprof.sampled++;
-      if (HashGuestTexture(words, true) == t.sampled_hash) {
+      if (HashGuestTexture(words, GuestTextureMemory(), true) == t.sampled_hash) {
         t.sample_frame = frame;
         return t.descriptor;
       }
@@ -3190,8 +3274,8 @@ struct Backend::Impl {
         raw = pre->raw;
         t.pre_sampled = pre->sampled;
       } else {
-        raw = HashGuestTexture(words);
-        t.pre_sampled = HashGuestTexture(words, true);
+        raw = HashGuestTexture(words, GuestTextureMemory());
+        t.pre_sampled = HashGuestTexture(words, GuestTextureMemory(), true);
       }
     }
     if (prehash_on && t.bytes <= kSmallTexture) {
@@ -3207,15 +3291,21 @@ struct Backend::Impl {
     }
     ScopedMs timer{t_texture};
     DecodedTexture dec;
-    if (!DecodeGuestTexture(words, &dec)) {
+    if (!DecodeGuestTexture(words, GuestTextureMemory(), &dec)) {
       t.failed = true;
       return dim == 2 ? kNull3D : kNull2D;
     }
-    uint64_t content = Hash(dec.data.data(), std::min<size_t>(dec.data.size(), 1 << 20));
+    if (((material_filter_floor > 1 && device_anisotropy > 1) || memory.lean) && dim == 1 && dec.mip_count > 1 &&
+        plume::RenderFormatBlockWidth(dec.format) == 4)
+      t.material_levels = uint8_t(dec.mip_count);
+    else
+      t.material_levels = 0;
+    *material_levels = t.material_levels;
+    // A changed mip or the bottom of a large image may lie beyond the first MiB.
+    const uint64_t content = Hash(dec.data.data(), dec.data.size());
     t.checked_frame = frame;
     t.raw_hash = raw;
-    t.bytes = dec.data.size();
-    if (t.texture && t.content == content) return t.descriptor;
+    if (t.texture && t.format == dec.format && t.content == content) return t.descriptor;
     t.content = content;
     t.all_zero = std::all_of(dec.data.begin(), dec.data.end(), [](uint8_t b) { return b == 0; });
     if (t.all_zero && zero_textures_logged < 40) {
@@ -3223,11 +3313,18 @@ struct Backend::Impl {
       REXLOG_INFO("[native] texture {:08X} ({}x{}, format {}) is all zero at frame {}", base & 0x1FFFFFFF,
                   dec.width, dec.height, words[1] & 0x3F, frame);
     }
-    if (t.texture && t.format != dec.format) {  // same guest texture, other host format: new texture
-      dead_textures.push_back(std::move(t.texture));
-      dead_views.push_back(std::move(t.view));
-    }
+    // When the same guest texture decodes to a different host format, earlier commands may
+    // still hold the old descriptor. Replace both the texture and its heap entry.
+    if (t.texture && t.format != dec.format) RetireCachedTexture(t);
     if (!t.texture) {
+      t.descriptor = AllocDescriptor();
+      if (t.descriptor == kOverflow) {
+        // Don't allocate an unusable image or point the shared overflow slot at it. Retry
+        // when a later frame has recycled a descriptor, keeping the dimension-appropriate null.
+        textures.erase(key);
+        *material_levels = 0;
+        return dim == 2 ? kNull3D : kNull2D;
+      }
       t.format = dec.format;
       t.texture = device->createTexture(
           dec.volume ? RenderTextureDesc::Texture3D(dec.width, dec.height, dec.depth, 1, dec.format)
@@ -3236,9 +3333,10 @@ struct Backend::Impl {
           dec.volume ? RenderTextureViewDesc::Texture3D(dec.format) : RenderTextureViewDesc::Texture2D(dec.format);
       view.componentMapping = dec.swizzle;
       t.view = t.texture->createTextureView(view);
-      if (t.descriptor < kFirstTextureDescriptor) t.descriptor = AllocDescriptor();
       texture_set->setTexture(t.descriptor, t.texture.get(), RenderTextureLayout::SHADER_READ, t.view.get());
     }
+    memory_stats.decoded_textures.Replace(t.bytes, dec.data.size());
+    t.bytes = dec.data.size();
     auto staging = upload.Allocate(dec.data.size(), 512);
     std::memcpy(staging.cpu, dec.data.data(), dec.data.size());
     Transition(list, t.texture.get(), RenderTextureLayout::COPY_DEST);
@@ -3254,7 +3352,7 @@ struct Backend::Impl {
     return t.descriptor;
   }
 
-  uint32_t SamplerDescriptor(const uint32_t words[6]) {
+  uint32_t SamplerDescriptor(const uint32_t words[6], uint32_t material_levels) {
     auto clamp = [](uint32_t m) {
       switch (m) {
         case 0: return RenderTextureAddressMode::WRAP;
@@ -3289,17 +3387,25 @@ struct Backend::Impl {
       s.minFilter = ((words[3] >> 21) & 3) == 1 ? RenderFilter::LINEAR : RenderFilter::NEAREST;
       s.mipmapMode = mip_filter == 1 ? RenderMipmapMode::LINEAR : RenderMipmapMode::NEAREST;
     }
-    s.maxAnisotropy = aniso >= 2 ? 1u << (aniso - 1) : 1;
-    s.maxAnisotropy = std::min<uint32_t>(s.maxAnisotropy, uint32_t(std::max(1, REXCVAR_GET(gtav_native_max_anisotropy))));
-    s.anisotropyEnabled = s.maxAnisotropy >= 2;
+    const uint32_t guest_aniso = aniso >= 2 ? 1u << (aniso - 1) : 1;
     s.minLOD = float((words[4] >> 2) & 15);
     s.maxLOD = base_map ? s.minLOD + 0.25f : float((words[4] >> 6) & 15);
     if (s.maxLOD < s.minLOD) s.maxLOD = s.minLOD;
+    const bool repeat = ((words[0] >> 10) & 7) < 2 && ((words[0] >> 13) & 7) < 2;
+    const bool trilinear = s.magFilter == RenderFilter::LINEAR && s.minFilter == RenderFilter::LINEAR &&
+                           s.mipmapMode == RenderMipmapMode::LINEAR;
+    const bool mip_range = !base_map && material_levels > 1 && s.minLOD < std::min(s.maxLOD, float(material_levels - 1));
+    s.maxAnisotropy = MaterialAnisotropy(material_filter_floor, material_levels, repeat, trilinear, mip_range,
+                                        guest_aniso, AnisotropyCap());
+    s.anisotropyEnabled = s.maxAnisotropy >= 2;
     // --gtav_native_texture_min_lod: skip the largest mip levels of mipmapped textures (Metal has no
     // sampler LOD bias, MoltenVK ignores mipLodBias; a min LOD clamp works). Each level quarters the
     // bytes a fetch reads: the prologue's snow terrain (73 fetches a pixel) is bandwidth bound on phones.
-    if (const int32_t skip = REXCVAR_GET(gtav_native_texture_min_lod); skip > 0 && !base_map && s.maxLOD > s.minLOD)
-      s.minLOD = std::min(s.minLOD + float(skip), s.maxLOD);
+    if (skip_material_mip && mip_range && repeat && trilinear) {
+      s.minLOD = std::min({s.minLOD + 1.0f, s.maxLOD, float(material_levels - 1)});
+    } else if (sampler_skip_mips > 0 && !base_map && s.maxLOD > s.minLOD) {
+      s.minLOD = std::min(s.minLOD + float(sampler_skip_mips), s.maxLOD);
+    }
     s.mipLODBias = float(int32_t(words[4] << 10) >> 22) / 32.0f;
     if (REXCVAR_GET(gtav_native_point_float32)) {
       switch (words[1] & 0x3F) {
@@ -3766,7 +3872,7 @@ struct Backend::Impl {
     desc.specConstantsCount = SpecConstants(spec, scs);
     desc.specConstants = scs;
     // Warm-up records: only pipelines whose shaders are the SPIR-V files of their hashes.
-    if (vs && ps != diag_flat_ps.get() && !TileOverride(ps_hash) && (ps || !ps_hash)) {
+    if (!memory.lean && vs && ps != diag_flat_ps.get() && !TileOverride(ps_hash) && (ps || !ps_hash)) {
       PipelineBytesWriter w;
       uint8_t has_gs = desc.geometryShader != nullptr;
       PipelineFields(w, desc, elements, slots, sc, has_gs);
@@ -3791,7 +3897,7 @@ struct Backend::Impl {
       job->desc.specConstantsCount = SpecConstants(spec, job->specs);
       job->desc.specConstants = job->specs;
       pending_pipelines[key] = job;
-      pipeline_compiler.Enqueue(device, job);
+      pipeline_compiler.Enqueue(device, job, memory.lean);
       if (!WaitForJob(*job)) return nullptr;
       auto result = std::move(job->result);
       pending_pipelines.erase(key);
@@ -3966,8 +4072,8 @@ struct Backend::Impl {
       for (uint32_t b = 0; b < unit; b++) out[i + b] = in[i + unit - 1 - b];
   }
 
-  void Draw(RenderCommandList* list, const FramePacket& f, const DrawCommand& d) {
-    if (!take_notes) return DrawImpl(list, f, d, nullptr);
+  void Draw(RenderCommandList* list, const FramePacket& f, const DrawCommand& d, uint32_t* traced_slots) {
+    if (!take_notes) return DrawImpl(list, f, d, traced_slots);
     Backend::DrawNote& n = notes.emplace_back();
     n = {d.vs_hash, d.ps_hash, d.render_targets[0], d.depth_stencil, d.streams[0].address, d.streams[0].size,
          d.streams[0].stride, d.indexed ? d.index_address : 0, d.start, d.count, d.primitive, d.base_vertex,
@@ -3986,7 +4092,7 @@ struct Backend::Impl {
     }
     size_t at = notes.size() - 1;
     uint32_t skipped = stat_skipped, uploads = stat_textures, rewritten = stat_rewritten;
-    DrawImpl(list, f, d, nullptr);
+    DrawImpl(list, f, d, traced_slots);
     auto& m = notes[at];
     m.skipped = stat_skipped != skipped;
     m.uploads = uint8_t(std::min<uint32_t>(stat_textures - uploads, 255));
@@ -4216,7 +4322,98 @@ struct Backend::Impl {
   };
   std::vector<RectElement> rect_elems;  // RectExpand: the elements of the stream being expanded
 
-  void DrawImpl(RenderCommandList* list, const FramePacket& f, const DrawCommand& d, void*) {
+#ifdef GTAV_CONTACT_RAYS_SHADER
+  bool TrackingContactRays() const {
+    return contact_status == ContactRayStatus::NoCompatiblePass || contact_status == ContactRayStatus::NoAlignedDepth;
+  }
+
+  // Find aligned R32F depth that corresponds to an actual binding of the shadow draw.
+  // For its D24S8-as-8888 sibling, require both writes to be from the same resolve.
+  // The address alone is not provenance: later passes can reuse that memory.
+  const ResolvedTexture* ContactDepth(const uint8_t* fetch, const uint32_t* descriptors) {
+    const ResolvedTexture* candidate = nullptr;
+    for (uint32_t i = 0; i < 32; ++i, fetch += 24) {
+      if (descriptors[i] < kFirstTextureDescriptor || ((be32(fetch + 20) >> 9) & 3) != 1) continue;
+      const uint32_t w1 = be32(fetch + 4), w2 = be32(fetch + 8), format = w1 & 0x3F;
+      if (format != 22 && format != 23 && format != 36 && format != 6) continue;
+      if (Extent{(w2 & 0x1FFF) + 1, ((w2 >> 13) & 0x1FFF) + 1} != kContactScene) continue;
+      const uint32_t base = w1 & 0x1FFFF000;
+      const auto depth = resolved_depth.find(base), latest = resolved_latest.find(base);
+      if (depth == resolved_depth.end() || latest == resolved_latest.end() || depth->second != latest->second) continue;
+      const auto& view = resolved.at(depth->second);
+      if (!view.contact_depth.Ready(frame) || view.descriptor < kFirstTextureDescriptor) continue;
+      if (descriptors[i] != view.descriptor) {
+        const auto* packed = format == 6 ? LatestResolved(base, false, kContactScene.width, kContactScene.height) : nullptr;
+        if (!packed || descriptors[i] != packed->descriptor || packed->contact_packed_serial != view.serial) continue;
+      }
+      if (candidate && candidate != &view) return nullptr;
+      candidate = &view;
+    }
+    return candidate;
+  }
+
+  void ContactDraw(RenderCommandList* list, const DrawCommand& d, const uint8_t* r, const uint8_t* fetch,
+                   const uint32_t* descriptors, RenderTarget* const color[4], uint32_t count, RenderTarget* depth,
+                   const RenderViewport& guest_vp, const RenderRect& host_scissor, bool diagnostic) {
+    const float top = std::min(guest_vp.y, guest_vp.y + guest_vp.height);
+    const Extent view = ContactViewport(guest_vp.x, top, guest_vp.width, std::fabs(guest_vp.height));
+    const uint32_t dc = regs::Read(r, regs::RB_DEPTHCONTROL);
+    if (depth && !depth->msaa && depth->width == kContactScene.width) {
+      const bool main_view = !diagnostic && !redirect2x && view == kContactScene &&
+                             guest_vp.minDepth == 0.0f && guest_vp.maxDepth == 1.0f;
+      depth->contact_writers.Write(frame, dc, main_view, d.depth_stencil);
+    }
+    if (count == 0) return;
+
+    auto* target = color[0];
+    const uint32_t mask = regs::Read(r, regs::RB_COLOR_MASK);
+    const auto seed = target->contact_mask;
+    // An intervening alpha write makes the initialization no longer attributable to that pass.
+    for (uint32_t i = 0; i < count; ++i) if ((mask >> (4 * i)) & 8) color[i]->contact_mask = {};
+    const auto kind = ClassifyContactMask(d.ps_hash, d.primitive, d.count, mask, regs::Read(r, regs::RB_BLENDCONTROL0));
+    if (kind == ContactMaskDraw::None || count != 1 || depth || (dc & 7) || diagnostic || redirect2x ||
+        !d.render_targets[0] || (regs::Read(r, regs::RB_COLORCONTROL) & 0x18) || active_query >= 0 || !bound_fb ||
+        target->msaa || target->format != RenderFormat::R8G8B8A8_UNORM || view.Empty() ||
+        view.width != target->width || view.height > target->height) return;
+    const Extent physical{Sz(view.width, target->scale), Sz(view.height, target->scale)};
+    if (host_scissor.left || host_scissor.top || host_scissor.right < int32_t(physical.width) ||
+        host_scissor.bottom < int32_t(physical.height)) return;
+    if (kind == ContactMaskDraw::Initialize) {
+      target->contact_mask = {frame, d.render_targets[0], physical};
+      return;
+    }
+    if (!seed.Matches(frame, d.render_targets[0], physical)) return;
+    const auto* z = ContactDepth(fetch, descriptors);
+    if (!z) {
+      contact_status = ContactRayStatus::NoAlignedDepth;
+      return;
+    }
+    if (!contact_pipeline_tried) {
+      contact_pipeline_tried = true;
+      contact_ps = device->createShader(g_native_contact_rays_ps, sizeof(g_native_contact_rays_ps), "PSContactRays",
+                                        RenderShaderFormat::SPIRV);
+      if (contact_ps)
+        contact_pipeline = device->createGraphicsPipeline(ContactRayPipelineDesc(layout.get(), blit_vs.get(), contact_ps.get()));
+      if (!contact_pipeline)
+        REXLOG_WARN("[graphics] screen-space contact rays unavailable: shader or pipeline creation failed");
+      else
+        REXLOG_INFO("[graphics] contact pass matched TU27 PS {:016X}: mask {}x{}, aligned depth {}x{}", d.ps_hash,
+                    physical.width, physical.height, z->contact_depth.size.width, z->contact_depth.size.height);
+    }
+    if (!contact_pipeline) {
+      contact_status = ContactRayStatus::Unavailable;
+      return;
+    }
+    const auto& coverage = z->contact_depth;
+    RecordContactRayMask(list, contact_pipeline.get(), physical,
+                         {z->descriptor, coverage.size.width, coverage.size.height, contact_settings.quality,
+                          contact_settings.strength, uint32_t(coverage.order == ContactDepthOrder::Reversed)});
+    InvalidateDrawState();  // next guest draw restores pipeline, viewport and constants
+    contact_status = ContactRayStatus::Recorded;
+  }
+#endif
+
+  void DrawImpl(RenderCommandList* list, const FramePacket& f, const DrawCommand& d, uint32_t* traced_slots) {
     prof.Start();
     const uint8_t* r = f.At(d.regs);
     // Did the game rewrite this draw's vertex/index memory since the D3D call? (logged with the
@@ -4246,6 +4443,7 @@ struct Backend::Impl {
         !live.empty() && live.find(fmt::format("{:016X}", d.vs_hash)) != std::string::npos)
       return;
     if (!skip_vs.empty() && skip_vs.find(fmt::format("{:016X}", d.vs_hash)) != std::string::npos) return;
+    if (fog.Skip(d.ps_hash, d.count && d.element_count, r, active_query >= 0)) return;
     // GTA V restores its depth buffer after EDRAM reuse by drawing 23 strips of 32 rows whose
     // colour targets alias the depth surface (bases 000, 020, ... with depth at the base before).
     // Native targets never lose their contents, so the restore has nothing to do here; drawn, it
@@ -4355,7 +4553,8 @@ struct Backend::Impl {
         sc[96 + slot] = memo.sampler;
         continue;
       }
-      descriptor = TextureDescriptor(list, words, &dim);
+      uint32_t material_levels;
+      descriptor = TextureDescriptor(list, words, &dim, &material_levels);
       if (dumping) {
         uint32_t base = FetchBaseAddress(words) & 0x1FFFFFFF;
         char kind = descriptor <= kNullCube ? 'N' : resolved_latest.count(base) ? 'R' : 'T';
@@ -4388,7 +4587,7 @@ struct Backend::Impl {
         // them, swizzle in the name) and the fetch words, once per address.
         if (kind == 'T' && (words[1] & 0x3F) == 6 && dump_raw_f36.insert(base).second) {
           DecodedTexture t;
-          if (DecodeGuestTexture(words, &t) && t.width * t.height <= 4096) {
+          if (DecodeGuestTexture(words, GuestTextureMemory(), &t) && t.width * t.height <= 4096) {
             std::string dir = LogPath(fmt::format("native_dump/frame_{}", dump_frame));
             std::filesystem::create_directories(dir);
             if (FILE* fp = std::fopen(fmt::format("{}/tex_{:08X}_f6_{}x{}_fmt{}_sw{}{}{}{}.bin", dir, base, t.width,
@@ -4414,7 +4613,7 @@ struct Backend::Impl {
             int32_t(words[4] << 10) >> 22, (words[2] & 0x1FFF) + 1, ((words[2] >> 13) & 0x1FFF) + 1);
       }
       sc[dim * 32 + slot] = descriptor;
-      sc[96 + slot] = SamplerDescriptor(words);
+      sc[96 + slot] = SamplerDescriptor(words, descriptor >= kFirstTextureDescriptor ? material_levels : 0);
       if (!dumping) {
         std::memcpy(memo.words, words, 24);
         memo.dim = dim;
@@ -4815,7 +5014,11 @@ struct Backend::Impl {
     uint32_t nvp = std::max(bind_count, 1u);
     RenderRect scissor(0, 0, int32_t(w), int32_t(h));
     if (REXCVAR_GET(gtav_native_scissor)) scissor = GuestScissor(r, w, h);
-    if (const float ts = count ? color[0]->scale : depth->scale; ts != 1.0f) {
+    const float ts = count ? color[0]->scale : depth->scale;
+#ifdef GTAV_CONTACT_RAYS_SHADER
+    const auto contact_viewport = vp;
+#endif
+    if (ts != 1.0f) {
       vp = ScaleViewport(vp, ts);
       scissor = ScaleRect(scissor, ts);
     }
@@ -4909,8 +5112,14 @@ struct Backend::Impl {
     } else {
       list->drawInstanced(d.count, 1, d.start - snap_first, 0);
     }
+    if (active_query >= 0) query_records[slot][active_query].coverage.Draw(ts);
     stat_draws++;
+#ifdef GTAV_CONTACT_RAYS_SHADER
+    if (TrackingContactRays())
+      ContactDraw(list, d, r, fetch, sc, color, count, depth, contact_viewport, scissor, diag != kDiagOff);
+#endif
     prof.Mark(prof.submit);
+    if (traced_slots) std::memcpy(traced_slots, sc, 32 * sizeof(*sc));
     // Dump frame: the scene's HDR target (EDRAM base --gtav_native_dump_rt, default 2D0) after
     // every draw into it, to find the draw that introduces an artifact (dump index in commands.txt).
     // The watched surface may be any of the draw's targets (G-buffer RT2 at 600, for instance).
@@ -5022,9 +5231,19 @@ struct Backend::Impl {
     };
     const RenderRect* rc;
     uint32_t rn;
-    for (uint32_t i = 0; i < count; i++)
-      if ((c.flags & (1u << i)) && rects_for(targets[i], &rc, &rn)) ClearAttachment(list, i, col, rc, rn);
-    if (depth && rects_for(depth, &rc, &rn)) list->clearDepthStencil(z, stencil, c.z, c.stencil & 0xFF, rc, rn);
+    for (uint32_t i = 0; i < count; i++) {
+      if (!(c.flags & (1u << i)) || !rects_for(targets[i], &rc, &rn)) continue;
+#ifdef GTAV_CONTACT_RAYS_SHADER
+      if (TrackingContactRays()) targets[i]->contact_mask = {};
+#endif
+      ClearAttachment(list, i, col, rc, rn);
+    }
+    if (depth && rects_for(depth, &rc, &rn)) {
+#ifdef GTAV_CONTACT_RAYS_SHADER
+      if (z && TrackingContactRays()) depth->contact_writers.Clear();
+#endif
+      list->clearDepthStencil(z, stencil, c.z, c.stencil & 0xFF, rc, rn);
+    }
     // The same EDRAM under another color format is another host target here, and D3D sets the new
     // surface's format only at the next draw, so the registers can still name the previous one: the
     // phone pass clears 2D0 while it reads 7e3 and then draws 8888, which kept the stale 8888
@@ -5039,7 +5258,12 @@ struct Backend::Impl {
           continue;
         RenderTarget* alias = &t;
         BindTargets(list, &alias, 1, nullptr);
-        if (rects_for(alias, &rc, &rn)) list->clearColor(0, col, rc, rn);
+        if (rects_for(alias, &rc, &rn)) {
+#ifdef GTAV_CONTACT_RAYS_SHADER
+          if (TrackingContactRays()) alias->contact_mask = {};
+#endif
+          list->clearColor(0, col, rc, rn);
+        }
       }
     }
     // G-buffer RT2 (600) leftover alpha: the G-buffer clear (target 0 at 180) leaves RT2 alone, and
@@ -5057,6 +5281,9 @@ struct Backend::Impl {
         RenderTarget* rt = &t;
         BindTargets(list, &rt, 1, nullptr);
         list->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 1.0f));
+#ifdef GTAV_CONTACT_RAYS_SHADER
+        if (TrackingContactRays()) rt->contact_mask = {};
+#endif
         if (rt3_alpha_logged++ < 3)
           REXLOG_INFO("[native] G-buffer clear: target {:03X} cleared to alpha 1", uint32_t(key & 0xFFF));
       }
@@ -5067,7 +5294,7 @@ struct Backend::Impl {
   // The depth resolve as the raw D24S8 word (see PSDepthPack), a second variant at the same
   // address for guests that fetch it through an 8888 view (GTA V's SSAO reads the stencil so).
   void WriteDepthPack(RenderCommandList* list, RenderTarget* src, uint32_t base, const uint32_t* words, uint32_t dw,
-                      uint32_t dh, const ResolveRegion& host) {
+                      uint32_t dh, const ResolveRegion& host, [[maybe_unused]] uint64_t depth_serial) {
     const float s = src->scale;
     uint64_t variant = uint64_t(base) | uint64_t(uint32_t(RenderFormat::R8G8B8A8_UNORM) & 0xFF) << 32 |
                        uint64_t(1) << 40 | uint64_t(Hash(&dw, 4, dh) & 0x3FFFFF) << 41 | uint64_t(s != 1.0f) << 63;
@@ -5075,6 +5302,9 @@ struct Backend::Impl {
     auto& variants = resolved_by_address[base];
     if (std::find(variants.begin(), variants.end(), variant) == variants.end()) variants.push_back(variant);
     dst.serial = ++resolve_serial;
+#ifdef GTAV_CONTACT_RAYS_SHADER
+    if (TrackingContactRays()) dst.contact_packed_serial = depth_serial;
+#endif
     if (!dst.texture) {
       dst.texture = device->createTexture(RenderTextureDesc::ColorTarget(Sz(dw, s), Sz(dh, s), RenderFormat::R8G8B8A8_UNORM));
       dst.view = dst.texture->createTextureView(RenderTextureViewDesc::Texture2D(RenderFormat::R8G8B8A8_UNORM));
@@ -5178,7 +5408,7 @@ struct Backend::Impl {
       u.size = g.size;
     }
     if (!u.texture || u.width != w || u.height != h || u.format != r.format) {
-      if (u.texture) dead_textures.push_back(std::move(u.texture));
+      RetireTexture(u.texture);
       if (u.view) dead_views.push_back(std::move(u.view));
       if (u.descriptor) pending_free_descriptors.push_back(u.descriptor);
       u.texture = device->createTexture(RenderTextureDesc::Texture2D(w, h, 1, r.format));
@@ -5298,6 +5528,7 @@ struct Backend::Impl {
   static constexpr uint32_t kMaxQueries = 1024;
   struct QueryRecord {
     uint32_t query, serial;  // serial 0: the query never ended in this frame
+    QueryCoverage coverage;
   };
   std::unique_ptr<RenderQueryPool> query_pools[Backend::kFramesInFlight];
   std::vector<QueryRecord> query_records[Backend::kFramesInFlight];
@@ -5315,7 +5546,7 @@ struct Backend::Impl {
       if (records.size() >= kMaxQueries) return;
       if (records.empty()) list->resetQueryPool(pool, 0, kMaxQueries);
       active_query = int32_t(records.size());
-      records.push_back({q.query, 0});
+      records.push_back({q.query, 0, {}});
       list->beginOcclusionQuery(pool, uint32_t(active_query));
     } else if (active_query >= 0 && records[active_query].query == q.query) {
       records[active_query].serial = q.serial;
@@ -5650,8 +5881,7 @@ struct Backend::Impl {
       if (held) {
         // The previous present may still sample this entry. Keep it and its texture until the
         // fence, and bind the replacement at a different index even if the guest swaps formats.
-        layouts.erase(held.get());
-        dead_textures.push_back(std::move(held));
+        RetireTexture(held);
         pending_free_descriptors.push_back(held_descriptor);
       }
       held = std::move(replacement);
@@ -5692,6 +5922,9 @@ struct Backend::Impl {
 
   void ClearResolvedColor(RenderCommandList* list, RenderTarget* src, const RenderRect& rect,
                           const RenderColor& color, bool in_pass) {
+#ifdef GTAV_CONTACT_RAYS_SHADER
+    if (TrackingContactRays()) src->contact_mask = {};
+#endif
     if (in_pass && bound_fb) {
       for (uint32_t i = 0; i < 4; i++)
         if (bound_color[i] == src) {
@@ -5708,7 +5941,8 @@ struct Backend::Impl {
     list->clearColor(0, color, &rect, 1);
   }
 
-  ResolveReplay Resolve(RenderCommandList* list, const FramePacket& f, const ResolveCommand& rc) {
+  ResolveReplay Resolve(RenderCommandList* list, const FramePacket& f, const ResolveCommand& rc,
+                        ResolveTraceHost* trace) {
     ScopedMs timer{t_resolve};
     fetch_cache.valid = false;
     slot_generation++;
@@ -5744,6 +5978,11 @@ struct Backend::Impl {
     bool cube = ((words[5] >> 9) & 3) == 3 && dw == dh;
     const float s = src->scale;  // the destination keeps the source's render scale
     const uint32_t host_w = Sz(dw, s), host_h = Sz(dh, s);
+    if (s > 1.0f && std::max(host_w, host_h) > device->getCapabilities().maxTextureSize) {
+      if (!oversize_resolve_logged) REXLOG_WARN("[native] supersampled resolve {}x{} exceeds the device's texture limit", host_w, host_h);
+      oversize_resolve_logged = true;
+      return {};
+    }
     uint32_t mips = ((words[4] >> 6) & 0xF) + 1;
     mips = std::min({mips, uint32_t(std::bit_width(std::max(dw, dh))),
                      uint32_t(std::bit_width(std::max(host_w, host_h)))});
@@ -5851,9 +6090,11 @@ struct Backend::Impl {
     }
     ResolveReplay replay{true, false};
     bool in_pass = false;
+    const char* route;
     if (shader_copy && !depth_resolve && s == 1.0f &&
         FetchResolve(list, r, src, int(source), dst, dst_format, x1, y1, x2, y2, px, py)) {
       in_pass = true;  // copied inside the source's render pass, which goes on
+      route = "in_pass";
       if (seqdiag) {
         seq_note += fmt::format(" [in-pass #{}{} after {} draws, pass:", fetch_candidates - 1,
                                 fetch_restarted ? " RESTARTED" : "", pass_draws);
@@ -5868,11 +6109,14 @@ struct Backend::Impl {
       float scale = (IsFixed16(src->format) ? 32.0f : 1.0f) / (IsFixed16(dst_format) ? 32.0f : 1.0f);
       bool encode_7e3 = IsFixed10(uint32_t(regs::Color(r, int(source)).format)) && src->float_data;
       ComputeResolve(list, src, src_descriptor, dst, x1, y1, x2, y2, px, py, scale, encode_7e3 ? 1 : 0);
+      route = "compute";
     } else if (shader_copy && !depth_resolve && REXCVAR_GET(gtav_native_skip_resolves) > 0 &&
                (x2 - x1) * (y2 - y1) >= uint32_t(REXCVAR_GET(gtav_native_skip_resolves))) {
       // timing experiment only: the destination keeps stale contents
       replay.copied = false;
+      route = "skipped";
     } else if (shader_copy) {
+      route = "shader";
       if (src_descriptor == src->descriptor)
         Transition(list, src->texture.get(),
                  depth_resolve ? RenderTextureLayout::DEPTH_READ : RenderTextureLayout::SHADER_READ);
@@ -5911,16 +6155,24 @@ struct Backend::Impl {
       list->setGraphicsPushConstants(0, push, 0, sizeof(push));
       list->drawInstanced(3, 1, 0, 0);
     } else if (src->msaa) {
+      route = "msaa";
       Transition(list, src->texture.get(), RenderTextureLayout::RESOLVE_SOURCE);
       Transition(list, dst.texture.get(), RenderTextureLayout::RESOLVE_DEST);
       RenderRect rect{int32_t(x1), int32_t(y1), int32_t(x2), int32_t(y2)};
       list->resolveTextureRegion(dst.texture.get(), px, py, src->texture.get(), &rect);
     } else {
+      route = "copy";
       Transition(list, src->texture.get(), RenderTextureLayout::COPY_SOURCE);
       Transition(list, dst.texture.get(), RenderTextureLayout::COPY_DEST);
       RenderBox box{int32_t(x1), int32_t(y1), int32_t(x2), int32_t(y2), 0, 1};
       list->copyTextureRegion(RenderTextureCopyLocation::Subresource(dst.texture.get()),
                               RenderTextureCopyLocation::Subresource(src->texture.get()), px, py, 0, &box);
+    }
+    if (trace) {
+      // Array/mip-chain bindings may read another subresource. Don't assign a single writer.
+      const uint32_t direct_2d = mips == 1 && layers == 1 && dst.descriptor != kOverflow ? dst.descriptor : 0;
+      *trace = {host, {std::max(1u, host_w >> rc.dest_level), std::max(1u, host_h >> rc.dest_level)},
+                uint32_t(src->format), uint32_t(dst.format), src->msaa, direct_2d, route};
     }
     if (!in_pass) Transition(list, dst.texture.get(), RenderTextureLayout::SHADER_READ);
     if (writeback_resolves && !depth_resolve) QueueWriteback(list, dst, base);
@@ -5962,8 +6214,17 @@ struct Backend::Impl {
       }
       DumpResolve(list, dst, base, rc.flags, words);
     }
+#ifdef GTAV_CONTACT_RAYS_SHADER
+    if (depth_resolve && TrackingContactRays()) {
+      // Reject downsampled, shifted, incomplete or MSAA inputs. Check actual host copy regions
+      // (including fractional scene scale), not what the guest requested.
+      const bool scene_copy = !subresources && src->width == kContactScene.width && Extent{dw, dh} == kContactScene;
+      const auto order = scene_copy ? src->contact_writers.For(frame) : ContactDepthOrder::Unknown;
+      dst.contact_depth.Copy(frame, src->texture.get(), {host_w, host_h}, order, src->contact_writers.revision, host);
+    }
+#endif
     if (depth_resolve && src->stencil_descriptor && rc.dest_level == 0 && rc.dest_face == 0)
-      WriteDepthPack(list, src, base, words, dw, dh, host);
+      WriteDepthPack(list, src, base, words, dw, dh, host, dst.serial);
     // The guest copies first (including the packed stencil view above). Clear the source region,
     // never the destination point: for tiled resolves the adjacent regions must survive.
     const RenderRect source_rect(int32_t(host.left), int32_t(host.top), int32_t(host.right), int32_t(host.bottom));
@@ -5978,6 +6239,9 @@ struct Backend::Impl {
         RenderTarget* depth = depth_resolve ? src : Target(d.base, d.float24, true, surface.pitch, surface.msaa, y2);
         if (!bound_fb || bound_depth != depth) BindTargets(list, nullptr, 0, depth);
         list->clearDepthStencil(true, true, clear->z, clear->stencil, &source_rect, 1);
+#ifdef GTAV_CONTACT_RAYS_SHADER
+        if (TrackingContactRays()) depth->contact_writers.Clear();
+#endif
         replay.cleared_depth = true;
         replay.applied_z = clear->z;
         replay.applied_stencil = clear->stencil;
@@ -5994,7 +6258,7 @@ struct Backend::Impl {
 Backend::Backend() : impl_(std::make_unique<Impl>()) {}
 Backend::~Backend() = default;
 
-bool Backend::Init(RenderDevice* device) { return impl_->Init(device); }
+bool Backend::Init(RenderDevice* device, const GraphicsMemoryPolicy& memory) { return impl_->Init(device, memory); }
 
 float Backend::RenderScale() const { return impl_->rs; }
 bool Backend::SpirvListed(const std::string& name) { return g_spirv_preload.Listed(name); }
@@ -6002,6 +6266,13 @@ bool Backend::SpirvListed(const std::string& name) { return g_spirv_preload.List
 FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
   auto& s = *impl_;
   s.frame++;
+  s.BeginContactFrame();
+#ifdef GTAV_DESKTOP_WORKSHOP
+  if (s.fog.BeginFrame(REXCVAR_GET(gtav_native_reduce_fog))) s.held_valid = false;
+#endif
+  s.sampler_anisotropy_cap = s.MemoryDefault("gtav_native_max_anisotropy", REXCVAR_GET(gtav_native_max_anisotropy), 2);
+  s.sampler_skip_mips = REXCVAR_GET(gtav_native_texture_min_lod);
+  s.skip_material_mip = s.memory.lean && rex::cvar::GetFlagSource("gtav_native_texture_min_lod") == rex::cvar::Source::kDefault;
   s.PreHash();
   if (int threads = REXCVAR_GET(gtav_native_convert_threads); threads > 0 && !s.converter_pool)
     s.converter_pool = std::make_unique<StreamConverter>(std::min(threads, 6));
@@ -6018,7 +6289,7 @@ FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
   s.stat_draws = s.stat_skipped = s.stat_pipelines_created = s.stat_textures = s.stat_rewritten = 0;
   s.notes.clear();
   s.take_notes = REXCVAR_GET(gtav_native_flicker_catch);
-  s.t_shader = s.t_pipeline = s.t_texture = s.t_resolve = 0;
+  s.t_shader = s.t_pipeline = s.t_texture = s.t_resolve = s.pipeline_wait_ms = 0;
   s.tile_split = 0;
   s.fetch_candidates = 0;
   s.tile_resolves.clear();
@@ -6080,10 +6351,11 @@ FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
       case CommandKind::kDraw: {
         const auto& draw = f.draws[c.index];
         const uint32_t drawn = s.stat_draws;
-        s.Draw(list, f, draw);
+        std::array<uint32_t, 32> traced_slots;  // populated only on a recorded draw when tracing
+        s.Draw(list, f, draw, trace ? traced_slots.data() : nullptr);
         s.pass_draws++;
         DrawsRecorded(c.index + 1);
-        if (trace) trace->Draw(draw, s.stat_draws != drawn);
+        if (trace) trace->Draw(draw, s.stat_draws != drawn ? traced_slots.data() : nullptr);
         if (s.seqdiag) {
           if (!s.seq_passes.empty()) flush_draws(), seq += s.seq_passes, s.seq_passes.clear();
           seq_draws++;
@@ -6098,8 +6370,9 @@ FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
       case CommandKind::kResolve: {
         const auto& resolve = f.resolves[c.index];
         s.seq_note.clear();
-        const auto replay = s.Resolve(list, f, resolve);
-        if (trace) trace->Resolve(resolve, replay);
+        ResolveTraceHost host;
+        const auto replay = s.Resolve(list, f, resolve, trace ? &host : nullptr);
+        if (trace) trace->Resolve(resolve, replay, host);
         if (s.seqdiag) flush_draws(), seq += s.seq_passes + "  " + s.seq_note + "\n", s.seq_passes.clear();
         break;
       }
@@ -6108,10 +6381,6 @@ FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
         if (trace) trace->Query(f.queries[c.index]);
         break;
     }
-  }
-  if (trace) {
-    if (trace->Write()) REXLOG_INFO("[native] trace: logs/native_trace/frame_{}.txt", f.index);
-    else REXLOG_WARN("[native] could not write logs/native_trace/frame_{}.txt", f.index);
   }
   if (s.seqdiag) {
     flush_draws();
@@ -6199,7 +6468,6 @@ FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
     REXLOG_INFO("[native] frame {} lost draws: {} pipelines compiling, {} vertex / {} pixel shaders not ready; first: {}",
                 f.index, s.lost_pipeline, s.lost_vs, s.lost_ps, s.lost_first);
   s.lost_pipeline = s.lost_vs = s.lost_ps = 0;
-  s.pipeline_wait_ms = 0;
   s.lost_first.clear();
   if (f.index % 150 == 0)
     REXLOG_INFO("[native] replay frame {}: {} drawn, {} skipped, {} new pipelines ({} total), {} texture uploads, "
@@ -6213,26 +6481,38 @@ FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
     for (uint32_t i = uint32_t(s.pass_labels[s.slot].size()); i < Impl::kPassStamps; i++)
       list->writeTimestamp(s.pass_pools[s.slot].get(), i);
   }
+  const auto finish_trace = [&](FrontBuffer front, bool held = false, uint32_t address = 0,
+                                uint32_t current_descriptor = 0, uint32_t format = 0) {
+    if (trace) {
+      trace->ContactRays(ContactStatusName(s.contact_status));
+      trace->Fog(s.fog.Info());
+      trace->Front(lost, held, address, current_descriptor, format, front.size);
+      if (trace->Write()) REXLOG_INFO("[native] trace: logs/native_trace/frame_{}.txt", f.index);
+      else REXLOG_WARN("[native] could not write logs/native_trace/frame_{}.txt", f.index);
+    }
+    return front;
+  };
   // The front buffer is the last resolve into the texture passed to Swap.
   for (auto it = f.resolves.rbegin(); it != f.resolves.rend(); ++it) {
     if (it->dest_texture != f.front_buffer) continue;
     const uint32_t* w = it->dest_words + 7;
-    ResolvedTexture* r = s.LatestResolved(FetchBaseAddress(w) & 0x1FFFFFFF, false, (w[2] & 0x1FFF) + 1,
-                                          ((w[2] >> 13) & 0x1FFF) + 1);
+    const uint32_t address = FetchBaseAddress(w) & 0x1FFFFFFF;
+    ResolvedTexture* r = s.LatestResolved(address, false, (w[2] & 0x1FFF) + 1, ((w[2] >> 13) & 0x1FFF) + 1);
     if (f.index % 150 == 0 && r)
       REXLOG_INFO("[native] present {:08X}: {}x{} format {} descriptor {}", FetchBaseAddress(w), r->width,
                   r->height, uint32_t(r->format), r->descriptor);
-    if (!r) break;
+    if (!r) return finish_trace({}, false, address);
     s.Transition(list, r->texture.get(), RenderTextureLayout::SHADER_READ);
     if (s.dumping) {
       uint32_t none[6] = {};
       s.DumpTexture(list, r->descriptor, uint32_t(r->format), r->width, r->height, 0xFFFF0000, 0xF0F0F0, none);
     }
     const Extent size{Impl::Sz(r->width, r->scale), Impl::Sz(r->height, r->scale)};
-    if (FrontBuffer held = s.HoldFront(list, *r, size, lost)) return held;
-    return {r->descriptor, size};
+    const FrontBuffer held = s.HoldFront(list, *r, size, lost);
+    return finish_trace(held ? held : FrontBuffer{r->descriptor, size}, bool(held), address, r->descriptor,
+                        uint32_t(r->format));
   }
-  return {};
+  return finish_trace({});
 }
 
 // The slot's parked state becomes the recording state (its upload chunks get reused); the
@@ -6256,7 +6536,19 @@ const std::vector<Backend::DrawNote>& Backend::LastNotes() const { return impl_-
 
 Backend::FrameStats Backend::LastStats() const {
   return {impl_->stat_draws, impl_->stat_skipped, impl_->stat_pipelines_created, impl_->stat_textures,
-          impl_->stat_rewritten, impl_->t_shader, impl_->t_pipeline, impl_->t_texture, impl_->t_resolve};
+          impl_->stat_rewritten, impl_->t_shader, impl_->t_pipeline, impl_->t_texture, impl_->t_resolve,
+          impl_->pipeline_wait_ms};
+}
+
+PipelineInfo Backend::PipelineStatus() const {
+  return {impl_->pipeline_wait_ms, uint32_t(impl_->pending_pipelines.size()), impl_->pipeline_warmer.used_};
+}
+
+GraphicsMemoryStats Backend::MemoryStats() const { return impl_->MemoryStats(); }
+
+RealismInfo Backend::Realism() const {
+  const uint32_t cap = impl_->AnisotropyCap();
+  return {std::min(impl_->material_filter_floor, cap), cap, impl_->contact_status, impl_->fog.Info()};
 }
 
 void Backend::FrameComplete(uint32_t slot) {
@@ -6293,11 +6585,10 @@ void Backend::FrameComplete(uint32_t slot) {
     const uint64_t* samples = pool->getResults();
     for (size_t i = 0; i < records.size(); i++)
       if (records[i].serial)  // in guest pixels (most queries draw into scaled targets)
-        PublishQueryResult(records[i].query, records[i].serial,
-                           impl_->rs == 1.0f ? samples[i] : uint64_t(double(samples[i]) / (impl_->rs * impl_->rs)));
+        PublishQueryResult(records[i].query, records[i].serial, records[i].coverage.GuestSamples(samples[i]));
     records.clear();
   }
-  p.upload.Reset();
+  impl_->memory_stats.upload_reclaimed += p.upload.AfterFence(impl_->memory.lean);
   auto& pending = p.pending_free_descriptors;
   for (uint32_t d : pending)
     if (d >= kFirstTextureDescriptor) impl_->free_descriptors.push_back(d);
@@ -6366,7 +6657,7 @@ void Backend::WriteDump() {
     // With --readback_resolve=full the emulated renderer's result for the same address is in
     // guest memory: decode it with the same fetch constant for a side-by-side comparison.
     DecodedTexture emu;
-    if (DecodeGuestTexture(d.words, &emu)) {
+    if (DecodeGuestTexture(d.words, GuestTextureMemory(), &emu)) {
       std::string ename = fmt::format("{}/{:03}_emu.ppm", dir, i);
       if (FILE* f = std::fopen(ename.c_str(), "wb")) {
         std::fprintf(f, "P6\n%u %u\n255\n", Impl::kDumpW, Impl::kDumpH);
@@ -6404,7 +6695,8 @@ void Backend::WriteDump() {
   s.dump_raw_used = 0;
   for (size_t i = 0; i < s.dump_textures.size(); i++) {
     DecodedTexture t;
-    if (!DecodeGuestTexture(s.dump_textures[i].data(), &t) || t.format != RenderFormat::BC1_UNORM) continue;
+    if (!DecodeGuestTexture(s.dump_textures[i].data(), GuestTextureMemory(), &t) || t.format != RenderFormat::BC1_UNORM)
+      continue;
     std::string name = fmt::format("{}/tex_{:02}_{:08X}_{}x{}.ppm", dir, i, s.dump_textures[i][1] & ~0xFFFu, t.width,
                                    t.height);
     if (FILE* f = std::fopen(name.c_str(), "wb")) {

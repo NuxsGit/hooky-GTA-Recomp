@@ -46,11 +46,13 @@ void Initialize() {
     if (rex::cvar::GetFlagSource(Spec(Key::GuestGpuLag).name) == Source::kDefault) set(Key::GuestGpuLag, "4");
   }
 #ifdef _WIN32
-  constexpr bool windows = true;
+  constexpr auto platform = Platform::Windows;
+#elif defined(GTAV_DESKTOP_WORKSHOP)
+  constexpr auto platform = Platform::Desktop;
 #else
-  constexpr bool windows = false;
+  constexpr auto platform = Platform::Mobile;
 #endif
-  player.emplace(path, legacy, std::getenv("GTAV_IGNORE_SETTINGS") != nullptr, windows, forced, get, set);
+  player.emplace(path, legacy, std::getenv("GTAV_IGNORE_SETTINGS") != nullptr, platform, forced, get, set);
   player->Load();
   REXLOG_INFO("[graphics] preferences: {}{}", PathText(path), player->Ignored() ? " (disabled for this run)" : "");
   if (player->ReadFailed()) REXLOG_WARN("[graphics] could not read preferences; won't overwrite them");

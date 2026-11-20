@@ -14,6 +14,10 @@ namespace gtav::native {
 // True when the native renderer is enabled (any mode other than off).
 bool Active();
 
+// Starts reading the existing Vulkan cache while the guest starts. Call before launching
+// the guest module, not from a replay thread. No eager read with lean memory or native off.
+void PrefetchPipelineCache();
+
 struct FramePacket;
 
 // Hands a finished guest frame to the render thread (backpressure, never drops for speed).

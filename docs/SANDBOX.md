@@ -55,20 +55,26 @@ or traffic. Progress relies on client-reported positions, not anticheat.
 
 ## Hosting for friends
 
-1. Everyone needs their own verified TU27 installation and a compatible Workshop build (protocol v2;
-   it won't connect to earlier Workshop builds). Choose
-   **Private multiplayer** at launch. The host opens **F6 → Session**, enters a nickname, chooses a
-   **TCP** port (default **30127**), and presses **Host here**. Leave **This PC only** unchecked for LAN
-   play. The listener shows the bound port and a random 32-character invite code.
-2. On the same network, give friends the host’s **LAN IPv4**, TCP port and code. For another network,
-   a trusted private VPN is recommended. If you choose direct Internet play, you must allow the
-   chosen TCP port through the host firewall and forward it to that PC on your router. Share the
-   reachable IPv4 with your friends. Carrier-grade NAT can prevent direct inbound play. The game
-   does not discover your public IP, configure your router or bypass NAT.
-3. Friends open **F6 → Session**, enter the host IPv4, same port and invite and press **Join friend**.
-   Nicknames use the same characters as course names, up to 20 characters. At most eight players
-   (host included) can be connected. **Stop server** ends the room and revokes its code; **Disconnect**
-   returns a client to its local Workshop. The code changes every time the host starts a room.
+1. Everyone needs their own verified TU27 installation and a compatible Workshop build (protocol v2).
+   Choose **Private multiplayer** at launch. On the host PC, open **F6 → Session**, enter a nickname,
+   choose a **TCP** port (default **30127**), and press **Host here**. Leave **This PC only** unchecked
+   for friends to connect. This is a listen server: the host's game must stay open.
+2. Select the **LAN / VPN address** that your friends can reach and press **Copy invitation**. Send
+   the resulting `IPv4:port code` privately. The list is taken when hosting starts; if you connect to
+   the LAN or VPN afterwards, restart the room and share the new invitation. The list does not
+   test reachability. Allow inbound connections to the chosen TCP port on the host firewall,
+   preferably limited to the trusted LAN/VPN.
+3. Friends open **F6 → Session**, paste the entire invitation into **Server**, and press **Join friend**.
+   Alternatively, enter `IPv4:port` and the 32-character **Invite code** separately. An IPv4 without
+   a port uses 30127. Nicknames use the same characters as course names, up to 20 characters.
+   At most eight players (host included) can connect. **Stop server** ends the room and revokes its
+   code; **Disconnect** returns a client to its local Workshop. The code changes on each room start.
+
+For friends on another network, use a trusted private VPN and share the host's VPN address. Direct
+Internet play requires forwarding an external TCP port on your router to the host's listening port.
+In that case use **Copy code** and share the router's reachable public IPv4 and **external** port
+instead of the listed LAN address. Carrier-grade NAT can prevent direct inbound play. The game does
+not discover your public IP, configure your router, or bypass NAT.
 
 **Use only with people and networks you trust.** The invite prevents accidental joins; it is not
 host authentication or encryption. The code, names, positions and race state travel in plaintext
@@ -102,10 +108,11 @@ ctest --test-dir build-launcher --output-on-failure
 ```
 
 The asset-free `sandbox_loopback` test covers both minigames, old/new layout files, bounds, scene
-selection by distance and pose freshness, and TCP rooms with multiple clients, capacity, refused
-edits, bad invites, disconnect and restart. The `workshop_core` suite tests the authoritative
-core, deferred effects and JSON on a fake game. The Linux launcher fixture checks the startup flag and
-its explicit campaign override. The Windows packaging smoke checks verified ZIP application,
+selection by distance and pose freshness, IPv4/port validation, and TCP rooms with multiple clients,
+copyable invitations, capacity, refused edits, bad/expired invites, disconnect and restart.
+The `workshop_core` suite tests the authoritative core, deferred effects and JSON on a fake game.
+The Linux launcher fixture checks the startup flag and its explicit campaign override. The Windows
+packaging smoke checks verified ZIP application,
 helper handoff, dashboard relaunch and preservation of player data. It separately starts the
 packaged host with a temporary no-game DLL to verify the actual selector and Solo default. Neither
 test boots the retail title.

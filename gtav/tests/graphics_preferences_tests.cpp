@@ -1,4 +1,5 @@
 #include "graphics_fixture.h"
+#include "native/graphics_choices.h"
 
 using namespace graphics_fixture;
 using gfx::SaveState;
@@ -50,7 +51,7 @@ int main() {
   const auto original = Read(primary);
   auto ignored = bench.Open(primary, legacy, {}, true);
   ignored.BeginRun();
-  CHECK(bench[Key::Output] == "720" && !ignored.Edit(Key::Output, "1440"));
+  CHECK(bench[Key::Output] == "-1" && !ignored.Edit(Key::Output, "1440"));
   CHECK(ignored.Edit(Key::Vsync, "true") && bench[Key::Vsync] == "true");
   CHECK(ignored.Save() == SaveState::Ignored && Read(primary) == original);
   // A more recent path is authoritative: fallback only on missing, never on failed read.
@@ -59,7 +60,7 @@ int main() {
   Write(unreadable, long_file);
   Flags error_flags;
   auto broken = error_flags.Open(unreadable, legacy);
-  CHECK(broken.ReadFailed() && broken.LoadedPath().empty() && error_flags[Key::Output] == "720");
+  CHECK(broken.ReadFailed() && broken.LoadedPath().empty() && error_flags[Key::Output] == "-1");
   CHECK(broken.Edit(Key::Vsync, "true") && broken.Save() == SaveState::Failed && Read(unreadable) == long_file);
   // Trigger a replacement failure even for users with administrator privileges.
   auto blocked = dir.root / "write-failure" / "graphics.ini";
@@ -73,9 +74,91 @@ int main() {
   CHECK(after_failure.Open(blocked).Value(Key::FrameLimit) == "60");
   // Files carried across OSes retain valid Windows choices without trying to apply their cvars.
   Flags linux_system;
-  auto other = linux_system.Open(primary, legacy, {}, false, false);
-  CHECK(!other.Available(Key::Fsr1) && !other.Edit(Key::AmdAntiLag, "false") && linux_system[Key::Output] == "720");
+  auto other = linux_system.Open(primary, legacy, {}, false, gfx::Platform::Desktop);
+  CHECK(!other.Available(Key::Fsr1) && !other.Edit(Key::AmdAntiLag, "false") && linux_system[Key::Output] == "-1");
   CHECK(other.Edit(Key::Vsync, "true") && other.Save() == SaveState::Saved);
   CHECK(Read(primary).find("gtav_native_amd_anti_lag=true\n") != std::string::npos);
-  std::puts("Graphics preferences: legacy, live vs restart, overrides, Unicode, ignore and atomic retry passed");
+  const auto presets_file = dir.root / "presets.ini";
+  constexpr auto& standard = gfx::kPresets[0];
+  constexpr auto& ultra = gfx::kPresets[1];
+  constexpr auto& potato = gfx::kPresets[2];
+  Flags preset_flags;
+  auto presets = preset_flags.Open(presets_file);
+  CHECK(gfx::PresetIndex(presets) == 0);
+  CHECK(gfx::CanonicalValue(Key::SceneScale, "1.500000") == "1.5");
+  CHECK(gfx::CanonicalValue(Key::SceneScale, "1.501").empty());
+  CHECK(gfx::CanonicalValue(Key::Output, "540") == "540");
+  CHECK(gfx::ApplyPreset(presets, ultra).edited && presets.Save() == SaveState::Saved);
+  CHECK(gfx::PresetIndex(presets) == 1 && preset_flags[Key::SceneScale] == "1.5");
+  CHECK(preset_flags[Key::MaterialFiltering] == "true" && !presets.PendingRestart());
+  CHECK(presets.Edit(Key::Output, "1440") && presets.Edit(Key::FrameLimit, "60"));
+  presets.BeginRun();
+  CHECK(gfx::ApplyPreset(presets, potato).edited && presets.Save() == SaveState::Saved);
+  CHECK(gfx::PresetIndex(presets) == 2 && presets.PendingRestart());
+  CHECK(preset_flags[Key::LowMemory] == "false" && preset_flags[Key::MaterialFiltering] == "true");
+  CHECK(preset_flags[Key::SceneScale] == "1.5" && presets.Value(Key::SceneScale) == "0.5");
+  CHECK(presets.Value(Key::FrameLimit) == "60" && presets.Value(Key::Output) == "1440");
+  Flags potato_boot;
+  auto potato_reloaded = potato_boot.Open(presets_file);
+  potato_reloaded.BeginRun();
+  CHECK(potato_boot[Key::LowMemory] == "true" && potato_boot[Key::MaterialFiltering] == "false");
+  CHECK(gfx::ApplyPreset(potato_reloaded, standard).edited && potato_reloaded.Save() == SaveState::Saved);
+  Flags standard_boot;
+  CHECK(gfx::PresetIndex(standard_boot.Open(presets_file)) == 0);
+  CHECK(standard_boot[Key::LowMemory] == "false" && standard_boot[Key::MaterialFiltering] == "false");
+  // A force-locked scene value doesn't get overwritten on disk or mislabelled as Ultra.
+  gfx::Locks scale_lock{};
+  scale_lock[Index(Key::SceneScale)] = true;
+  Flags cli;
+  cli[Key::SceneScale] = "0.75";
+  auto locked = cli.Open(presets_file, {}, scale_lock);
+  CHECK(gfx::ApplyPreset(locked, ultra).edited && locked.Save() == SaveState::Saved);
+  CHECK(cli[Key::SceneScale] == "0.75" && gfx::PresetIndex(locked) == std::size(gfx::kPresets));
+  CHECK(Read(presets_file).find("gtav_native_render_scale=1\n") != std::string::npos);
+  const auto saved_presets = Read(presets_file);
+  Flags mobile, benchmark, linux_flags;
+  auto phone = mobile.Open(presets_file, {}, {}, false, gfx::Platform::Mobile);
+  CHECK(!phone.Available(Key::SceneScale) && !phone.Available(Key::LowMemory));
+  CHECK(!gfx::ApplyPreset(phone, potato).edited && phone.Save() == SaveState::Unchanged);
+  auto headless = benchmark.Open(presets_file, {}, {}, true);
+  CHECK(gfx::ApplyPreset(headless, potato).edited && headless.Save() == SaveState::Ignored);
+  CHECK(benchmark[Key::LowMemory] == "true" && Read(presets_file) == saved_presets);
+  headless.BeginRun();
+  CHECK(!gfx::ApplyPreset(headless, ultra).edited && benchmark[Key::LowMemory] == "true");
+  auto desktop = linux_flags.Open(presets_file, {}, {}, false, gfx::Platform::Desktop);
+  CHECK(gfx::ApplyPreset(desktop, potato).edited && gfx::PresetIndex(desktop) == 2);
+  CHECK(!desktop.Available(Key::Output) && linux_flags[Key::LowMemory] == "true" && linux_flags[Key::SceneScale] == "0.5");
+  CHECK(Read(presets_file) == saved_presets);
+
+  const auto realism_file = dir.root / "realism.ini";
+  Flags realism_flags;
+  auto realism = realism_flags.Open(realism_file);
+  realism.BeginRun();
+  CHECK(realism.Value(Key::ContactRays) == "0" && realism.Value(Key::MaterialAnisotropy) == "0");
+  CHECK(!realism.Edit(Key::ContactRays, "4") && !realism.Edit(Key::ContactRays, "low"));
+  CHECK(!realism.Edit(Key::ContactStrength, "101") && !realism.Edit(Key::ContactStrength, "50%"));
+  CHECK(!realism.Edit(Key::MaterialAnisotropy, "3") && !realism.Edit(Key::MaterialAnisotropy, "-1"));
+  CHECK(realism.Edit(Key::ContactRays, "2") && realism.Edit(Key::ContactStrength, "75"));
+  CHECK(realism_flags[Key::ContactRays] == "2" && realism_flags[Key::ContactStrength] == "75" && !realism.PendingRestart());
+  CHECK(realism.Edit(Key::MaterialAnisotropy, "16") && realism.Pending(Key::MaterialAnisotropy));
+  CHECK(realism_flags[Key::MaterialAnisotropy] == "0" && realism.Save() == SaveState::Saved);
+  Flags realism_boot;
+  auto graphics = realism_boot.Open(realism_file, {}, {}, false, gfx::Platform::Desktop);
+  CHECK(realism_boot[Key::MaterialAnisotropy] == "16" && realism_boot[Key::ContactRays] == "2");
+  for (const auto& preset : gfx::kPresets) {
+    CHECK(gfx::ApplyPreset(graphics, preset).edited);
+    CHECK(graphics.Value(Key::MaterialAnisotropy) == "16" && graphics.Value(Key::ContactRays) == "2" &&
+          graphics.Value(Key::ContactStrength) == "75");
+  }
+  gfx::Locks contact_lock{};
+  contact_lock[Index(Key::ContactRays)] = true;
+  Flags off;
+  auto cli_off = off.Open(realism_file, {}, contact_lock);
+  CHECK(cli_off.Value(Key::ContactRays) == "0" && !cli_off.Edit(Key::ContactRays, "3"));
+  CHECK(cli_off.Edit(Key::ContactStrength, "0") && cli_off.Save() == SaveState::Saved);
+  CHECK(Read(realism_file).find("gtav_native_contact_rays=2\n") != std::string::npos);
+  auto no_mobile = mobile.Open(realism_file, {}, {}, false, gfx::Platform::Mobile);
+  CHECK(!no_mobile.Available(Key::ContactRays) && !no_mobile.Available(Key::MaterialAnisotropy));
+  CHECK(mobile[Key::ContactRays] == "0" && mobile[Key::MaterialAnisotropy] == "0");
+  std::puts("Graphics preferences: legacy, live vs restart, realism overrides, Unicode, ignore and atomic retry passed");
 }

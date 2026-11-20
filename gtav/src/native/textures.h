@@ -5,9 +5,12 @@
 #include <plume_render_interface.h>
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace gtav::native {
+
+inline constexpr uint32_t kGuestTextureAddressSpace = 512u << 20;
 
 struct DecodedTexture {
   struct Mip {
@@ -27,14 +30,15 @@ struct DecodedTexture {
 // Decodes the 2D texture a fetch constant describes (mip chain untiled, endian-swapped,
 // unsupported formats converted), or the base level of a 3D texture. Returns false for anything
 // not handled yet (cube, stacked, unknown formats); the caller binds a null texture instead.
-bool DecodeGuestTexture(const uint32_t words[6], DecodedTexture* out);
+// `physical` is the guest's physical memory window, also usable with synthetic memory in tests.
+bool DecodeGuestTexture(const uint32_t words[6], std::span<const uint8_t> physical, DecodedTexture* out);
 
 // Hash of the texture's raw guest bytes (base + mips): cheap change detection without decoding.
 // `sampled` hashes ~5 KB spread over the texture instead (a per-frame check of large textures).
-uint64_t HashGuestTexture(const uint32_t words[6], bool sampled = false);
+uint64_t HashGuestTexture(const uint32_t words[6], std::span<const uint8_t> physical, bool sampled = false);
 
 // The guest physical byte ranges a texture reads: base level {address, size}, mips {address, size}
-// (size 0 without mips). False if the fetch constant is not a texture.
+// (size 0 without mips). False if the layout is unsupported or outside the physical address space.
 bool GuestTextureRanges(const uint32_t words[6], uint32_t ranges[4]);
 
 // The guest physical base address of a texture fetch constant (0 if not a texture).

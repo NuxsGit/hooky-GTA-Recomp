@@ -38,20 +38,30 @@ int main() {
     labels.clear(); rects.clear();
     ImGui::NewFrame();
     ImGui::SetNextWindowPos({40.f, 40.f});
-    ImGui::SetNextWindowSize({680.f, 550.f});
+    ImGui::SetNextWindowSize({680.f, std::min(550.f, io.DisplaySize.y - 60.f)});
     CHECK(ImGui::Begin("Graphics fixture"));
     if (gfx::DrawGraphicsMenu(prefs, {1920, 1080}, 60, 16.7, info, 1)) CHECK(prefs.Save() == gfx::SaveState::Saved);
     ImGui::End();
     ImGui::Render();
     CHECK(ImGui::GetDrawData()->TotalVtxCount > 200);
   };
-  auto click = [&](const char* name) {
-    CHECK(labels.contains(name) && rects.contains(labels[name]));
-    const auto pt = rects.at(labels.at(name)).GetCenter();
+  auto click_at = [&](ImVec2 pt) {
     io.AddMousePosEvent(pt.x, pt.y); frame();
     io.AddMouseButtonEvent(0, true); frame();
     io.AddMouseButtonEvent(0, false); frame();
     frame();
+  };
+  auto click = [&](const char* name) {
+    CHECK(labels.contains(name) && rects.contains(labels[name]));
+    click_at(rects.at(labels.at(name)).GetCenter());
+  };
+  auto combo = [&](Key key, const char* name, const char* choice) {
+    // BeginCombo registers its rectangle but doesn't send a label to the test engine.
+    const int id = int(key);
+    const auto seed = ImHashData(&id, sizeof(id), labels.at("Realism"));
+    const auto r = rects.at(ImHashStr(name, 0, seed));
+    click_at({r.Min.x + 50, r.GetCenter().y});
+    click(choice);
   };
   frame(); frame();
   click("FPS counter");
@@ -60,13 +70,51 @@ int main() {
   click("Balanced");
   CHECK(flags[Key::Fsr1] == "true" && flags[Key::SceneScale] == "1.000000" && prefs.PendingRestart());
   CHECK(fresh.Open(path).Value(Key::SceneScale) == "0.875");
-  click("Best image");
+  click("Ultra");
+  CHECK(prefs.PendingRestart() && prefs.Value(Key::SceneScale) == "1.5");
+  CHECK(prefs.Value(Key::MaterialFiltering) == "true" && flags[Key::MaterialFiltering] == "false");
+  click("Potato");
+  CHECK(prefs.PendingRestart() && prefs.Value(Key::LowMemory) == "true" && flags[Key::LowMemory] == "false");
+  CHECK(fresh.Open(path).Value(Key::SceneScale) == "0.5" && fresh[Key::MaterialFiltering] == "false");
+  click("Standard");
   CHECK(!prefs.PendingRestart() && flags[Key::Fsr1] == "false" && flags[Key::FrameLimit] == "30");
+  CHECK(fresh.Open(path).Value(Key::LowMemory) == "false");
   click("Exact texture and buffer checks");
   CHECK(flags[Key::ExactCache] == "true" && fresh.Open(path).Value(Key::ExactCache) == "true");
   click("Latency & support");
-  io.DisplaySize = {800, 580}; frame();
+  io.DisplaySize = {960, 540}; frame();
   CHECK(labels.contains("Display") && labels.contains("Performance") && labels.contains("Latency & support"));
+
+  // The read-only tab fits Potato's Auto window. Render both an unavailable snapshot and a
+  // real one, including a soft-target overage; neither should touch the preferences.
+  const auto saved = Read(path);
+  click("Memory");
+  const int waiting = ImGui::GetDrawData()->TotalVtxCount;
+  info.lean_memory = true;
+  info.memory = GraphicsMemoryStats{{200 * kMiB, 192 * kMiB}, {54 * kMiB, 64 * kMiB}, 16 * kMiB, 48 * kMiB};
+  frame();
+  CHECK(ImGui::GetDrawData()->TotalVtxCount > waiting && Read(path) == saved && !prefs.PendingRestart());
+  info.lean_memory = false;
+  info.memory->converted_buffers.target = 0;
+  frame();
+  CHECK(ImGui::GetDrawData()->TotalVtxCount > waiting && Read(path) == saved);
+  click("Realism");
+  info.realism = {8, 16, ContactRayStatus::NoAlignedDepth};
+  frame();
+  combo(Key::MaterialAnisotropy, "Material filtering (restart)", "16x minimum");
+  CHECK(flags[Key::MaterialAnisotropy] == "0" && prefs.Pending(Key::MaterialAnisotropy));
+  CHECK(fresh.Open(path).Value(Key::MaterialAnisotropy) == "16");
+  combo(Key::ContactRays, "Contact rays", "Medium / 20 steps");
+  CHECK(flags[Key::ContactRays] == "2" && !prefs.Pending(Key::ContactRays));
+  const auto strength = rects.at(labels.at("Contact strength"));
+  click_at({strength.Min.x + 206, strength.GetCenter().y});
+  CHECK(std::stoi(flags[Key::ContactStrength]) > 50 && flags[Key::ContactStrength] == fresh.Open(path).Value(Key::ContactStrength));
+  for (auto status : {ContactRayStatus::Unavailable, ContactRayStatus::Recorded}) {
+    info.realism.contact_rays = status;
+    frame();
+  }
+  combo(Key::ContactRays, "Contact rays", "Off");
+  CHECK(flags[Key::ContactRays] == "0" && fresh.Open(path).Value(Key::ContactRays) == "0");
   ImGui::DestroyContext();
-  std::puts("F1: real ImGui tab changes, saved live options and reversible restart preset passed");
+  std::puts("F1: saved live options, realism controls, restart presets and read-only memory counters passed");
 }

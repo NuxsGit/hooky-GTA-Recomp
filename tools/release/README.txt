@@ -23,7 +23,7 @@ What you need
   with disc002\default.xexp and disc002\update.rpf.
 - Windows 10/11 x64, a CPU with AVX2 (Intel Haswell / AMD Zen or newer), a GPU with current Vulkan drivers.
 - A keyboard and mouse, or a gamepad recognized by SDL.
-- About 25 GB free on this drive during setup (about 17 GB once installed), 8 GB RAM or more.
+- About 25 GB free on this drive during setup (about 17 GB once installed), 8 GB RAM or more recommended.
 
 First run
 ---------
@@ -48,10 +48,11 @@ Private session (Sandbox multiplayer). Campaign co-op is visible but unavailable
 Arrow keys or D-pad select, Enter/A plays and Esc/B closes. Sandbox uses a separate profile: data\user\sandbox\profile. On the first sandbox
 run, complete the original game’s first-run screens and prologue before using free-roam tools.
 Press F6 in free roam: build and save layouts with props, set up checkpoint races or hunts,
-and spawn a test vehicle. In Private multiplayer, Host here opens a TCP listener (default 30127);
-friends with the same Workshop build join with your reachable IPv4, port and code. Nearby friends
-appear as ghost pedestrians or test vehicles. Use a trusted LAN/VPN. No encryption, automatic
-port forwarding, GTA Online, terrain editing or synced world physics. Details: docs/SANDBOX.md.
+and spawn a test vehicle. In Private multiplayer, open F6 > Session > Host here (TCP port 30127
+by default). Select a reachable LAN/VPN address and use Copy invitation. Friends with a compatible
+Workshop build paste the invitation in Server and press Join friend. Keep the host game open.
+Nearby friends appear as ghost pedestrians or test vehicles. Use a trusted LAN/VPN. No encryption,
+automatic port forwarding, GTA Online, terrain editing or synced world physics. Details: docs/SANDBOX.md.
 Skip the selector for story mode with: gtav_launcher.exe --play -- --gtav_mode=campaign
 
 Recompile and update
@@ -91,9 +92,18 @@ Default bindings (physical positions):
 - 1 or Mouse4 = LB; 3 or Mouse5 = RB; arrows = D-pad; Tab = Back; Esc = Start.
 F1 opens/closes the native settings overlay. Esc closes it when open. On an SDL gamepad use
 RB + Back to toggle it, D-pad and A to navigate, and B to close.
-F1 > Display (Windows native renderer): choose 1080p, 1440p, 4K or your desktop resolution.
-Restart after changing Output or Scene scale. Output size is not native scene rendering size.
+Before playing: Graphismes > Préréglage graphique. Ultra improves scene and water sampling;
+Potato lowers scene resolution and memory use. Standard restores native detail. In game:
+F1 > Performance; quit and restart after choosing a preset there. Potato with Auto output opens
+at 540p. It still requires a compatible Vulkan driver (integrated GPUs can qualify); 4 GB RAM /
+1 GB shared graphics is an experimental target. F1 > Memory shows tracked caches and upload
+buffers, not total RAM/VRAM. F1 > Display also offers manual output sizes. Restart after changing
+Output or Scene scale. Output size is not native scene rendering size.
 AMD FSR 1 spatial upscaling can be toggled live, or left on Linear for less GPU work.
+F1 > Realism: adjustable material filtering up to 16x (restart) and experimental screen-space
+contact rays (quality and strength, live). Contact rays are off by default. When the renderer
+cannot identify matching scene depth and shadow inputs the original shadows are kept.
+This is not hardware ray tracing and does not replace textures or models.
 To report a rendering problem without dumping textures, start from PowerShell with:
   .\gtav_launcher.exe --play -- --gtav_native_trace_only=true
 Press F9 when the problem appears; share logs\native_trace\frame_*.txt and the scene/settings.

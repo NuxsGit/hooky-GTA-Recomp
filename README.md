@@ -78,7 +78,8 @@ from them.
   | GPU | Vulkan driver | Vulkan driver + loader | built in (Metal) |
   | Extra | none (the Visual C++ runtime is included) | a desktop session (X11 or Wayland) | none |
 
-  8 GB RAM or more. About 25 GB free during setup, about 17 GB afterwards. See [Controls](#controls)
+  8 GB RAM or more recommended. Potato reduces the game's memory use, but 4 GB RAM with shared
+  graphics memory is not a verified minimum. About 25 GB free during setup, about 17 GB afterwards. See [Controls](#controls)
   for gamepads and the default keyboard/mouse bindings.
 - **For the phones** (optional): see [iPhone](#iphone) and [Android](#android).
 
@@ -165,9 +166,9 @@ Enter/A confirms and Esc/B closes. The two sandbox modes have a separate local p
 **F6** in free roam to save checkpoint layouts, run minigames, or host/join a private session.
 Try the [Creative Build overlay (F8) and AdminOS phone (P / Up)](docs/WORKSHOP_CREATIVE.md)
 for local construction and Solo practice moderation.
-In a private room (IPv4, TCP port, invite code), friends see nearby ghost actors. This is not
-GTA Online or full world synchronization.
-See [Workshop setup, limitations, and testing](docs/SANDBOX.md).
+In a private room, the host can copy an `IPv4:port code` invitation from **F6 → Session**.
+Friends paste it into **Server** to join and see nearby ghost actors. This is not GTA Online or
+full world synchronization. See [Workshop setup, limitations, and testing](docs/SANDBOX.md).
 
 ## Controls
 
@@ -202,11 +203,19 @@ AZERTY. The mouse steers the right stick, not the PC version's native camera.
 it when open; otherwise Esc pauses the game. On an SDL gamepad press **RB + Back** together;
 use the D-pad and A to navigate and B to close. Touch controls keep their Menu button.
 On desktop, the illustrated mode selector also has **Graphismes / Graphics** for choosing settings
-before launching. Both screens save in `data/config/graphics.ini` when launched from the installer.
+before launching. **Ultra** increases sampling for the scene and water surface; **Potato** reduces
+scene resolution, caches and buffering. It releases upload memory that stays idle after loading.
+Choose **Standard** to restore the preset defaults. **F1 → Memory** shows cache and upload sizes,
+not total RAM or VRAM. Both screens save in `data/config/graphics.ini` when launched from the installer.
+**F1 → Realism** adds a material-filtering override (up to 16×, restart) and experimental
+screen-space contact rays (three quality levels and live intensity). Contact rays are off by
+default and only run with compatible scene inputs. Presets don't change these overrides.
+This is not hardware ray tracing or a replacement for the game's textures or models.
+See [realism options and testing](docs/GRAPHICS_REALISM.md).
 On Windows, **Display** shows actual output, VSync, scene scale and optional spatial AMD FSR 1 with
 or without sharpening. **Latency & support** shows a short render queue option and experimental
 AMD Anti-Lag on supported Vulkan drivers. DLSS, XeSS, temporal FSR and frame generation are not
-integrated. See [Windows graphics settings](docs/WINDOWS_GRAPHICS.md).
+integrated. See [graphics presets and Windows settings](docs/WINDOWS_GRAPHICS.md).
 
 **Desktop debug overlay (native renderer).** Press **F2** (**Fn + F2** if required by your keyboard)
 for live logs and the experimental **Story tools** tab. In Campaign free roam, explicitly enable the

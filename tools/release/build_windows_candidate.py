@@ -196,7 +196,8 @@ def main():
 
     run("cmake", "-S", "gtav/tests", "-B", "build/graphics-tests", "-G", "Ninja",
         "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_CXX_COMPILER={llvm_bin / 'clang++.exe'}",
-        f"-DGTAV_IMGUI_SOURCE={sdk / 'thirdparty/imgui'}", "-DGTAV_TEST_PLAY_HUB=ON",
+        f"-DGTAV_IMGUI_SOURCE={sdk / 'thirdparty/imgui'}", f"-DGTAV_FMT_SOURCE={sdk / 'thirdparty/fmt'}",
+        f"-DGTAV_TEXTURE_SDK_SOURCE={sdk}", "-DGTAV_TEST_PLAY_HUB=ON",
         f"-DCMAKE_PREFIX_PATH={install}")
     run("cmake", "--build", "build/graphics-tests", "--parallel")
     run("ctest", "--test-dir", "build/graphics-tests", "--output-on-failure")

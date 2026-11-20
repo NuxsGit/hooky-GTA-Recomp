@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <optional>
@@ -52,6 +53,30 @@ std::atomic<bool> g_reset_phone{false};
 ImGuiContext* g_context = nullptr;
 bool g_font_uploaded = false;
 float g_scale = 1.0f;
+
+// Coalesce synchronous preference writes during slider drags and rapid edits.
+// Live cvar edits are applied immediately; disk writes wait for idle or close.
+std::mutex g_save_mutex;
+std::chrono::steady_clock::time_point g_last_edit{};
+bool g_pending_save = false;
+
+void NotePendingSave() {
+  std::lock_guard lock(g_save_mutex);
+  g_last_edit = std::chrono::steady_clock::now();
+  g_pending_save = true;
+}
+
+void FlushPendingSaveImpl(bool force) {
+  std::lock_guard lock(g_save_mutex);
+  if (!g_pending_save) return;
+  auto now = std::chrono::steady_clock::now();
+  if (!force && now - g_last_edit < std::chrono::milliseconds(350)) return;
+  // Settings runtime is owned by the render thread after BeginRun, but Commit
+  // is also safe to call from the window thread for force flushes: the file
+  // is the same and edits are already in the shared Preferences object.
+  settings::Commit();
+  g_pending_save = false;
+}
 
 void EnsureContext(uint32_t h) {
   if (g_context) return;
@@ -145,10 +170,21 @@ void BuildSettings(uint32_t fps, double frame_ms, const PresentationInfo& info) 
   if (ImGui::Begin("Graphics settings (F1)", &open, ImGuiWindowFlags_NoCollapse)) {
     auto& prefs = settings::Player();
     if (settings::DrawGraphicsMenu(prefs, {uint32_t(display.x), uint32_t(display.y)}, fps, frame_ms, info, g_scale))
-      settings::Commit();
+      NotePendingSave();
+    // Flush once the user idles or stops dragging. While a slider is active we
+    // keep the disk quiet and only update the live cvar.
+    const bool dragging = ImGui::IsAnyItemActive();
+    if (!dragging) FlushPendingSaveImpl(false);
   }
   ImGui::End();
-  if (!open && g_panel == Panel::Settings) Close();
+  if (!open && g_panel == Panel::Settings) {
+    FlushPendingSaveImpl(true);
+    Close();
+  } else if (open) {
+    // Also flush on panel switch without closing the window: the user moved
+    // to Debug/Workshop; the F1 render thread may return before next BuildSettings.
+    FlushPendingSaveImpl(false);
+  }
 }
 
 void BuildDebug(uint32_t fps, double frame_ms) {
@@ -177,6 +213,9 @@ void BuildWorkshop() {
 #endif
 
 void SwitchPanel(Panel wanted, std::optional<Panel> only_if = {}) {
+  // Flush any pending F1 save before the panel changes or closes: the
+  // F1 render thread may return before building widgets (early-out).
+  if (wanted == Panel::Closed || g_panel.load() == Panel::Settings) FlushPendingSaveImpl(true);
   std::lock_guard lock(g_input_mutex);
   if (only_if && g_panel.load() != *only_if) return;
   const auto next = debug::TogglePanel(g_panel.load(), wanted);
@@ -246,7 +285,10 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const P
 #else
   const bool workshop_hud = false;
 #endif
-  if (!IsOpen() && !touch_overlay && !workshop_hud) return nullptr;
+  if (!IsOpen() && !touch_overlay && !workshop_hud) {
+    FlushPendingSaveImpl(false);
+    return nullptr;
+  }
   EnsureContext(h);
   ImGuiContext* previous = ImGui::GetCurrentContext();
   ImGui::SetCurrentContext(g_context);
@@ -339,5 +381,7 @@ void SetFontTexture(uint32_t descriptor) {
   g_font_uploaded = true;
   if (previous && previous != g_context) ImGui::SetCurrentContext(previous);
 }
+
+void FlushPendingSave(bool force) { FlushPendingSaveImpl(force); }
 
 }  // namespace gtav::native::menu

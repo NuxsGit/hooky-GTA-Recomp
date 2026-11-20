@@ -36,11 +36,7 @@ constexpr RGB kWhite{250, 243, 232}, kMuted{180, 178, 191}, kSoft{130, 135, 152}
               kInk{21, 20, 27}, kPanel{26, 27, 39}, kLine{57, 55, 72}, kBlack{13, 14, 22};
 constexpr RGB kAccents[] = {kOrange, kMint, kSoft, kLavender};
 
-struct Text {
-  const char* en;
-  const char* fr;
-  const char* In(bool french) const { return french ? fr : en; }
-};
+using gfx::Text;
 struct Tile {
   SDL_Rect rect;
   Text title, label, state, description;
@@ -241,10 +237,17 @@ class Hub {
       return false;
     }
     if (graphics_) {
-      for (size_t i = 0; i < graphics_rows_.size(); ++i) {
+      for (size_t i = 0; i < GraphicsCount(); ++i) {
         const auto row = GraphicsRect(i);
         if (!SDL_PointInRect(&point, &row)) continue;
         graphics_focus_ = i;
+        if (HasPresets() && i == 0) {
+          for (size_t n = 0; n < std::size(gfx::kPresets); ++n) {
+            const auto button = PresetRect(n);
+            if (SDL_PointInRect(&point, &button)) { SelectPreset(n); break; }
+          }
+          return false;
+        }
         if (point.x >= row.x + row.w - 42) ChangeValue(1);
         else if (point.x >= row.x + row.w - 372 && point.x < row.x + row.w - 330) ChangeValue(-1);
         return false;
@@ -264,7 +267,7 @@ class Hub {
     if (SDL_PointInRect(&point, &kAction)) return 2;
     for (int i = 0; i < 3; ++i) if (SDL_PointInRect(&point, &kTabs[i])) return 3 + i;
     if (graphics_) {
-      for (size_t i = 0; i < graphics_rows_.size(); ++i) {
+      for (size_t i = 0; i < GraphicsCount(); ++i) {
         const auto row = GraphicsRect(i);
         if (SDL_PointInRect(&point, &row)) return 16 + int(i);
       }
@@ -366,10 +369,22 @@ class Hub {
     display_.Label(out, L(label), rect.x + 16, rect.y + 37, 33, kWhite);
   }
 
-  static SDL_Rect GraphicsRect(size_t i) { return {60, 284 + int(i) * 62, 878, 57}; }
+  bool HasPresets() const { return workshop_ && prefs_.Available(gfx::Key::LowMemory); }
+  size_t GraphicsCount() const { return graphics_rows_.size() + HasPresets(); }
+  SDL_Rect GraphicsRect(size_t i) const {
+    const int pitch = HasPresets() ? 54 : 62;
+    return {60, 284 + int(i) * pitch, 878, pitch - 5};
+  }
+
+  SDL_Rect PresetRect(size_t i) const {
+    const auto row = GraphicsRect(0);
+    constexpr int kButtonWidth = 110, kStep = 116;
+    return {row.x + row.w - int(std::size(gfx::kPresets)) * kStep + int(i) * kStep, row.y + 6,
+            kButtonWidth, row.h - 12};
+  }
 
   void AdvanceGraphics(int direction) {
-    const int count = int(graphics_rows_.size());
+    const int count = int(GraphicsCount());
     graphics_focus_ = size_t((int(graphics_focus_) + direction + count) % count);
   }
 
@@ -377,36 +392,69 @@ class Hub {
     if (prefs_.Save() == gfx::SaveState::Failed) SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Could not save graphics preferences");
   }
 
+  static size_t CycleChoice(size_t current, int count, int direction) {
+    if (current >= size_t(count)) return direction > 0 ? 0 : count - 1;
+    return (int(current) + direction + count) % count;
+  }
+
+  void SelectPreset(size_t index) {
+    if (!gfx::CanApplyPreset(prefs_)) return;
+    preset_cursor_ = index;
+    const auto result = gfx::ApplyPreset(prefs_, gfx::kPresets[index]);
+    rejected_ = result.rejected != nullptr;
+    if (result.edited) Save();
+  }
+
   void ChangeValue(int direction) {
-    const auto& row = *graphics_rows_[graphics_focus_];
+    if (HasPresets() && graphics_focus_ == 0) {
+      const auto index = preset_cursor_.value_or(gfx::PresetIndex(prefs_));
+      SelectPreset(CycleChoice(index, int(std::size(gfx::kPresets)), direction));
+      return;
+    }
+    const auto& row = *graphics_rows_[graphics_focus_ - HasPresets()];
     if (!prefs_.CanEdit(row.key)) return;
-    const auto index = gfx::ChoiceIndex(row, prefs_.Value(row.key));
-    const int count = int(row.choices.size());
-    const int new_index = index == row.choices.size() ? (direction > 0 ? 0 : count - 1) :
-        (int(index) + direction + count) % count;
-    rejected_ = !prefs_.Edit(row.key, row.choices[new_index].value);
-    if (!rejected_) Save();
+    const auto index = CycleChoice(gfx::ChoiceIndex(row, prefs_.Value(row.key)), int(row.choices.size()), direction);
+    rejected_ = !prefs_.Edit(row.key, row.choices[index].value);
+    if (!rejected_) { preset_cursor_.reset(); Save(); }
+  }
+
+  void DrawGraphicsRow(SDL_Surface* out, SDL_Point pointer, size_t i, Text name, const char* value, bool locked) {
+    const auto rect = GraphicsRect(i);
+    const bool selected = graphics_focus_ == i;
+    const bool hover = SDL_PointInRect(&pointer, &rect);
+    const RGB edge = selected ? kLavender : hover ? kMuted : kLine;
+    Fill(out, rect, selected || hover ? kPanel : kBlack);
+    Border(out, rect, edge, 1);
+    if (selected) Fill(out, {rect.x, rect.y, 4, rect.h}, kLavender);
+    body_.Label(out, L(name), rect.x + 20, rect.y + (rect.h - 27) / 2, 27, kWhite);
+    if (locked) body_.Label(out, L({"LOCKED", "FORCÉ"}), rect.x + 350, rect.y + (rect.h - 18) / 2, 18, kMuted);
+    Tag(out, {rect.x + rect.w - 372, rect.y + 1, 42, rect.h - 2}, "<", false, locked ? kSoft : selected ? kLavender : kMuted, 24);
+    body_.Center(out, value, {rect.x + rect.w - 330, rect.y, 288, rect.h}, 24, locked ? kMuted : kMint);
+    Tag(out, {rect.x + rect.w - 42, rect.y + 1, 41, rect.h - 2}, ">", false, locked ? kSoft : selected ? kLavender : kMuted, 24);
   }
 
   void DrawGraphics(SDL_Surface* out, SDL_Point pointer) {
+    const auto preset = HasPresets() ? gfx::PresetIndex(prefs_) : std::size(gfx::kPresets);
+    if (HasPresets()) {
+      const auto row = GraphicsRect(0);
+      const bool selected = graphics_focus_ == 0;
+      Fill(out, row, selected ? kPanel : kBlack);
+      Border(out, row, selected ? kLavender : kLine, 1);
+      if (selected) Fill(out, {row.x, row.y, 4, row.h}, kLavender);
+      body_.Label(out, L({"Graphics preset", "Préréglage graphique"}), row.x + 20, row.y + 12, 26, kWhite);
+      for (size_t i = 0; i < std::size(gfx::kPresets); ++i) {
+        const auto button = PresetRect(i);
+        const bool hover = SDL_PointInRect(&pointer, &button);
+        Tag(out, button, L(gfx::kPresets[i].title), i == preset,
+            !gfx::CanApplyPreset(prefs_) ? kSoft : hover ? kWhite : i == preset ? kMint : kLavender, 20);
+      }
+    }
     for (size_t i = 0; i < graphics_rows_.size(); ++i) {
       const auto& row = *graphics_rows_[i];
-      const auto rect = GraphicsRect(i);
-      const bool selected = graphics_focus_ == i;
-      const bool locked = !prefs_.CanEdit(row.key);
-      const bool hover = SDL_PointInRect(&pointer, &rect);
-      const RGB edge = selected ? kLavender : hover ? kMuted : kLine;
-      Fill(out, rect, selected || hover ? kPanel : kBlack);
-      Border(out, rect, edge, 1);
-      if (selected) Fill(out, {rect.x, rect.y, 4, rect.h}, kLavender);
-      body_.Label(out, row.title.In(french_), rect.x + 20, rect.y + 16, 27, kWhite);
       const auto value = prefs_.Value(row.key);
       const auto index = gfx::ChoiceIndex(row, value);
-      const char* title = index < row.choices.size() ? row.choices[index].title.In(french_) : value.c_str();
-      if (locked) body_.Label(out, L({"LOCKED", "FORCÉ"}), rect.x + 350, rect.y + 21, 18, kMuted);
-      Tag(out, {rect.x + rect.w - 372, rect.y + 1, 42, rect.h - 2}, "<", false, locked ? kSoft : selected ? kLavender : kMuted, 24);
-      body_.Center(out, title, {rect.x + rect.w - 330, rect.y, 288, rect.h}, 24, locked ? kMuted : kMint);
-      Tag(out, {rect.x + rect.w - 42, rect.y + 1, 41, rect.h - 2}, ">", false, locked ? kSoft : selected ? kLavender : kMuted, 24);
+      const char* title = index < row.choices.size() ? L(row.choices[index].title) : value.c_str();
+      DrawGraphicsRow(out, pointer, i + HasPresets(), row.title, title, !prefs_.CanEdit(row.key));
     }
     const SDL_Rect panel{960, 284, 420, 429};
     Fill(out, panel, kPanel);
@@ -419,15 +467,17 @@ class Hub {
       body_.Label(out, title.In(french_), 982, y, 26, kWhite);
       body_.Label(out, state.In(french_), 982, y + 30, 21, accent);
     };
-    if (workshop_ && prefs_.Available(gfx::Key::Fsr1)) {
-      feature(405, {"AMD FSR 1", "AMD FSR 1"}, {"Spatial  /  when scaling up", "Spatial  /  en agrandissement"}, kMint);
-      feature(475, {"AMD Anti-Lag", "AMD Anti-Lag"}, {"Vulkan driver check at launch", "Détection du pilote au lancement"}, kOrange);
+    if (HasPresets()) {
+      feature(405, {"Ultra", "Ultra"}, {"Denser scene and water shading", "Rendu de la scène et de l’eau affiné"}, kMint);
+      feature(475, {"Potato", "Potato"}, {"4 GB RAM / 1 GB graphics: unverified", "4 Go RAM / 1 Go vidéo : non validé"}, kOrange);
     } else {
-      feature(405, {"Native Vulkan graphics", "Graphismes Vulkan natifs"}, {"Advanced options on Windows", "Options avancées sous Windows"}, kMuted);
+      feature(405, {"Native Vulkan graphics", "Graphismes Vulkan natifs"}, {"Presets require native replay", "Préréglages réservés au rendu natif"}, kMuted);
       feature(475, {"Output and latency", "Sortie et latence"}, {"See in-game F1 for active values", "Valeurs actives dans F1 en jeu"}, kMuted);
     }
-    feature(545, {"DLSS / XeSS / temporal FSR", "DLSS / XeSS / FSR temporel"}, {"Not integrated", "Non intégrés"}, kMuted);
-    feature(615, {"Frame generation x2-x8", "Génération d’images x2-x8"}, {"Not integrated", "Non intégrée"}, kMuted);
+    feature(545, {"Compatible Vulkan driver", "Pilote Vulkan compatible"},
+            {"Required for every preset", "Requis dans tous les modes"}, kMuted);
+    feature(615, {"DLSS / XeSS / temporal FSR", "DLSS / XeSS / FSR temporel"},
+            {"No frame generation", "Pas de génération d’images"}, kMuted);
     Fill(out, {60, 741, 1320, 1}, kLine);
     const bool retry = prefs_.LastSave() == gfx::SaveState::Failed && !prefs_.ReadFailed();
     const Text status = prefs_.Ignored() ? Text{"BENCHMARK  /  NO SAVE", "BENCHMARK  /  SANS SAUVEGARDE"} :
@@ -437,10 +487,17 @@ class Hub {
         prefs_.LastSave() == gfx::SaveState::Saved ? Text{"SAVED  /  APPLIES ON PLAY", "ENREGISTRÉ  /  APPLIQUÉ AU LANCEMENT"} :
         !workshop_ ? Text{"NATIVE RENDERER OFF", "RENDU NATIF DÉSACTIVÉ"} :
         Text{"AUTO-SAVE  /  SHARED GRAPHICS SETTINGS", "SAUVEGARDE AUTO  /  GRAPHISMES COMMUNS AUX MODES"};
-    const auto& row = *graphics_rows_[graphics_focus_];
+    constexpr Text kLocked{"Locked by the launch arguments or environment.", "Forcé par les arguments de lancement ou l’environnement."};
+    Text help;
+    if (HasPresets() && graphics_focus_ == 0) {
+      help = !gfx::CanApplyPreset(prefs_) ? kLocked : preset < std::size(gfx::kPresets) ? gfx::kPresets[preset].help :
+          Text{"Custom settings. Launch overrides stay locked.", "Réglages personnalisés. Les options forcées restent verrouillées."};
+    } else {
+      const auto& row = *graphics_rows_[graphics_focus_ - HasPresets()];
+      help = prefs_.Forced(row.key) ? kLocked : row.help;
+    }
     body_.Label(out, L(status), 60, 756, 21, (retry || prefs_.ReadFailed() || rejected_) ? kOrange : kMint);
-    body_.Label(out, prefs_.Forced(row.key) ? L({"Locked by the launch arguments or environment.", "Forcé par les arguments de lancement ou l’environnement."}) :
-        row.help.In(french_), 60, 785, 25, kWhite);
+    body_.Label(out, L(help), 60, 785, 25, kWhite);
     Tag(out, kAction, retry ? L({"RETRY SAVE", "RÉESSAYER"}) : L({"<    BACK TO MODES", "<    RETOUR AUX MODES"}),
         true, SDL_PointInRect(&pointer, &kAction) ? kWhite : kLavender, 24);
     Fill(out, {60, 835, 1320, 1}, kLine);
@@ -452,6 +509,7 @@ class Hub {
   gfx::Preferences& prefs_;
   bool graphics_ = false, rejected_ = false;
   size_t graphics_focus_ = 0;
+  std::optional<size_t> preset_cursor_;
   std::vector<const gfx::Row*> graphics_rows_;
   Font body_{kBodyTtf}, display_{kDisplayTtf};
   Surface backdrop_ = MakeSurface(kWidth, kHeight), canvas_ = MakeSurface(kWidth, kHeight);

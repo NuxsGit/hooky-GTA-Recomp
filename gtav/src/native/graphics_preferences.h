@@ -13,14 +13,16 @@ namespace gtav::native::settings {
 
 enum class Key {
   FrameLimit, Vsync, Counter, SunShadows, AsyncPipelines, GuestGpuLag, ExactCache,
-  TextureRecheck, Touch, Output, SceneScale, Fsr1, ShortQueue, AmdAntiLag, FsrSharpen, Count
+  TextureRecheck, Touch, Output, SceneScale, Fsr1, ShortQueue, AmdAntiLag, FsrSharpen,
+  MaterialFiltering, LowMemory, MaterialAnisotropy, ContactRays, ContactStrength, ReduceFog, Count
 };
 
+enum class Platform { Mobile, Desktop, Windows };
 constexpr size_t Index(Key key) { return static_cast<size_t>(key); }
 struct Setting {
   std::string_view name;
   bool restart = false;
-  bool windows_only = false;
+  Platform minimum = Platform::Mobile;
 };
 inline constexpr std::array<Setting, Index(Key::Count)> kSettings{{
     {"gtav_fps_limit"},
@@ -32,12 +34,18 @@ inline constexpr std::array<Setting, Index(Key::Count)> kSettings{{
     {"gtav_native_exact_cache"},
     {"gtav_native_texture_recheck_frames"},
     {"gtav_touch_controls"},
-    {"gtav_native_output", true, true},
-    {"gtav_native_render_scale", true, true},
-    {"gtav_native_fsr1", false, true},
-    {"gtav_native_short_queue", true, true},
-    {"gtav_native_amd_anti_lag", true, true},
-    {"gtav_native_fsr1_sharpen", false, true},
+    {"gtav_native_output", true, Platform::Windows},
+    {"gtav_native_render_scale", true, Platform::Desktop},
+    {"gtav_native_fsr1", false, Platform::Windows},
+    {"gtav_native_short_queue", true, Platform::Windows},
+    {"gtav_native_amd_anti_lag", true, Platform::Windows},
+    {"gtav_native_fsr1_sharpen", false, Platform::Windows},
+    {"gtav_native_material_filtering", true, Platform::Desktop},
+    {"gtav_native_low_memory", true, Platform::Desktop},
+    {"gtav_native_material_anisotropy", true, Platform::Desktop},
+    {"gtav_native_contact_rays", false, Platform::Desktop},
+    {"gtav_native_contact_strength", false, Platform::Desktop},
+    {"gtav_native_reduce_fog", false, Platform::Desktop},
 }};
 constexpr const Setting& Spec(Key key) { return kSettings[Index(key)]; }
 std::optional<Key> FindKey(std::string_view name);
@@ -52,7 +60,7 @@ class Preferences {
   using Set = std::function<bool(Key, std::string_view)>;
 
   Preferences(std::filesystem::path path, std::filesystem::path legacy, bool ignore_file,
-              bool windows, Locks forced, Get get, Set set);
+              Platform platform, Locks forced, Get get, Set set);
   // Applies valid saved values once. No writes on startup, even when importing the legacy file.
   void Load();
   // Before starting guest work: capture the startup values, then stage edits of startup flags
@@ -79,7 +87,8 @@ class Preferences {
  private:
   using Values = std::array<std::string, Index(Key::Count)>;
   std::filesystem::path path_, legacy_, loaded_path_;
-  bool ignored_, windows_;
+  bool ignored_;
+  Platform platform_;
   Locks forced_;
   Get get_;
   Set set_;

@@ -1,8 +1,11 @@
 // Game output sizing, independent of the window system and Vulkan.
 #pragma once
 
+#include "graphics_policy.h"
+
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace gtav::native {
@@ -19,11 +22,13 @@ struct OutputRect {
 };
 
 // Present settings intentionally don't change the guest's display registers or EDRAM layout.
-enum class OutputMode : int32_t { kDesktop = 0, k720p = 720, k1080p = 1080, k1440p = 1440, k2160p = 2160 };
+enum class OutputMode : int32_t { kDesktop = 0, k540p = 540, k720p = 720, k1080p = 1080, k1440p = 1440, k2160p = 2160 };
 
-constexpr OutputMode ParseOutputMode(int32_t value) {
+constexpr OutputMode ParseOutputMode(int32_t value, bool lean = false) {
   switch (value) {
+    case -1: return lean ? OutputMode::k540p : OutputMode::k720p;  // Auto
     case 0: return OutputMode::kDesktop;
+    case 540: return OutputMode::k540p;
     case 1080: return OutputMode::k1080p;
     case 1440: return OutputMode::k1440p;
     case 2160: return OutputMode::k2160p;
@@ -38,7 +43,7 @@ constexpr Extent OutputPreset(OutputMode mode) {
 
 // A matching monitor can show all preset pixels, without losing rows to the frame/taskbar.
 constexpr bool UseBorderless(OutputMode mode, Extent monitor) {
-  return mode == OutputMode::kDesktop || (mode != OutputMode::k720p && OutputPreset(mode) == monitor);
+  return mode == OutputMode::kDesktop || (int32_t(mode) > 720 && OutputPreset(mode) == monitor);
 }
 
 constexpr OutputRect FitAspect(Extent bounds, Extent aspect) {
@@ -82,6 +87,18 @@ constexpr Fsr1Route PlanFsr1(Extent fsr_size, const OutputRect& rect, bool sharp
 
 enum class UpscaleStatus { kLinear, kFsr1, kNoUpscale, kUnavailable };
 enum class AntiLagStatus { Unsupported, Off, Fallback, Ready, Pacing };
+enum class ContactRayStatus { Off, NoCompatiblePass, NoAlignedDepth, Recorded, Unavailable };
+
+struct FogInfo {
+  bool reduced = false;
+  uint32_t suppressed = 0, protected_draws = 0;  // last replay, not a GPU/presentation result
+};
+
+struct RealismInfo {
+  uint32_t material_floor = 1, anisotropy_cap = 1;  // effective boost and cap for this run
+  ContactRayStatus contact_rays = ContactRayStatus::Off;
+  FogInfo fog;
+};
 
 constexpr AntiLagStatus DriverPacing(bool supported, bool requested, bool enabled, bool called) {
   if (!supported) return AntiLagStatus::Unsupported;
@@ -89,6 +106,12 @@ constexpr AntiLagStatus DriverPacing(bool supported, bool requested, bool enable
   if (!enabled) return AntiLagStatus::Fallback;
   return called ? AntiLagStatus::Pacing : AntiLagStatus::Ready;
 }
+
+struct PipelineInfo {
+  double wait_ms = 0;           // CPU wait for background compiles in the last replay
+  uint32_t pending = 0;         // on-demand jobs not yet collected, including completed ones
+  uint32_t warmed = 0;          // cached pipelines reused since launch
+};
 
 struct PresentationInfo {
   Extent input;          // Actual front buffer including the game's HUD, not the monitor size.
@@ -101,6 +124,11 @@ struct PresentationInfo {
   float scene_scale = 1.0f;
   uint32_t queue_limit = 2;
   AntiLagStatus anti_lag = AntiLagStatus::Unsupported;
+  uint32_t gpu_slots = 2;
+  bool lean_memory = false;
+  std::optional<GraphicsMemoryStats> memory;  // sampled when a host overlay is open
+  RealismInfo realism;
+  std::optional<PipelineInfo> pipelines;
 };
 
 }  // namespace gtav::native

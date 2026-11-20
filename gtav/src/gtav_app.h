@@ -9,6 +9,7 @@
 
 #include "debug_tools.h"
 #include "native/input.h"
+#include "native/menu.h"
 #include "native/renderer.h"
 #include "native/settings_runtime.h"
 #include "native/touch_controls.h"
@@ -52,7 +53,10 @@ class GtavApp : public rex::ReXApp {
     gtav::debug::InstallLogCapture();
     gtav::native::settings::Initialize();
   }
-  void OnPreLaunchModule() override { gtav::native::settings::Player().BeginRun(); }
+  void OnPreLaunchModule() override {
+    gtav::native::settings::Player().BeginRun();
+    gtav::native::PrefetchPipelineCache();
+  }
   void OnPreSetup(rex::RuntimeConfig& config) override {
     gtav::native::input::Configure();
     config.input_factory = [](bool tool_mode) -> std::unique_ptr<rex::system::IInputSystem> {
@@ -123,6 +127,7 @@ class GtavApp : public rex::ReXApp {
   }
   void OnShutdown() override {
     shutting_down_ = true;
+    gtav::native::menu::FlushPendingSave(true);
 #ifdef _WIN32
     gtav::native::StopGuestInputPacing();  // Drain a driver call before guest/input teardown.
 #endif

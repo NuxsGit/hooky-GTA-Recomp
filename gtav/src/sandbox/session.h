@@ -8,6 +8,16 @@
 
 namespace gtav::sandbox {
 
+// Numeric IPv4 in host byte order. No DNS, URL handling or network discovery is needed to join.
+struct Endpoint {
+  uint32_t ipv4 = 0;
+  uint16_t port = kDefaultPort;
+  bool operator==(const Endpoint&) const = default;
+};
+std::optional<Endpoint> ParseEndpoint(std::string_view text);
+std::string FormatEndpoint(Endpoint endpoint);
+std::string FormatInvitation(Endpoint endpoint, std::string_view invite);
+
 enum class Link { Idle, Opening, Hosting, Connecting, Joined, Failed };
 struct SessionView {
   Link link = Link::Idle;
@@ -16,6 +26,7 @@ struct SessionView {
   std::string error;
   World world;
   std::optional<uint32_t> rtt_ms{};  // kernel TCP estimate, not a v2 packet field
+  std::vector<Endpoint> host_addresses{};  // successful listener only; local interfaces, not public discovery
   bool Owner() const { return link == Link::Idle || link == Link::Hosting || link == Link::Failed; }
 };
 
@@ -30,7 +41,9 @@ class Session {
 
   // Port 0 is for loopback tests only. Startup/stop serialize across UI and shutdown.
   bool Host(uint16_t port, std::string name, bool loopback_only = false);
-  bool Join(std::string ipv4, uint16_t port, std::string name, std::string_view invite);
+  // An IPv4[:port] with a separate code, or the host's single pasted "IPv4:port code".
+  // Inline codes take precedence. Invalid input is rejected before starting a socket worker.
+  bool Join(std::string_view address_or_invitation, std::string name, std::string_view invite = {});
   void Stop();
   SessionView View() const;
   Link LinkState() const;
@@ -41,7 +54,7 @@ class Session {
 
  private:
   void RunHost(uint16_t port, bool loopback_only);
-  void RunClient(const std::string& ipv4, uint16_t port, const std::string& name, wire::Invite invite);
+  void RunClient(Endpoint endpoint, const std::string& name, wire::Invite invite);
   void Fail(std::string error);
   bool Available() const;
   void ResetRoom(std::string name);
@@ -53,6 +66,7 @@ class Session {
   Link link_ = Link::Idle;
   uint16_t port_ = 0;
   std::string invite_, error_;
+  std::vector<Endpoint> host_addresses_;
   Course local_course_;
   Room room_{"Player"};
   World remote_;

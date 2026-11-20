@@ -4,6 +4,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <charconv>
 
 namespace gtav::native::settings {
 namespace {
@@ -61,14 +62,18 @@ class Controls {
     StateLabel(key);
   }
 
-  void Preset(int selection) {
-    rejected = nullptr;
-    // Do not trade correct sun shadows for speed automatically. These presets leave the
-    // display refresh, frame cap, queue depth and driver feature choices alone.
-    Edit(Key::SunShadows, "true");
-    Edit(Key::AsyncPipelines, selection == 0 ? "false" : "true");
-    if (prefs.Available(Key::SceneScale)) Edit(Key::SceneScale, selection == 0 ? "1" : selection == 1 ? "0.875" : "0.75");
-    if (prefs.Available(Key::Fsr1)) Edit(Key::Fsr1, selection == 0 ? "false" : "true");
+  void Percent(Key key, const char* label, int fallback, bool enabled) {
+    const auto value = CanonicalValue(key, prefs.Value(key));
+    int number = fallback;
+    if (!value.empty()) std::from_chars(value.data(), value.data() + value.size(), number);
+    ImGui::SetNextItemWidth(std::min(244.0f * scale, ImGui::GetContentRegionAvail().x * 0.56f));
+    ImGui::BeginDisabled(!enabled || !prefs.CanEdit(key));
+    if (ImGui::SliderInt(label, &number, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp)) {
+      rejected = nullptr;
+      Edit(key, std::to_string(number).c_str());
+    }
+    ImGui::EndDisabled();
+    StateLabel(key);
   }
 
   Preferences& prefs;
@@ -95,6 +100,7 @@ constexpr Row kTextureRow{Key::TextureRecheck, {"Full texture recheck", ""},
     {"Lower: sooner texture refreshes, higher CPU cost. Exact checks override this interval.", ""}, kTextureChoices};
 
 void Display(Controls& ui, Extent output, const PresentationInfo& info) {
+  ImGui::TextUnformatted("Window & scaling");
   ImGui::Text("Output  %u x %u", output.width, output.height);
   if (!info.input.Empty()) {
     ImGui::SameLine();
@@ -103,8 +109,9 @@ void Display(Controls& ui, Extent output, const PresentationInfo& info) {
   if (ui.prefs.Available(Key::Output)) {
     const auto index = ChoiceIndex(kOutputRow, std::to_string(int32_t(info.boot_output)));
     const char* output_name = index < kOutputRow.choices.size() ? kOutputChoices[index].title.en : "Custom";
-    ImGui::TextDisabled("This run: %s  /  scene scale %.1f%%", output_name, info.scene_scale * 100);
+    ImGui::TextDisabled("This run: %s", output_name);
   }
+  if (ui.prefs.Available(Key::SceneScale)) ImGui::TextDisabled("Scene scale this run: %.1f%%", info.scene_scale * 100);
   ImGui::Spacing();
   ui.Combo(kOutputRow);
   ui.Combo(kScaleRow);
@@ -123,6 +130,8 @@ void Display(Controls& ui, Extent output, const PresentationInfo& info) {
       break;
   }
   ImGui::Spacing();
+  ImGui::Separator();
+  ImGui::TextUnformatted("VSync & counters");
   ui.Combo(kVsyncRow);
   ImGui::TextDisabled("Swap-chain VSync: %s", info.vsync ? "On" : "Off");
   if (info.vsync && ui.prefs.Value(Key::Vsync) == "false") {
@@ -131,44 +140,146 @@ void Display(Controls& ui, Extent output, const PresentationInfo& info) {
   ui.Check(Key::Counter, "FPS counter", "Counts rendered frames, not simulated or generated frames.");
 }
 
-void Performance(Controls& ui) {
-  if (ui.prefs.Available(Key::Output)) {
-    ImGui::TextUnformatted("Rendering preset");
-    if (ImGui::Button("Best image")) ui.Preset(0);
-    ImGui::SameLine();
-    if (ImGui::Button("Balanced")) ui.Preset(1);
-    ImGui::SameLine();
-    if (ImGui::Button("Performance")) ui.Preset(2);
-    ImGui::TextWrapped("100%% / 87.5%% / 75%% scene scale on next launch. Balanced and Performance request FSR 1; the frame limit is independent.");
+void Performance(Controls& ui, const PresentationInfo& info) {
+  if (ui.prefs.Available(Key::LowMemory)) {
+    ImGui::TextUnformatted("Presets");
+    const size_t selected = PresetIndex(ui.prefs);
+    ImGui::Text("Requested preset: %s", selected < std::size(kPresets) ? kPresets[selected].title.en : "Custom");
+    ImGui::BeginDisabled(!CanApplyPreset(ui.prefs));
+    for (size_t i = 0; i < std::size(kPresets); i++) {
+      if (i == 1 || i == 2 || i == 4) ImGui::SameLine();
+      const auto& preset = kPresets[i];
+      if (ImGui::Button(preset.title.en)) {
+        const auto result = ApplyPreset(ui.prefs, preset);
+        ui.changed |= result.edited;
+        rejected = result.rejected;
+      }
+      if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", preset.help.en);
+    }
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("Preset changes keep the FPS limit, display overrides and locked options. Potato targets low-memory PCs; compatible Vulkan graphics are still required.");
+    ImGui::TextDisabled("This run: %.0f%% scene  /  %u GPU slot%s  /  %s caches", info.scene_scale * 100,
+                        info.gpu_slots, info.gpu_slots == 1 ? "" : "s", info.lean_memory ? "reduced" : "normal");
     ImGui::Separator();
+    ImGui::TextUnformatted("Quality tweaks");
+    ui.Check(Key::MaterialFiltering, "Enhanced material filtering (restart)",
+             "Raises anisotropy to 8x on eligible repeating, mipmapped materials when supported. Wave state and depth are unchanged.");
+    ui.Check(Key::LowMemory, "Reduced memory usage (restart)",
+             "Reduces cache targets, uploads and GPU frames in flight. Shaders load as needed. Not a RAM limit.");
   }
 #ifdef __ANDROID__
   // Keep the existing mobile presets: these change pacing as well as compile policy.
   if (ImGui::Button("Best image")) {
-    ui.Preset(0);
+    ui.Edit(Key::SunShadows, "true");
+    ui.Edit(Key::AsyncPipelines, "false");
     ui.Edit(Key::FrameLimit, "30");
     ui.Edit(Key::Vsync, "true");
     ui.Edit(Key::GuestGpuLag, "6");
   }
   ImGui::SameLine();
   if (ImGui::Button("Max performance")) {
-    ui.Preset(1);
+    ui.Edit(Key::SunShadows, "true");
+    ui.Edit(Key::AsyncPipelines, "true");
     ui.Edit(Key::FrameLimit, "0");
     ui.Edit(Key::Vsync, "false");
     ui.Edit(Key::GuestGpuLag, "4");
   }
   ImGui::Separator();
 #endif
+  ImGui::Separator();
+  ImGui::TextUnformatted("Frame pacing & compilation");
   ui.Combo(kFrameLimitRow);
   ui.Check(Key::SunShadows, "Per-pixel sun shadows", "Disabling can expose blocky shadows/reflections.");
   ui.Check(Key::AsyncPipelines, "Compile new effects in the background", "Reduces first-use hitches. An effect can be missing until it compiles.");
+  if (info.pipelines) {
+    const auto& p = *info.pipelines;
+    if (p.wait_ms > 0.5) ImGui::TextColored(kAmber, "Background pipeline wait: %.1f ms this frame (%u pending)", p.wait_ms, p.pending);
+    else ImGui::TextDisabled("Background pipeline wait: %.1f ms  (%u pending, %u warmed)", p.wait_ms, p.pending, p.warmed);
+    if (info.lean_memory) ImGui::TextDisabled("Pipeline warmup skipped in reduced-memory mode.");
+    else if (p.warmed) ImGui::TextDisabled("%u cached pipelines reused since launch.", p.warmed);
+  } else {
+    ImGui::TextDisabled("Background pipeline wait: waiting for first frame.");
+  }
+  ImGui::Spacing();
+  ImGui::TextUnformatted("Texture validation");
   ui.Check(Key::ExactCache, "Exact texture and buffer checks", "Full checks reduce stale textures at a CPU cost.");
   if (ui.prefs.Value(Key::ExactCache) != "true") ui.Combo(kTextureRow);
   ui.Check(Key::Touch, "Touch controls", "On-screen gamepad; hidden when a controller is connected.");
 }
 
+void Realism(Controls& ui, const RealismInfo& info) {
+  ImGui::TextUnformatted("Materials");
+  ui.Combo(kAnisotropyRow);
+  if (info.anisotropy_cap <= 1) ImGui::TextDisabled("Anisotropic sampling unavailable or limited to 1x.");
+  else if (info.material_floor > 1)
+    ImGui::TextDisabled("Eligible surfaces: %ux minimum, %ux renderer cap.", info.material_floor, info.anisotropy_cap);
+  else ImGui::TextDisabled("No extra material filtering (renderer cap %ux).", info.anisotropy_cap);
+  ImGui::Spacing();
+  ImGui::Separator();
+  ImGui::TextUnformatted("Screen-space contact occlusion");
+  ui.Combo(kContactRayRow);
+  const auto quality = ChoiceIndex(kContactRayRow, ui.prefs.Value(Key::ContactRays));
+  ui.Percent(Key::ContactStrength, "Contact strength", 50, quality > 0 && quality < kContactRayRow.choices.size());
+  switch (info.contact_rays) {
+    case ContactRayStatus::Off: ImGui::TextDisabled("Contact rays: off, no extra pass."); break;
+    case ContactRayStatus::NoCompatiblePass: ImGui::TextColored(kAmber, "Contact rays: no compatible shadow pass in this frame."); break;
+    case ContactRayStatus::NoAlignedDepth: ImGui::TextColored(kAmber, "Contact rays: no aligned scene depth; original shadows."); break;
+    case ContactRayStatus::Recorded: ImGui::TextColored(kMint, "Contact rays: recorded in the scene shadow mask."); break;
+    case ContactRayStatus::Unavailable: ImGui::TextColored(kAmber, "Contact rays: unavailable in this build or on this driver."); break;
+  }
+  ImGui::TextWrapped("Experimental, screen-space only. Uses visible scene depth; no new textures, meshes or off-screen reflections.");
+  ImGui::TextDisabled("Hardware ray tracing is not integrated.");
+  ImGui::Spacing();
+  ImGui::Separator();
+  ImGui::TextUnformatted("Distant fog");
+  ui.Check(Key::ReduceFog, "Reduce distant fog (experimental)",
+           "Live toggle. Omits one TU27 fog strip (PS 9DFE7F549A326A57) over distant hills. Other weather, sky bands and hills remain. Exact match except for that draw.");
+  if (ui.prefs.Available(Key::ReduceFog)) {
+    const auto& fog = info.fog;
+    if (fog.reduced) {
+      if (fog.suppressed) ImGui::TextColored(kMint, "Fog: %u draw%s omitted this frame.", fog.suppressed, fog.suppressed == 1 ? "" : "s");
+      else if (fog.protected_draws) ImGui::TextColored(kAmber, "Fog: %u matching draw%s protected (depth/stencil/query).", fog.protected_draws, fog.protected_draws == 1 ? "" : "s");
+      else ImGui::TextDisabled("Fog: reduced — no matching draw this frame.");
+    } else {
+      ImGui::TextDisabled("Fog: original — all distant fog drawn.");
+    }
+    ImGui::TextWrapped("Only that strip is skipped, with depth/stencil/MRT/query checks. If haze persists, other passes or weather may contribute — verify with F9 traces.");
+  }
+}
+
+void Memory(const PresentationInfo& info) {
+  if (!info.memory) {
+    ImGui::TextDisabled("Waiting for renderer counters.");
+    return;
+  }
+  const auto& stats = *info.memory;
+  const auto cache = [](const char* name, const CacheUsage& usage) {
+    if (usage.OverTarget())
+      ImGui::TextColored(kAmber, "%s: %.1f / %.0f MiB (over soft target)", name,
+                         usage.bytes / double(kMiB), usage.target / double(kMiB));
+    else if (usage.target)
+      ImGui::Text("%s: %.1f / %.0f MiB", name, usage.bytes / double(kMiB), usage.target / double(kMiB));
+    else
+      ImGui::Text("%s: %.1f MiB (no target)", name, usage.bytes / double(kMiB));
+  };
+  ImGui::TextUnformatted("Renderer caches and uploads");
+  cache("Decoded textures", stats.decoded_textures);
+  cache("Converted vertex/index buffers", stats.converted_buffers);
+  ImGui::Text("Upload buffers reserved: %.1f MiB", stats.upload_reserved / double(kMiB));
+  if (info.lean_memory)
+    ImGui::TextDisabled("Upload buffers released since launch: %.1f MiB", stats.upload_reclaimed / double(kMiB));
+  if (info.pipelines) {
+    ImGui::Spacing();
+    ImGui::TextDisabled("Pipelines warmed: %u reused, %u pending this frame.", info.pipelines->warmed, info.pipelines->pending);
+  }
+  ImGui::Spacing();
+  ImGui::TextWrapped("Cache targets are not caps. Resources that are in use or waiting for the GPU may still occupy memory.");
+  ImGui::TextWrapped("These counters are not total RAM or VRAM. They exclude game memory, render targets, shaders and driver overhead.");
+}
+
 void Latency(Controls& ui, const PresentationInfo& info) {
   if (ui.prefs.Available(Key::ShortQueue)) {
+    ImGui::TextUnformatted("Queue & driver pacing");
     ui.Combo(kQueueRow);
     ImGui::TextDisabled("This run: up to %u guest frames queued before replay", info.queue_limit);
     ui.Combo(kAntiLagRow);
@@ -213,7 +324,9 @@ bool DrawGraphicsMenu(Preferences& prefs, Extent output, uint32_t fps, double fr
   ImGui::Separator();
   if (ImGui::BeginTabBar("Graphics tabs")) {
     if (ImGui::BeginTabItem("Display")) { Display(ui, output, info); ImGui::EndTabItem(); }
-    if (ImGui::BeginTabItem("Performance")) { Performance(ui); ImGui::EndTabItem(); }
+    if (ImGui::BeginTabItem("Performance")) { Performance(ui, info); ImGui::EndTabItem(); }
+    if (prefs.Available(Key::ContactRays) && ImGui::BeginTabItem("Realism")) { Realism(ui, info.realism); ImGui::EndTabItem(); }
+    if (prefs.Available(Key::LowMemory) && ImGui::BeginTabItem("Memory")) { Memory(info); ImGui::EndTabItem(); }
     if (ImGui::BeginTabItem("Latency & support")) { Latency(ui, info); ImGui::EndTabItem(); }
     ImGui::EndTabBar();
   }

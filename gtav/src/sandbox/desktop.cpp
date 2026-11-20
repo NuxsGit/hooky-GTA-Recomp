@@ -148,36 +148,55 @@ void EditCourse(const SessionView& view, const Player* local) {
 }
 
 void ShowNetwork(const SessionView& view) {
-  static char name[21] = "Player", address[16] = "127.0.0.1", code[33]{};
-  static int port = kDefaultPort;
+  static char name[21] = "Player", address[128]{}, code[64]{};
+  static int host_port = kDefaultPort;
   static bool local_only = false;
+  static size_t selected_address = 0;
   static std::string notice;
   ImGui::TextUnformatted(LinkLabel(view.link));
   if (!view.error.empty()) ImGui::TextWrapped("%s", view.error.c_str());
   const bool idle = view.link == Link::Idle || view.link == Link::Failed;
   if (idle) {
     ImGui::InputText("Nickname", name, sizeof(name));
-    ImGui::InputInt("TCP port", &port, 0);
-    const bool port_ok = port > 0 && port <= 65535;
+    ImGui::SeparatorText("Host on this PC");
+    ImGui::InputInt("TCP port", &host_port, 0);
     ImGui::Checkbox("This PC only (testing)", &local_only);
-    if (ImGui::Button("Host here"))
-      notice = port_ok && Party().Host(uint16_t(port), name, local_only) ? "" :
+    if (ImGui::Button("Host here")) {
+      selected_address = 0;
+      notice = host_port > 0 && host_port <= 65535 && Party().Host(uint16_t(host_port), name, local_only) ? "" :
           "Enter a port from 1 to 65535 and a nickname (letters, digits, spaces, - or _).";
-    ImGui::Spacing();
-    ImGui::InputText("Host IPv4", address, sizeof(address));
-    ImGui::InputText("Invite code", code, sizeof(code), ImGuiInputTextFlags_CharsHexadecimal);
+    }
+    ImGui::SeparatorText("Join a friend");
+    ImGui::InputTextWithHint("Server", "IPv4:port or paste the full invitation", address, sizeof(address));
+    ImGui::InputTextWithHint("Invite code", "Leave blank if pasted with the address", code, sizeof(code));
     if (ImGui::Button("Join friend")) {
-      if (port_ok && Party().Join(address, uint16_t(port), name, code)) {
-        std::fill(std::begin(code), std::end(code), '\0');
-        notice.clear();
-      } else notice = "Enter the host IPv4 address, TCP port and 32-character invite code.";
+      if (!ValidName(name)) notice = "Enter a nickname (letters, digits, spaces, - or _).";
+      else notice = Party().Join(address, name, code) ? "" :
+          "Paste the full invitation, or enter the host's IPv4:port and 32-character invite code.";
     }
   } else {
     if (view.link == Link::Hosting) {
-      ImGui::Text("Listening on TCP %u. Share your reachable IPv4 and this code privately.", unsigned(view.port));
-      ImGui::TextUnformatted(view.invite.c_str());
-      ImGui::SameLine();
+      ImGui::Text("Listening on TCP %u. The room stays open while your game is running.", unsigned(view.port));
+      if (view.host_addresses.empty()) {
+        ImGui::TextWrapped("No local IPv4 detected at startup. Connect to the LAN/VPN and restart the room, "
+                           "or share a reachable IPv4 and the code manually.");
+      } else {
+        selected_address = std::min(selected_address, view.host_addresses.size() - 1);
+        const bool test = (view.host_addresses.front().ipv4 >> 24) == 127;
+        if (ImGui::BeginCombo(test ? "This PC only" : "LAN / VPN address",
+                              FormatEndpoint(view.host_addresses[selected_address]).c_str())) {
+          for (size_t i = 0; i < view.host_addresses.size(); ++i) {
+            if (ImGui::Selectable(FormatEndpoint(view.host_addresses[i]).c_str(), i == selected_address))
+              selected_address = i;
+          }
+          ImGui::EndCombo();
+        }
+        if (ImGui::Button("Copy invitation"))
+          ImGui::SetClipboardText(FormatInvitation(view.host_addresses[selected_address], view.invite).c_str());
+        ImGui::SameLine();
+      }
       if (ImGui::Button("Copy code")) ImGui::SetClipboardText(view.invite.c_str());
+      ImGui::TextWrapped("Invite: %s", view.invite.c_str());
     }
     if (ImGui::Button(view.link == Link::Hosting ? "Stop server" : "Disconnect")) {
       Party().Stop();
@@ -185,8 +204,9 @@ void ShowNetwork(const SessionView& view) {
     }
   }
   if (!notice.empty()) ImGui::TextWrapped("%s", notice.c_str());
-  ImGui::TextWrapped("For friends outside your LAN, forward this TCP port yourself or use a trusted private VPN. "
-                     "IPv4 only. Traffic is not encrypted. No Rockstar services or public matchmaking.");
+  ImGui::TextWrapped("Share invitations privately. Allow inbound TCP on the host's firewall. For remote friends, "
+                     "use a trusted private VPN, or forward TCP manually if your Internet connection permits it. "
+                     "IPv4 only; traffic is not encrypted.");
 }
 }  // namespace
 

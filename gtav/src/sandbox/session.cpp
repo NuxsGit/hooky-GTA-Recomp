@@ -5,9 +5,12 @@
 #include <ws2tcpip.h>
 #include <mstcpip.h>
 #include <bcrypt.h>
+#include <iphlpapi.h>
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netinet/tcp.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -17,6 +20,7 @@
 #endif
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <system_error>
@@ -27,6 +31,25 @@ namespace {
 constexpr int64_t kUpdateMs = 100, kHandshakeMs = 4'000, kIdleMs = 6'000;
 constexpr size_t kPeerSlots = kMaxPlayers + 3;
 constexpr unsigned kPacketsPerSecond = 36;
+constexpr std::string_view kWhitespace = " \t\r\n";
+
+std::string_view Trim(std::string_view text) {
+  const auto first = text.find_first_not_of(kWhitespace);
+  return first == text.npos ? std::string_view{} : text.substr(first, text.find_last_not_of(kWhitespace) - first + 1);
+}
+
+bool Decimal(std::string_view text, uint32_t& value) {
+  if (text.empty()) return false;
+  const auto* end = text.data() + text.size();
+  const auto [next, error] = std::from_chars(text.data(), end, value);
+  return error == std::errc{} && next == end;
+}
+
+bool Unicast(uint32_t ipv4) {
+  const auto first = ipv4 >> 24;
+  return first > 0 && first < 224;  // exclude unspecified, multicast, limited broadcast and reserved addresses
+}
+
 #ifdef _WIN32
 using Sock = SOCKET;
 constexpr Sock kInvalid = INVALID_SOCKET;
@@ -143,6 +166,48 @@ sockaddr_in Address(uint16_t port, uint32_t ipv4) {
   return addr;
 }
 
+// Snapshot the usable local interfaces when hosting starts. This never sends traffic or
+// guesses the address of a router; the host chooses the interface their friends can reach.
+std::vector<Endpoint> LocalEndpoints(uint16_t port, bool loopback_only) {
+  if (loopback_only) return {{INADDR_LOOPBACK, port}};
+  std::vector<Endpoint> endpoints;
+  const auto add = [&](const sockaddr* socket_address) {
+    if (!socket_address || socket_address->sa_family != AF_INET) return;
+    const uint32_t ipv4 = ntohl(reinterpret_cast<const sockaddr_in*>(socket_address)->sin_addr.s_addr);
+    if (Unicast(ipv4) && (ipv4 >> 24) != 127) endpoints.push_back({ipv4, port});
+  };
+#ifdef _WIN32
+  constexpr ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                          GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_SKIP_FRIENDLY_NAME;
+  ULONG size = 15'000;
+  for (int retry = 0; retry < 2 && size <= (1u << 20); ++retry) {
+    std::vector<uint8_t> storage(size);
+    auto* adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(storage.data());
+    const ULONG result = GetAdaptersAddresses(AF_INET, flags, nullptr, adapters, &size);
+    if (result == ERROR_BUFFER_OVERFLOW) continue;
+    if (result != NO_ERROR) break;
+    for (const auto* nic = adapters; nic; nic = nic->Next) {
+      if (nic->OperStatus != IfOperStatusUp) continue;
+      for (const auto* address = nic->FirstUnicastAddress; address; address = address->Next) {
+        if (address->DadState == IpDadStatePreferred && address->Address.iSockaddrLength >= int(sizeof(sockaddr_in)))
+          add(address->Address.lpSockaddr);
+      }
+    }
+    break;
+  }
+#else
+  ifaddrs* interfaces = nullptr;
+  if (getifaddrs(&interfaces) == 0) {
+    for (const auto* nic = interfaces; nic; nic = nic->ifa_next)
+      if (nic->ifa_flags & IFF_UP) add(nic->ifa_addr);
+    freeifaddrs(interfaces);
+  }
+#endif
+  std::sort(endpoints.begin(), endpoints.end(), [](Endpoint a, Endpoint b) { return a.ipv4 < b.ipv4; });
+  endpoints.erase(std::unique(endpoints.begin(), endpoints.end()), endpoints.end());
+  return endpoints;
+}
+
 struct Pipe {
   explicit Pipe(Socket socket, int64_t now) : socket(std::move(socket)), last_rx(now), window(now) {}
   Socket socket;
@@ -217,6 +282,40 @@ bool FinishConnect(Sock socket, const std::atomic<bool>& stop_requested) {
 }
 }  // namespace
 
+std::optional<Endpoint> ParseEndpoint(std::string_view text) {
+  text = Trim(text);
+  const auto colon = text.find(':');
+  auto address = text.substr(0, colon);
+  uint32_t port = kDefaultPort;
+  if (colon != text.npos) {
+    const auto digits = text.substr(colon + 1);
+    if (digits.size() > 5 || !Decimal(digits, port) || port == 0 || port > 65535) return std::nullopt;
+  }
+  uint32_t ipv4 = 0;
+  for (int i = 0; i < 4; ++i) {
+    const auto dot = address.find('.');
+    if ((dot == address.npos) != (i == 3)) return std::nullopt;
+    const auto octet = address.substr(0, dot);
+    uint32_t value;
+    if (octet.size() > 3 || (octet.size() > 1 && octet.front() == '0') || !Decimal(octet, value) || value > 255)
+      return std::nullopt;
+    ipv4 = (ipv4 << 8) | value;
+    if (i != 3) address.remove_prefix(dot + 1);
+  }
+  if (!Unicast(ipv4)) return std::nullopt;
+  return Endpoint{ipv4, uint16_t(port)};
+}
+
+std::string FormatEndpoint(Endpoint endpoint) {
+  const auto ip = endpoint.ipv4;
+  return std::to_string(ip >> 24) + '.' + std::to_string((ip >> 16) & 255) + '.' +
+         std::to_string((ip >> 8) & 255) + '.' + std::to_string(ip & 255) + ':' + std::to_string(endpoint.port);
+}
+
+std::string FormatInvitation(Endpoint endpoint, std::string_view invite) {
+  return FormatEndpoint(endpoint) + ' ' + std::string(invite);
+}
+
 Session::~Session() {
   // Don't reconstruct UI state from a destructor.
   StopWorker();
@@ -250,22 +349,28 @@ bool Session::Host(uint16_t port, std::string name, bool loopback_only) {
   return true;
 }
 
-bool Session::Join(std::string ipv4, uint16_t port, std::string name, std::string_view code) {
-  auto invite = wire::ParseInvite(code);
-  if (!port || !invite || !ValidName(name) || ipv4.empty() || ipv4.size() > 15 ||
-      ipv4.find_first_not_of("0123456789.") != ipv4.npos) return false;
+bool Session::Join(std::string_view address, std::string name, std::string_view code) {
+  address = Trim(address);
+  const auto separator = address.find_first_of(kWhitespace);
+  if (separator != address.npos) {
+    code = address.substr(separator);
+    address = address.substr(0, separator);
+  }
+  const auto endpoint = ParseEndpoint(address);
+  const auto invite = wire::ParseInvite(Trim(code));
+  if (!endpoint || !invite || !ValidName(name)) return false;
   std::lock_guard lifecycle(lifecycle_);
   { std::lock_guard lock(mutex_); if (!Available()) return false; }
   StopLocked();
   {
     std::lock_guard lock(mutex_);
     link_ = Link::Connecting;
-    port_ = port;
+    port_ = endpoint->port;
   }
   stop_requested_.store(false, std::memory_order_relaxed);
   try {
-    worker_ = std::thread([this, ipv4 = std::move(ipv4), port, name = std::move(name), invite = *invite] {
-      RunClient(ipv4, port, name, invite);
+    worker_ = std::thread([this, endpoint = *endpoint, name = std::move(name), invite = *invite] {
+      RunClient(endpoint, name, invite);
     });
   } catch (const std::system_error&) {
     Fail("Could not start the private session worker.");
@@ -292,6 +397,7 @@ void Session::StopLocked() {
   link_ = Link::Idle;
   port_ = 0;
   invite_.clear();
+  host_addresses_.clear();
   error_.clear();
   remote_ = {};
   rtt_ms_.reset();
@@ -304,6 +410,7 @@ void Session::Fail(std::string error) {
   link_ = Link::Failed;
   port_ = 0;
   invite_.clear();
+  host_addresses_.clear();
   error_ = std::move(error);
   remote_ = {};
   rtt_ms_.reset();
@@ -319,7 +426,7 @@ Link Session::LinkState() const {
 SessionView Session::View() const {
   std::lock_guard lock(mutex_);
   const auto now = NowMs();
-  if (link_ != Link::Joined) return {link_, port_, invite_, error_, room_.View(1, now)};
+  if (link_ != Link::Joined) return {link_, port_, invite_, error_, room_.View(1, now), {}, host_addresses_};
   auto world = remote_;
   if (now - last_snapshot_ms_ > kPoseLifetimeMs)
     for (auto& p : world.players) p.pose.reset();
@@ -382,11 +489,14 @@ void Session::RunHost(uint16_t port, bool loopback_only) {
     Fail("Can't open that TCP port. Choose another port and check your local firewall.");
     return;
   }
+  const auto bound_port = ntohs(addr.sin_port);
+  auto addresses = LocalEndpoints(bound_port, loopback_only);
   {
     std::lock_guard lock(mutex_);
     link_ = Link::Hosting;
-    port_ = ntohs(addr.sin_port);
+    port_ = bound_port;
     invite_ = wire::FormatInvite(invite);
+    host_addresses_ = std::move(addresses);
   }
   std::vector<Peer> peers;
   int64_t snapshot_at = 0;
@@ -447,13 +557,12 @@ void Session::RunHost(uint16_t port, bool loopback_only) {
   }
 }
 
-void Session::RunClient(const std::string& ipv4, uint16_t port, const std::string& name, wire::Invite invite) {
+void Session::RunClient(Endpoint endpoint, const std::string& name, wire::Invite invite) {
   Sockets sockets;
   Socket connection(sockets.ready ? socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) : kInvalid);
-  auto addr = Address(port, 0);
-  if (!connection || !Nonblocking(connection.Get()) || inet_pton(AF_INET, ipv4.c_str(), &addr.sin_addr) != 1 ||
-      addr.sin_addr.s_addr == htonl(INADDR_ANY) || addr.sin_addr.s_addr == htonl(INADDR_BROADCAST)) {
-    Fail("Enter a valid host IPv4 address and TCP port.");
+  const auto addr = Address(endpoint.port, endpoint.ipv4);
+  if (!connection || !Nonblocking(connection.Get())) {
+    Fail("Cannot initialize the client TCP socket.");
     return;
   }
   LowLatency(connection.Get());

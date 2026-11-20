@@ -10,6 +10,7 @@
 #include "input_pacing.h"
 #include "menu.h"
 #include "paths.h"
+#include "pipeline_cache_io.h"
 #include "shader_compiler.h"
 #include "settings_runtime.h"
 #ifdef GTAV_DESKTOP_WORKSHOP
@@ -40,6 +41,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <set>
 #include <unordered_map>
 #include <memory>
@@ -54,9 +56,11 @@
 
 REXCVAR_DEFINE_STRING(gtav_native, "off", "GTAV", "Native renderer: off | shadow | on");
 REXCVAR_DEFINE_BOOL(gtav_native_vsync, true, "GTAV", "Native renderer: wait for vertical sync when presenting");
+REXCVAR_DEFINE_BOOL(gtav_native_low_memory, false, "GTAV",
+                    "Desktop native renderer: smaller caches and upload chunks, one GPU frame in flight, load shaders on demand (restart)");
 #ifdef _WIN32
-REXCVAR_DEFINE_INT32(gtav_native_output, 720, "GTAV",
-                     "Windows output height at startup: 720 | 1080 | 1440 | 2160 | 0 (borderless desktop)");
+REXCVAR_DEFINE_INT32(gtav_native_output, -1, "GTAV",
+                     "Windows output height: -1 (Auto) | 540 | 720 | 1080 | 1440 | 2160 | 0 (borderless desktop)");
 REXCVAR_DEFINE_BOOL(gtav_native_fsr1, false, "GTAV", "Windows: AMD FSR 1 spatial upscaling of the SDR front buffer");
 REXCVAR_DEFINE_BOOL(gtav_native_fsr1_sharpen, true, "GTAV", "Windows: sharpen FSR 1 output with RCAS (can be disabled live)");
 REXCVAR_DEFINE_BOOL(gtav_native_short_queue, false, "GTAV", "Windows: queue one guest frame instead of two (restart)");
@@ -249,6 +253,15 @@ class Renderer {
     }
   }
 
+  void PrefetchPipelineCache() {
+    if (REXCVAR_GET(gtav_native_low_memory) || pipeline_cache_seed_.valid()) return;
+    try {
+      pipeline_cache_seed_ = std::async(std::launch::async, ReadDriverCache);
+    } catch (const std::system_error&) {
+      // Thread unavailable: fall back to the regular read at device creation.
+    }
+  }
+
   void Submit(FramePacket&& packet) {
     if (!started_.exchange(true)) thread_ = std::thread([this] { ThreadMain(); });
     {
@@ -418,7 +431,8 @@ class Renderer {
       auto extent = [](RECT r) -> Extent { return {uint32_t(r.right - r.left), uint32_t(r.bottom - r.top)}; };
       const bool borderless = have_monitor && UseBorderless(mode, extent(monitor.rcMonitor));
       const DWORD style = borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
-      RECT rc{0, 0, 1280, 720};
+      const Extent initial = mode == OutputMode::k540p ? OutputPreset(mode) : Extent{1280, 720};
+      RECT rc{0, 0, LONG(initial.width), LONG(initial.height)};
       AdjustWindowRect(&rc, style, FALSE);
       HWND hwnd = CreateWindowExW(0, wc.lpszClassName, on ? L"GTA V" : L"GTA V - native renderer (shadow)", style,
                                   have_monitor ? monitor.rcMonitor.left : CW_USEDEFAULT,
@@ -499,13 +513,23 @@ class Renderer {
 #endif
 
   bool Init() {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    constexpr uint64_t kDefaultChunk = 32 * kMiB;
+#else
+    constexpr uint64_t kDefaultChunk = 64 * kMiB;
+#endif
+#ifdef GTAV_DESKTOP_WORKSHOP
+    memory_ = MakeGraphicsMemoryPolicy(REXCVAR_GET(gtav_native_low_memory), kDefaultChunk);
+#else
+    memory_ = MakeGraphicsMemoryPolicy(false, kDefaultChunk);
+#endif
 #ifdef __ANDROID__
     // Plume reports its Vulkan failures on stderr, which Android discards.
     std::freopen((ExeDir() / "logs" / "stderr.txt").string().c_str(), "w", stderr);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
 #endif
 #ifdef _WIN32
-    window_mode_ = ParseOutputMode(REXCVAR_GET(gtav_native_output));
+    window_mode_ = ParseOutputMode(REXCVAR_GET(gtav_native_output), memory_.lean);
     if (!CreateNativeWindow()) return false;
 #else
     SDL_RunOnMainThread(
@@ -552,7 +576,8 @@ class Renderer {
             }
           }
 #else
-          r->window_ = SDL_CreateWindow(on ? "GTA V" : "GTA V - native renderer (shadow)", 1280, 720,
+          const auto size = OutputPreset(ParseOutputMode(-1, r->memory_.lean));
+          r->window_ = SDL_CreateWindow(on ? "GTA V" : "GTA V - native renderer (shadow)", int(size.width), int(size.height),
                                         SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE |
                                             (REXCVAR_GET(gtav_native_hidden) ? SDL_WINDOW_HIDDEN : 0));
 #endif
@@ -615,7 +640,8 @@ class Renderer {
 #endif
     interface_ = plume::CreateVulkanInterface();
     if (!interface_) {
-      REXLOG_ERROR("[native] Plume Vulkan interface creation failed");
+      REXLOG_ERROR("[native] Could not start Vulkan. Install a compatible Vulkan 1.2 driver/loader. "
+                   "Potato reduces memory use; it does not provide a software renderer.");
       return false;
     }
     std::string preferred;
@@ -624,7 +650,7 @@ class Renderer {
       if (preferred.empty() && name.find(REXCVAR_GET(gtav_native_device)) != std::string::npos)
         preferred = name;
     }
-    LoadPipelineCache();
+    LoadPipelineCache();  // even on Potato: avoids driver compiles of already used pipelines
 #ifdef _WIN32
     anti_lag_requested_ = REXCVAR_GET(gtav_native_amd_anti_lag);
     const bool use_anti_lag = anti_lag_requested_ && REXCVAR_GET(gtav_native) == "on" &&
@@ -634,16 +660,25 @@ class Renderer {
     device_ = interface_->createDevice(preferred);
 #endif
     if (!device_) {
-      REXLOG_ERROR("[native] Plume device creation failed");
+      REXLOG_ERROR("[native] Could not create a Vulkan device. Check the listed adapters and update the GPU driver. "
+                   "A compatible integrated GPU can work; no dedicated card is required by the presets.");
       return false;
     }
     REXLOG_INFO("[native] using {}", device_->getDescription().name);
     {
       const auto& caps = device_->getCapabilities();
-      REXLOG_INFO("[native] device caps: geometry shader {}, descriptor indexing {}, scalar layout {}, "
-                  "buffer device address {}, present wait {}",
-                  caps.geometryShader, caps.descriptorIndexing, caps.scalarBlockLayout,
-                  caps.bufferDeviceAddress, caps.presentWait);
+      REXLOG_INFO("[native] device caps: geometry shader {}, descriptor indexing {}, sampled-image update-after-bind {}, "
+                  "scalar layout {}, buffer device address {}, max anisotropy {}, present wait {}",
+                  caps.geometryShader, caps.descriptorIndexing, caps.sampledImageUpdateAfterBind, caps.scalarBlockLayout,
+                  caps.bufferDeviceAddress, caps.maxSamplerAnisotropy, caps.presentWait);
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (!caps.descriptorIndexing || !caps.sampledImageUpdateAfterBind || !caps.bufferDeviceAddress) {
+        REXLOG_ERROR("[native] '{}' lacks required Vulkan features (descriptor indexing with sampled-image update-after-bind, "
+                     "or buffer device address). Potato uses the same renderer; try a compatible adapter/driver.",
+                     device_->getDescription().name);
+        return false;
+      }
+#endif
     }
     queue_cmd_ = device_->createCommandQueue(plume::RenderCommandListType::DIRECT);
     // Init steps are logged: a cold first boot after a rebuild sometimes never got past here.
@@ -661,7 +696,7 @@ class Renderer {
     REXLOG_INFO("[native] init: swap chain created, resizing");
     swapchain_->resize();
     REXLOG_INFO("[native] init: swap chain {}x{}", swapchain_->getWidth(), swapchain_->getHeight());
-    for (uint32_t i = 0; i < Backend::kFramesInFlight; i++) {
+    for (uint32_t i = 0; i < memory_.frame_slots; i++) {
       lists_[i] = queue_cmd_->createCommandList();
       present_lists_[i] = queue_cmd_->createCommandList();
       fences_[i] = device_->createCommandFence();
@@ -670,9 +705,10 @@ class Renderer {
     }
     CreateFramebuffers();
     REXLOG_INFO("[native] init: framebuffers created, backend init");
-    backend_ok_ = backend_.Init(device_.get());
+    backend_ok_ = backend_.Init(device_.get(), memory_);
     REXLOG_INFO("[native] init: done");
-    if (!backend_ok_) REXLOG_ERROR("[native] backend init failed; showing clear color only");
+    if (!backend_ok_) REXLOG_ERROR("[native] Backend initialization failed (check Vulkan feature/descriptor limits and "
+                                  "available memory); showing clear color only");
 #ifdef _WIN32
     const auto& caps = device_->getCapabilities();
     REXLOG_INFO("[graphics] Vulkan VSync requested={}, active={}; guest queue={}; AMD Anti-Lag requested={}, feature={}, enabled={}",
@@ -752,34 +788,42 @@ class Renderer {
 
   // Vulkan pipeline cache, persisted next to the exe so pipelines compiled once load in about a
   // millisecond on later runs. Saved periodically (the game exits without unwinding).
-  std::filesystem::path PipelineCachePath() { return ExeDir() / "shader_cache" / "vk_pipelines.bin"; }
+  static std::filesystem::path PipelineCachePath() { return ExeDir() / "shader_cache" / "vk_pipelines.bin"; }
+
+  static std::vector<uint8_t> ReadDriverCache() {
+    if (auto bytes = ReadCacheBytes(PipelineCachePath(), kDriverCacheLimit)) return std::move(*bytes);
+    REXLOG_WARN("[native] Vulkan pipeline cache unreadable or oversized; starting with a cold driver cache");
+    return {};
+  }
 
   void LoadPipelineCache() {
-    std::vector<uint8_t> data;
-    if (FILE* f = std::fopen(PipelineCachePath().string().c_str(), "rb")) {
-      std::fseek(f, 0, SEEK_END);
-      data.resize(size_t(std::max(0L, std::ftell(f))));
-      std::fseek(f, 0, SEEK_SET);
-      if (std::fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
-      std::fclose(f);
-    }
-    REXLOG_INFO("[native] pipeline cache: {} KB loaded", data.size() / 1024);
+    const bool prefetched = pipeline_cache_seed_.valid();
+    const auto start = std::chrono::steady_clock::now();
+    auto data = prefetched ? pipeline_cache_seed_.get() : ReadDriverCache();
+    const double wait_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    REXLOG_INFO("[native] pipeline cache: {} KB loaded ({}; {:.2f} ms on render thread)",
+                data.size() / 1024, prefetched ? "prefetch" : "direct read", wait_ms);
     plume::SetVulkanPipelineCacheData(std::move(data));
   }
+
+  std::future<std::vector<uint8_t>> pipeline_cache_seed_;
 
   void MaybeSavePipelineCache(uint32_t new_pipelines) {
     pipelines_since_save_ += new_pipelines;
     auto now = std::chrono::steady_clock::now();
-    if (!pipelines_since_save_ || now - last_cache_save_ < std::chrono::seconds(20)) return;
+    if (!pipelines_since_save_ || now - last_cache_save_ < std::chrono::seconds(20) ||
+        cache_writing_.exchange(true)) return;  // don't take a driver snapshot while a write is in progress
     last_cache_save_ = now;
     pipelines_since_save_ = 0;
     auto get_start = std::chrono::steady_clock::now();
     std::vector<uint8_t> data = plume::GetVulkanPipelineCacheData(device_.get());
     double get_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - get_start).count();
-    if (data.empty()) return;
+    if (data.empty() || data.size() > kDriverCacheLimit) {
+      cache_writing_ = false;
+      return;
+    }
     // The file is written by a background thread: ~33 MB on the busy E: disk took ~2 s, a freeze
     // every 20 s while the renderer (and so the guest, through the swap wait) waited for it.
-    if (cache_writing_.exchange(true)) return;  // the previous save is still being written
     std::thread([this, data = std::move(data), get_ms] {
       auto start = std::chrono::steady_clock::now();
       std::error_code ec;
@@ -1031,11 +1075,12 @@ class Renderer {
 
   void RetireAll() {
     submitter_.Drain();
-    for (uint32_t i = 0; i < Backend::kFramesInFlight; i++) Retire((slot_ + i) % Backend::kFramesInFlight);
+    uint32_t slot = slot_;
+    for (uint32_t i = 0; i < memory_.frame_slots; i++, slot = NextFrameSlot(slot, memory_)) Retire(slot);
   }
 
-  // Two frames in flight: frame N+1 is recorded while the GPU runs frame N, so a frame costs
-  // max(record, GPU) instead of record + GPU. Shot and dump frames are waited for at once.
+  // Normally two frames in flight, so recording and GPU work overlap. The lean path waits for
+  // the same slot to retire before reuse. Shot and dump frames are waited for at once.
   void Present(const FramePacket& frame) {
 #ifndef _WIN32
     input::UpdateMouseCapture();
@@ -1214,7 +1259,7 @@ class Renderer {
         queue_cmd_->executeCommandLists(&l, 1, nullptr, 0, nullptr, 0, fence);
       });
       in_flight_[slot] = true;
-      slot_ = (slot + 1) % Backend::kFramesInFlight;
+      slot_ = NextFrameSlot(slot, memory_);
       return;
     }
     auto acquire_end = std::chrono::steady_clock::now();
@@ -1307,6 +1352,13 @@ class Renderer {
       presentation.vsync = swapchain_->isVsyncEnabled();
       presentation.adapter = device_->getDescription().name;
       presentation.scene_scale = backend_.RenderScale();
+      presentation.gpu_slots = memory_.frame_slots;
+      presentation.lean_memory = memory_.lean;
+      if (menu::IsOpen()) {
+        presentation.memory = backend_.MemoryStats();
+        presentation.realism = backend_.Realism();
+        presentation.pipelines = backend_.PipelineStatus();
+      }
 #ifdef _WIN32
       presentation.boot_output = window_mode_;
       presentation.queue_limit = uint32_t(QueueLimit());
@@ -1337,7 +1389,7 @@ class Renderer {
     auto submit_end = std::chrono::steady_clock::now();
     auto present_end = submit_end;
     in_flight_[slot] = true;
-    slot_ = (slot + 1) % Backend::kFramesInFlight;
+    slot_ = NextFrameSlot(slot, memory_);
     auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
     timing_.Add(ms(record_end - record_start), ms(wait_end - wait_start));
     last_record_ms_ = ms(record_end - record_start);
@@ -1356,10 +1408,11 @@ class Renderer {
     if (interval > kHitchMs && backend_ok_) {
       auto st = backend_.LastStats();
       REXLOG_INFO("[native] hitch {:.1f} ms at guest frame {}: record {:.1f} ms, wait {:.1f} ms, {} new pipelines, "
-                  "{} textures, {} draws (misses: shaders {:.1f} pipelines {:.1f} textures {:.1f} ms; resolves {:.1f} ms)",
+                  "{} textures, {} draws (misses: shaders {:.1f} pipelines {:.1f} textures {:.1f} ms; resolves {:.1f} ms; "
+                  "background pipeline wait {:.1f} ms)",
                   interval, frame.index, ms(record_end - record_start), ms(wait_end - wait_start),
                   st.pipelines_created, st.textures, st.draws, st.shader_ms, st.pipeline_ms, st.texture_ms,
-                  st.resolve_ms);
+                  st.resolve_ms, st.pipeline_wait_ms);
     }
     timing_.acquire_sum += ms(acquire_end - main_submit_end);
     timing_.submit_sum += ms(submit_end - record_end);
@@ -1664,6 +1717,7 @@ class Renderer {
   plume::RenderWindow render_window_ = nullptr;  // ANativeWindow* of SDLActivity's surface
 #endif
 #endif
+  GraphicsMemoryPolicy memory_;  // sampled at renderer Init; never resized live
   std::unique_ptr<plume::RenderInterface> interface_;
   std::unique_ptr<plume::RenderDevice> device_;
   std::unique_ptr<plume::RenderCommandQueue> queue_cmd_;
@@ -1722,6 +1776,8 @@ Renderer g_renderer;
 }  // namespace
 
 bool Active() { return REXCVAR_GET(gtav_native) != "off"; }
+
+void PrefetchPipelineCache() { if (Active()) g_renderer.PrefetchPipelineCache(); }
 
 void Submit(FramePacket&& frame) { g_renderer.Submit(std::move(frame)); }
 

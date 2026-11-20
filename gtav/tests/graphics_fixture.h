@@ -41,12 +41,13 @@ inline std::string Read(const fs::path& path) {
 
 struct Flags {
   std::array<std::string, Index(Key::Count)> values{
-      "30", "false", "false", "true", "true", "4", "false", "30", "false", "720", "1.000000", "false", "false", "false", "true"};
+      "30", "false", "false", "true", "true", "4", "false", "30", "false", "-1", "1.000000", "false", "false", "false", "true",
+      "false", "false", "0", "0", "50", "false"};
   std::optional<Key> reject;
   std::string& operator[](Key key) { return values[Index(key)]; }
   gfx::Preferences Open(const fs::path& path, const fs::path& legacy = {}, gfx::Locks forced = {},
-                        bool ignore = false, bool windows = true) {
-    gfx::Preferences prefs(path, legacy, ignore, windows, forced, [this](Key key) { return (*this)[key]; },
+                        bool ignore = false, gfx::Platform platform = gfx::Platform::Windows) {
+    gfx::Preferences prefs(path, legacy, ignore, platform, forced, [this](Key key) { return (*this)[key]; },
         [this](Key key, std::string_view value) {
           if (reject == key) return false;
           (*this)[key] = value;

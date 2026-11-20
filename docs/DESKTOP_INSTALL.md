@@ -90,8 +90,12 @@ will be slower, but it does not remove saves. Never distribute your game data or
 with arrows, Tab or D-pad. **Enter / A / Play** confirms; **Esc / B** closes without loading a save.
 On Windows `gtav_launcher.exe --play` and on Linux/macOS normal launch of a ready install go directly
 to this screen, bypassing setup. The hub uses original artwork, and follows French/English locale.
-Open **Graphismes / Graphics** (F1 or Y) to set graphics before loading a profile. Esc or B leaves
-that tab without exiting the hub. See [options and driver support](WINDOWS_GRAPHICS.md).
+Open **Graphismes / Graphics** (F1 or Y) to set graphics before loading a profile. Choose **Ultra**
+for denser scene and water shading, **Potato** for reduced rendering and memory use, or **Standard**
+to return to native detail. On Windows, Auto output starts Potato in a smaller 540p window. In the
+running game the presets are under **F1 → Performance**; restart to apply scene and memory changes.
+Potato still needs a compatible Vulkan GPU/driver; 4 GB RAM with shared graphics is not a validated
+minimum. Esc or B leaves the tab without exiting the hub. See [graphics options and driver support](WINDOWS_GRAPHICS.md).
 
 | Card | What it does |
 | --- | --- |

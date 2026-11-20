@@ -151,7 +151,7 @@ index acfedce..d49581a 100644
              return addRange(RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, binding, count, nullptr));
          }
 diff --git a/plume_render_interface_types.h b/plume_render_interface_types.h
-index ad63e0e..51981fc 100644
+index ad63e0e..6dad806 100644
 --- a/plume_render_interface_types.h
 +++ b/plume_render_interface_types.h
 @@ -166,6 +166,7 @@ namespace plume {
@@ -208,7 +208,21 @@ index ad63e0e..51981fc 100644
  
          RenderFramebufferDesc() = default;
  
-@@ -1796,6 +1806,10 @@ namespace plume {
+@@ -1784,6 +1794,7 @@ namespace plume {
+ 
+         // Bindless resources.
+         bool descriptorIndexing = false;
++        bool sampledImageUpdateAfterBind = false;
+         bool scalarBlockLayout = false;
+ 
+         // Buffers.
+@@ -1791,11 +1802,16 @@ namespace plume {
+         
+         // Samplers.
+         bool samplerMirrorClampToEdge = false;
++        uint32_t maxSamplerAnisotropy = 1;
+ 
+         // Present.
          bool presentWait = false;
          bool displayTiming = false;
  
@@ -220,7 +234,7 @@ index ad63e0e..51981fc 100644
          uint64_t maxTextureSize = 0;
  
 diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
-index 4fdc4bf..8b8ca33 100644
+index 4fdc4bf..e23f36b 100644
 --- a/plume_vulkan.cpp
 +++ b/plume_vulkan.cpp
 @@ -11,7 +11,16 @@
@@ -956,7 +970,22 @@ index 4fdc4bf..8b8ca33 100644
  
          res = vmaCreateAllocator(&allocatorInfo, &allocator);
          if (res != VK_SUCCESS) {
-@@ -4196,19 +4575,33 @@ namespace plume {
+@@ -4158,11 +4537,14 @@ namespace plume {
+         capabilities.resolveRegion = true;
+         capabilities.resolveModes = false;
+         capabilities.descriptorIndexing = descriptorIndexingSupported;
++        capabilities.sampledImageUpdateAfterBind = descriptorIndexingSupported && indexingFeatures.descriptorBindingSampledImageUpdateAfterBind;
+         capabilities.scalarBlockLayout = scalarBlockLayoutSupported;
+         capabilities.bufferDeviceAddress = bufferDeviceAddressSupported;
+         capabilities.samplerMirrorClampToEdge = supportedOptionalExtensions.find(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME) != supportedOptionalExtensions.end();
+         capabilities.presentWait = presentWaitSupported;
+         capabilities.displayTiming = supportedOptionalExtensions.find(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) != supportedOptionalExtensions.end();
++        capabilities.maxSamplerAnisotropy = deviceFeatures.features.samplerAnisotropy
++            ? uint32_t(physicalDeviceProperties.limits.maxSamplerAnisotropy) : 1;
+         capabilities.maxTextureSize = physicalDeviceProperties.limits.maxImageDimension2D;
+         capabilities.preferHDR = memoryHeapSize > (512 * 1024 * 1024);
+         capabilities.dynamicDepthBias = true;
+@@ -4196,19 +4578,33 @@ namespace plume {
      }
  
      std::unique_ptr<RenderShader> VulkanDevice::createShader(const void *data, uint64_t size, const char *entryPointName, RenderShaderFormat format) {
@@ -993,7 +1022,7 @@ index 4fdc4bf..8b8ca33 100644
      }
  
      std::unique_ptr<RenderPipeline> VulkanDevice::createRaytracingPipeline(const RenderRaytracingPipelineDesc &desc, const RenderPipeline *previousPipeline) {
-@@ -4224,7 +4617,12 @@ namespace plume {
+@@ -4224,7 +4620,12 @@ namespace plume {
      }
  
      std::unique_ptr<RenderTexture> VulkanDevice::createTexture(const RenderTextureDesc &desc) {
@@ -1007,7 +1036,7 @@ index 4fdc4bf..8b8ca33 100644
      }
  
      std::unique_ptr<RenderAccelerationStructure> VulkanDevice::createAccelerationStructure(const RenderAccelerationStructureDesc &desc) {
-@@ -4248,13 +4646,21 @@ namespace plume {
+@@ -4248,13 +4649,21 @@ namespace plume {
      }
  
      std::unique_ptr<RenderFramebuffer> VulkanDevice::createFramebuffer(const RenderFramebufferDesc &desc) {
@@ -1030,7 +1059,7 @@ index 4fdc4bf..8b8ca33 100644
      void VulkanDevice::setBottomLevelASBuildInfo(RenderBottomLevelASBuildInfo &buildInfo, const RenderBottomLevelASMesh *meshes, uint32_t meshCount, bool preferFastBuild, bool preferFastTrace) {
          assert(meshes != nullptr);
          assert(meshCount > 0);
-@@ -4463,6 +4869,11 @@ namespace plume {
+@@ -4463,6 +4872,11 @@ namespace plume {
      void VulkanDevice::release() {
          nullBuffer = nullptr; // force destruction before destroying allocator
  
@@ -1042,7 +1071,7 @@ index 4fdc4bf..8b8ca33 100644
          if (allocator != VK_NULL_HANDLE) {
              vmaDestroyAllocator(allocator);
              allocator = VK_NULL_HANDLE;
-@@ -4495,7 +4906,27 @@ namespace plume {
+@@ -4495,7 +4909,27 @@ namespace plume {
  #else
      VulkanInterface::VulkanInterface() {
  #endif
@@ -1070,7 +1099,7 @@ index 4fdc4bf..8b8ca33 100644
          if (res != VK_SUCCESS) {
              fprintf(stderr, "volkInitialize failed with error code 0x%X.\n", res);
              return;
-@@ -4654,6 +5085,29 @@ namespace plume {
+@@ -4654,6 +5088,29 @@ namespace plume {
          return createdDevice->isValid() ? std::move(createdDevice) : nullptr;
      }
  
@@ -1100,7 +1129,7 @@ index 4fdc4bf..8b8ca33 100644
      const RenderInterfaceCapabilities &VulkanInterface::getCapabilities() const {
          return capabilities;
      }
-@@ -4666,6 +5120,26 @@ namespace plume {
+@@ -4666,6 +5123,26 @@ namespace plume {
          return instance != nullptr;
      }
  

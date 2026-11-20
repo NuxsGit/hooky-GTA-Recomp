@@ -255,6 +255,27 @@ void Disk() {
   fs::remove_all(root);
 }
 
+void Endpoints() {
+  CHECK(ParseEndpoint(" \t192.168.1.42:1\r\n") == (Endpoint{0xC0A8012A, 1}));
+  CHECK(ParseEndpoint("127.0.0.1") == (Endpoint{0x7F000001, kDefaultPort}));
+  const auto max_port = ParseEndpoint("100.64.23.45:65535");
+  CHECK(max_port && FormatEndpoint(*max_port) == "100.64.23.45:65535");
+  for (const auto bad : {"", "127.0.0.1:", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:9999999999",
+                         "127.0.0.1:+1", "127.0.0.1:-1", "127.0.0.1: 1", "127.0.0.1:1x", "127.0.0.1:1:2",
+                         "127.00.0.1", "127.0.0.256", "127..0.1", "127.1", "127.0.0.1.", "127.0.0.1:1/code",
+                         "0.0.0.0", "224.0.0.1", "255.255.255.255", "[::1]:30127", "localhost:30127"})
+    CHECK(!ParseEndpoint(bad));
+  CHECK(!ParseEndpoint(std::string_view("127.0.0.1\0:1", 12)));
+  Session invalid;
+  constexpr auto code = "0123456789abcdef0123456789abcdef";
+  CHECK(!invalid.Join("127.0.0.1:0", "Guest", code));
+  CHECK(!invalid.Join("127.0.0.1:30127", "Guest"));
+  CHECK(!invalid.Join("127.0.0.1:30127 bad", "Guest", code));  // never silently use a stale code
+  CHECK(!invalid.Join("127.0.0.1:30127 0123456789abcdef0123456789abcdef extra", "Guest"));
+  CHECK(!invalid.Join("127.0.0.1:30127", "../Guest", code));
+  CHECK(invalid.LinkState() == Link::Idle);
+}
+
 void Loopback() {
   Session host, client, friend2, rejected, occupied;
   CHECK(host.SetCourse(kTrack));
@@ -262,17 +283,24 @@ void Loopback() {
   CHECK(Until([&] { return host.View().link == Link::Hosting; }));
   const auto listening = host.View();
   CHECK(listening.port && listening.invite.size() == 32);
+  CHECK(listening.host_addresses == (std::vector<Endpoint>{{0x7F000001, listening.port}}));
+  const auto endpoint = listening.host_addresses.front();
+  const auto address = FormatEndpoint(endpoint);
+  const auto invitation = FormatInvitation(endpoint, listening.invite);
+  CHECK(invitation == "127.0.0.1:" + std::to_string(listening.port) + ' ' + listening.invite);
   CHECK(occupied.Host(listening.port, "Second host", true));
   CHECK(Until([&] { return occupied.View().link == Link::Failed; }));
+  CHECK(occupied.View().host_addresses.empty() && occupied.View().invite.empty());
   auto wrong = listening.invite;
   wrong[0] = wrong[0] == 'f' ? 'e' : 'f';
-  CHECK(rejected.Join("127.0.0.1", listening.port, "Wrong invite", wrong));
+  CHECK(rejected.Join(FormatInvitation(endpoint, wrong), "Wrong invite", listening.invite));
   CHECK(Until([&] { return rejected.View().link == Link::Failed; }));
   CHECK(host.View().world.players.size() == 1);
 
-  CHECK(client.Join("127.0.0.1", listening.port, "Friend", listening.invite));
+  CHECK(client.Join(" \t" + invitation + "\r\n", "Friend"));
   CHECK(Until([&] { return client.View().link == Link::Joined; }));
   CHECK(client.LinkState() == Link::Joined && !client.View().Owner());
+  CHECK(client.View().host_addresses.empty() && client.View().invite.empty());
   CHECK(!client.SetCourse({"Cannot edit host map", {}}) && !client.StartRace());
 #ifdef __linux__
   CHECK(Until([&] { return client.View().rtt_ms.has_value(); }));
@@ -280,7 +308,7 @@ void Loopback() {
 #endif
   const auto id = client.View().world.self;
   CHECK(id > 1 && client.View().world.course == kTrack);
-  CHECK(friend2.Join("127.0.0.1", listening.port, "Friend Two", listening.invite));
+  CHECK(friend2.Join(address, "Friend Two", " " + listening.invite + " "));
   CHECK(Until([&] { return friend2.View().link == Link::Joined; }));
   const auto id2 = friend2.View().world.self;
   CHECK(id2 > 1 && id2 != id);
@@ -318,28 +346,32 @@ void Loopback() {
   friend2.Stop();
   client.Stop();
   CHECK(Until([&] { return host.View().world.players.size() == 1; }));
-  CHECK(client.Join("127.0.0.1", listening.port, "Friend", listening.invite));
+  CHECK(client.Join(invitation, "Friend"));
   CHECK(Until([&] { return client.View().link == Link::Joined; }));
   CHECK(client.View().world.self != id);
   std::array<Session, kMaxPlayers - 2> others;
   for (auto& guest : others) {
-    CHECK(guest.Join("127.0.0.1", listening.port, "Friend", listening.invite));
+    CHECK(guest.Join(invitation, "Friend"));
     CHECK(Until([&] { return guest.View().link == Link::Joined; }));
   }
   CHECK(host.View().world.players.size() == kMaxPlayers);
-  CHECK(rejected.Join("127.0.0.1", listening.port, "Room full", listening.invite));
+  CHECK(rejected.Join(invitation, "Room full"));
   CHECK(Until([&] { return rejected.View().link == Link::Failed; }));
   CHECK(host.View().world.players.size() == kMaxPlayers);
   host.Stop();
+  CHECK(host.View().host_addresses.empty() && host.View().invite.empty());
   CHECK(Until([&] { return client.View().link == Link::Failed; }));
   CHECK(host.Host(listening.port, "Host", true));
   CHECK(Until([&] { return host.View().link == Link::Hosting; }));
   CHECK(host.View().invite != listening.invite);
   CHECK(host.View().world.course == kTrack);
+  CHECK(rejected.Join(invitation, "Expired invite"));
+  CHECK(Until([&] { return rejected.LinkState() == Link::Failed; }));
+  CHECK(host.View().world.players.size() == 1);
   // Cancel a newly scheduled join (before or during the connection), then start another
   // worker on the same object. Stop must join the old worker before clearing state.
   Session cancelled;
-  CHECK(cancelled.Join("127.0.0.1", listening.port, "Cancel", host.View().invite));
+  CHECK(cancelled.Join(FormatInvitation(endpoint, host.View().invite), "Cancel"));
   cancelled.Stop();
   CHECK(cancelled.LinkState() == Link::Idle && !cancelled.View().rtt_ms);
   CHECK(cancelled.Host(0, "Restart", true));
@@ -353,6 +385,7 @@ int main() {
   HuntAndLayoutCodec();
   Scene();
   Disk();
+  Endpoints();
   Loopback();
   std::cout << "Asset-free sandbox and TCP loopback checks passed\n";
 }
