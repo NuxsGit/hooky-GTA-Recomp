@@ -194,6 +194,13 @@ def main():
              f"-DCMAKE_LINKER={llvm_bin / 'lld-link.exe'}")
     build_sdk(sdk, install, clang, args.sdk_cache)
 
+    run("cmake", "-S", "gtav/tests", "-B", "build/graphics-tests", "-G", "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_CXX_COMPILER={llvm_bin / 'clang++.exe'}",
+        f"-DGTAV_IMGUI_SOURCE={sdk / 'thirdparty/imgui'}", "-DGTAV_TEST_PLAY_HUB=ON",
+        f"-DCMAKE_PREFIX_PATH={install}")
+    run("cmake", "--build", "build/graphics-tests", "--parallel")
+    run("ctest", "--test-dir", "build/graphics-tests", "--output-on-failure")
+
     run("cmake", "-S", "thirdparty/XenosRecomp", "-B", "build-xr", "-G", "Ninja",
         "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl",
         "-DBUILD_SHARED_LIBS=OFF", "-DXENOS_RECOMP_DXIL=OFF")
@@ -202,11 +209,6 @@ def main():
         "-DGTAV_GAME_DLL=ON", f"-Drexglue_DIR={install / 'lib/cmake/rexglue'}",
         f"-DREX_SDK_SRC={sdk / 'src'}", *clang)
     run("cmake", "--build", "build-dll", "--parallel")
-    run("cmake", "-S", "gtav/tests", "-B", "build/graphics-tests", "-G", "Ninja",
-        "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_CXX_COMPILER={llvm_bin / 'clang++.exe'}",
-        f"-DGTAV_IMGUI_SOURCE={sdk / 'thirdparty/imgui'}")
-    run("cmake", "--build", "build/graphics-tests", "--parallel")
-    run("ctest", "--test-dir", "build/graphics-tests", "--output-on-failure")
     run("cmake", "-S", "loader", "-B", "build-launcher", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
         "-DCMAKE_CXX_COMPILER=cl", "-DGTAV_LAUNCHER_TESTS=ON", f"-DGTAV_NIGHTLY_BUILD={args.nightly_build}",
         f"-DGTAV_SDK_THIRDPARTY={sdk / 'thirdparty'}")

@@ -35,7 +35,11 @@ int main(int argc, char** argv) {
   Temp dir;
   Flags flags;
   const auto file = dir.root / "data/config/graphics.ini";
-  auto prefs = flags.Open(file);
+  const auto legacy = dir.root / "gtav_settings.ini";
+  const std::string old = "gtav_native_output=720\ngtav_fps_limit=60\n";
+  Write(legacy, old);
+  auto prefs = flags.Open(file, legacy);
+  CHECK(prefs.LoadedPath() == legacy && !fs::exists(file));
   auto launch = [&](bool enabled, std::vector<SDL_Keycode> values, std::optional<Mode> mode) {
     SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
     Keys keys{std::move(values)};
@@ -52,7 +56,28 @@ int main(int argc, char** argv) {
   launch(true, {SDLK_F1, SDLK_RIGHT, SDLK_DOWN, SDLK_RIGHT, SDLK_ESCAPE, SDLK_RETURN}, Mode::Solo);
   CHECK(flags[Key::Output] == "1080" && flags[Key::SceneScale] == "0.875");
   Flags restarted;
-  CHECK(restarted.Open(file).Value(Key::Output) == "1080");
+  {
+    auto reloaded = restarted.Open(file, legacy);
+    CHECK(reloaded.LoadedPath() == file && reloaded.Value(Key::Output) == "1080");
+    CHECK(reloaded.Value(Key::SceneScale) == "0.875" && reloaded.Value(Key::FrameLimit) == "60");
+    CHECK(Read(legacy) == old);
+  }
+  {
+    gfx::Locks forced{};
+    forced[Index(Key::Output)] = true;
+    Flags overridden;
+    overridden[Key::Output] = "1440";
+    auto locked = overridden.Open(file, legacy, forced);
+    Hub hub(true, false, locked);
+    hub.SelectTab(2);
+    hub.Horizontal(1);  // the locked output row does not edit or poison the stored value
+    hub.Vertical(1);
+    hub.Horizontal(-1);
+    CHECK(locked.LastSave() == gfx::SaveState::Saved && locked.Value(Key::Output) == "1440");
+    CHECK(Read(file).find("gtav_native_output=1080\n") != std::string::npos);
+    CHECK(Read(file).find("gtav_native_render_scale=1\n") != std::string::npos);
+    CHECK(prefs.Edit(Key::SceneScale, "0.875") && prefs.Save() == gfx::SaveState::Saved);
+  }
   {
     Hub french(true, true, prefs), english(true, false, prefs);
     CHECK(french.Okay() && english.Okay());

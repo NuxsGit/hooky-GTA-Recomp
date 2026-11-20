@@ -2,7 +2,6 @@
 #include "win_process.h"
 #include "sources.h"
 
-#include <algorithm>
 #include <array>
 #include <stdexcept>
 #include <cstdlib>
@@ -217,7 +216,6 @@ void VerifyPackage(const fs::path& root, const fs::path& archive, const wchar_t*
 }
 
 void VerifyHostSelector(const fs::path& root) {
-  SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   std::wstring error;
   const auto host = root / "gtav_fast.exe";
   // The fixture DLL satisfies the imports, and traps any attempt to run a guest function. A missing
@@ -227,8 +225,13 @@ void VerifyHostSelector(const fs::path& root) {
   const auto legacy = root / "gtav_settings.ini";
   const char* legacy_values = "gtav_native_output=720\ngtav_fps_limit=60\n";
   Put(legacy, legacy_values);
-  enum class Case { SaveGraphics, ReloadGraphics, CliOverride, MissingInstall, UnicodeHome };
-  for (auto test : {Case::SaveGraphics, Case::ReloadGraphics, Case::CliOverride, Case::MissingInstall, Case::UnicodeHome}) {
+  // Exercise file migration and editing in the SDL fixture. The extracted host here proves that
+  // the exact packaged executable reads the resulting files, without CI-window focus assumptions.
+  const char* saved_values = "gtav_native_output=1080\ngtav_fps_limit=60\n"
+                             "gtav_native_render_scale=0.875\ngtav_native_fsr1=true\n";
+  enum class Case { LegacyGraphics, ReloadGraphics, CliOverride, MissingInstall, UnicodeHome };
+  for (auto test : {Case::LegacyGraphics, Case::ReloadGraphics, Case::CliOverride, Case::MissingInstall, Case::UnicodeHome}) {
+    if (test == Case::ReloadGraphics) Put(settings, saved_values);
     const bool enter = test == Case::MissingInstall || test == Case::UnicodeHome;
     const bool have_partitions = test == Case::UnicodeHome;
     if (have_partitions) fs::create_directories(root / "data/user/0000000000000000/545408A7/00000002");
@@ -250,28 +253,6 @@ void VerifyHostSelector(const fs::path& root) {
       CHECK(PostMessageW(modes, WM_KEYDOWN, vk, 0));  // virtual-key input, no hardware required
       CHECK(PostMessageW(modes, WM_KEYUP, vk, 0));
     };
-    auto click = [&](int x, int y) {
-      // Click the software hub's 1440x900 coordinate space. Unlike a posted F1 key, this
-      // does not need the CI runner to grant the new process real keyboard focus.
-      RECT rect{};
-      CHECK(GetClientRect(modes, &rect) && rect.right > 0 && rect.bottom > 0);
-      const float scale = std::min(rect.right / 1440.0f, rect.bottom / 900.0f);
-      const auto point = MAKELPARAM((rect.right - int(1440 * scale)) / 2 + int(x * scale),
-                                   (rect.bottom - int(900 * scale)) / 2 + int(y * scale));
-      CHECK(PostMessageW(modes, WM_MOUSEMOVE, 0, point));
-      CHECK(PostMessageW(modes, WM_LBUTTONDOWN, MK_LBUTTON, point));
-      CHECK(PostMessageW(modes, WM_LBUTTONUP, 0, point));
-    };
-    if (test == Case::SaveGraphics || test == Case::CliOverride) {
-      click(1265, 193);  // Graphismes tab.
-      click(916, 310);   // 720p -> 1080p, or ignored when output is forced.
-      if (test == Case::SaveGraphics) {
-        click(916, 374);  // Scene scale 100 -> 87.5%.
-        click(916, 434);  // Linear -> FSR 1.
-      } else {
-        click(588, 374);  // Change another value while output is forced.
-      }
-    }
     if (!enter) CHECK(PostMessageW(modes, WM_CLOSE, 0, 0));
     if (enter) {
       CHECK(PostMessageW(modes, WM_SETFOCUS, 0, 0));
@@ -292,20 +273,29 @@ void VerifyHostSelector(const fs::path& root) {
     }
     WaitExit(process.handle.Get(), 10'000, have_partitions ? 1 : 0);
     CHECK(Text(legacy) == legacy_values);
-    const auto saved = Text(settings);
+    const bool legacy_launch = test == Case::LegacyGraphics;
+    if (legacy_launch) CHECK(!fs::exists(settings));  // don't write until the player edits
+    else {
+      CHECK(Text(settings) == saved_values);
+      for (const auto& entry : fs::directory_iterator(settings.parent_path()))
+        CHECK(!entry.path().filename().wstring().starts_with(L"graphics.ini.new-"));
+    }
     const auto lines = Text(log);
-    const auto graphics = lines.find("[graphics] preferences:");
-    error = L"Pass " + std::to_wstring(int(test)) + L", file: " + Widen(saved.empty() ? "<empty or missing>" : saved);
-    if (graphics != lines.npos) error += L"\n" + Widen(lines.substr(graphics, 1200));
-    CHECK(saved.find("gtav_native_output=1080\n") != std::string::npos && saved.find("gtav_fps_limit=60\n") != std::string::npos);
-    CHECK(saved.find("gtav_native_fsr1=true\n") != std::string::npos);
-    CHECK(saved.find(test == Case::SaveGraphics || test == Case::ReloadGraphics ?
-        "gtav_native_render_scale=0.875\n" : "gtav_native_render_scale=1\n") != std::string::npos);
-    for (const auto& entry : fs::directory_iterator(settings.parent_path()))
-      CHECK(!entry.path().filename().wstring().starts_with(L"graphics.ini.new-"));
-    const auto* output = test == Case::SaveGraphics ? "=720" : test == Case::CliOverride ? "=1440 (launch override)" : "=1080";
-    CHECK(lines.find(std::string("[graphics] startup gtav_native_output") + output) != std::string::npos);
-    if (test != Case::SaveGraphics) CHECK(lines.find("[graphics] startup gtav_native_fsr1=true") != std::string::npos);
+    auto startup = [&](std::string_view field, std::string_view expected) {
+      const std::string prefix = "[graphics] startup " + std::string(field) + "=";
+      const auto pos = lines.find(prefix);
+      const auto actual = pos == lines.npos ? std::string{"<missing log entry>"} :
+          lines.substr(pos + prefix.size(), lines.find_first_of("\r\n", pos) - (pos + prefix.size()));
+      if (actual != expected) {
+        std::cerr << "Graphics startup error: pass " << int(test) << " " << field << " expected "
+                  << expected << ", got " << actual << '\n';
+      }
+      CHECK(actual == expected);
+    };
+    startup("gtav_native_output", legacy_launch ? "720" : test == Case::CliOverride ? "1440 (launch override)" : "1080");
+    startup("gtav_fps_limit", "60");
+    startup("gtav_native_fsr1", legacy_launch ? "false" : "true");
+    startup("gtav_native_render_scale", legacy_launch ? "1.000000" : "0.875000");
     CHECK(fs::is_directory(workspace / "profile") == have_partitions);
     CHECK(fs::is_directory(workspace / "courses") == have_partitions);
     const auto config = workspace / "profile/config";
@@ -318,7 +308,7 @@ void VerifyHostSelector(const fs::path& root) {
       }
     }
   }
-  std::cout << "Packaged host saved/reloaded graphics in the accented install, honored a CLI override, blocked co-op and flushed the isolated Workshop profile\n";
+  std::cout << "Packaged host loaded legacy and current graphics in the accented install, honored a CLI override, blocked co-op and flushed the isolated Workshop profile\n";
 }
 }  // namespace
 
