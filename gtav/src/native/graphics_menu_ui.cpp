@@ -299,9 +299,18 @@ void Latency(Controls& ui, const PresentationInfo& info) {
   ui.Combo(kGuestGpuLagRow);
   ImGui::Spacing();
   ImGui::Separator();
-  ImGui::TextUnformatted("Not integrated in this renderer");
-  ImGui::TextDisabled("DLSS  /  XeSS  /  temporal FSR  /  Frame generation x2-x8");
-  ImGui::TextWrapped("Temporal features require validated motion, depth, and scene colour before the game's HUD. No generated frames are being presented.");
+  ImGui::TextUnformatted("Frame generation");
+  ui.Combo(kFrameGenRow);
+  {
+    const auto fg = ui.prefs.Value(Key::FrameGeneration);
+    if (fg == "0" || fg.empty()) ImGui::TextDisabled("Frame generation: off - no interpolated frames.");
+    else if (fg == "2") ImGui::TextColored(kMint, "Frame generation: x2 - experimental interpolation.");
+    else ImGui::TextColored(kMint, "Frame generation: x%s - experimental interpolation.", fg.c_str());
+  }
+  ImGui::TextWrapped("x2-x8 interpolation. Requires validated motion, depth and scene colour before HUD. Without them no frames are generated; UI restored per request.");
+  ImGui::Separator();
+  ImGui::TextUnformatted("Not integrated: DLSS / XeSS / temporal FSR");
+  ImGui::TextWrapped("Those still require validated motion vectors and are not generated here.");
 }
 }  // namespace
 

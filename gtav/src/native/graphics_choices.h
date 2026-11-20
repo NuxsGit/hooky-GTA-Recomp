@@ -77,6 +77,17 @@ inline constexpr Row kContactRayRow{Key::ContactRays, {"Contact rays", "Rayons d
     {"Experimental screen-space occlusion before lighting. Independent of presets. Not hardware ray tracing.",
      "Occlusion expérimentale dans l’espace écran avant l’éclairage. Indépendante des préréglages. Pas de ray tracing matériel."}, kContactRayChoices};
 
+inline constexpr Choice kFrameGenChoices[]{
+    {"0", {"Off", "Désactivé"}},
+    {"2", {"x2", "x2"}},
+    {"3", {"x3", "x3"}},
+    {"4", {"x4", "x4"}},
+    {"8", {"x8", "x8"}},
+};
+inline constexpr Row kFrameGenRow{Key::FrameGeneration, {"Frame generation", "Génération d'images"},
+    {"Experimental interpolation x2-x8. Requires validated motion vectors; no generated frames without them. Choose multiplier; actual generation depends on driver and frame pacing.",
+     "Interpolation expérimental x2-x8. Nécessite vecteurs de mouvement validés ; pas d'images générées sans eux."}, kFrameGenChoices};
+
 inline constexpr std::array kStartupRows{kOutputRow, kScaleRow, kUpscalingRow, kFrameLimitRow,
                                          kVsyncRow, kQueueRow, kAntiLagRow};
 
