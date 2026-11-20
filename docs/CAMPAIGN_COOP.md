@@ -74,8 +74,18 @@ Même transport que les sessions privées : TCP `kDefaultPort=30127`, invitation
 ## Missions à 3 (toutes les missions)
 
 - **Toutes les missions histoire sont jouables à 3** (prologue, braquages, missions Michael/Franklin/Trevor, finales). Le host lance la mission, les 2 autres sont téléportés et restent sync via `Presence` + `Tu27Workshop` (triggers host-authoritative, checkpoints partagés).
-- Progression partagée : la sauvegarde `campaign_coop` avance pour les 3, pas besoin de refaire en solo. Si un joueur meurt/wasted, respawn co-op, `Mission Failed` relance pour les 3.
+- Progression partagée : la sauvegarde `campaign_coop` avance pour les 3, pas besoin de refaire en solo.
 - Free-roam reste dispo entre les missions (map markers, world sync).
+
+## Mort en coop - solo vs shared (GTA Online adapte)
+
+Copie GTA Online mais adaptee a la campagne (3 joueurs). Code : `gtav/src/sandbox/campaign_death.{h,cpp}` expose `DeathMode {SoloOnline, SharedMission}`, `CampaignDeathMode(in_mission)`, `IsCampaignSoloDeath()`, `DeathNotification()`, `HospitalPenalty()`.
+
+- **Open world / free roam (hors mission) - SOLO** : `DeathMode::SoloOnline`. Seul le joueur mort passe `Wasted` -> respawn hopital le plus proche, perte cash `-2% max $5000` (GTA Online adapted), les 2 autres continuent sans interruption. Notification : `"X is Wasted (solo) - respawning at hospital - others continue (GTA Online style)"`. Pas de `Mission Failed` partage. HUD F6/ShowCampaignStatus : `Solo Online (open world)`. Economie : `HospitalPenalty(cash)=min(cash*0.02,5000)` (`ApplyHospitalPenalty`). Ex: $10k -> -$200, $300k -> -$5000 cap.
+
+- **Missions histoire (braquages etc) - PARTAGE** : `DeathMode::SharedMission`. Mort partagee host-authoritative : fenetre de 30s `kSharedMissionReviveWindowMs=30000` pour revive par un coequipier (`Tu27Workshop::Revive` via `kRevive/kResurrect`), sinon `Mission Failed` pour les 3 et relance au checkpoint partage. Notification : `"X is Wasted - Mission Failed in 30s if not revived (shared)"`. HUD : `Shared (missions)`. Log `[campaign_death]` dans `frame_limit.cpp:NoteFailureEffect` + `debug_tools.cpp:PlayablePed` track `SetCampaignMissionState(kMission)` pour le routage.
+
+- **Implementation** : `debug_tools.cpp:PlayablePed` track `GetCampaignMissionState()` depuis `call.Flag(kMission)` quand `Mode::CampaignCoop`. `frame_limit.cpp:NoteFailureEffect` log solo vs shared. `desktop.cpp:DrawHud/ShowCampaignStatus` affiche `DeathModeLabel` + hint. `Tu27Workshop::Perform(Revive)` reste le native sous-jacent (host decide Mission Failed apres 30s). Tests : `kSoloHospitalPenaltyRate=0.02`, `kSoloHospitalPenaltyMax=5000`.
 
 ## Limites
 

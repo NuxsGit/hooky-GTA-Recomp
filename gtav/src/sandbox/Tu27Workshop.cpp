@@ -277,6 +277,9 @@ bool Tu27Workshop::Perform(Tool tool, Entity e, uint32_t value) {
   if (e.kind != Kind::Ped) return false;
   switch (tool) {
     case Tool::Revive:
+      // Campaign death routing: in open world solo, revive is local hospital (GTA Online style);
+      // in mission shared, revive has 30s window before host Mission Failed. Actual mode is
+      // chosen by the caller via CampaignDeathMode(in_mission) - this tool just executes the native.
       if (!call.Invoke(call.Flag(kDead, {e.handle, 0}) ? kResurrect : kRevive, {e.handle}) || !Exists(e)) return false;
       [[fallthrough]];
     case Tool::Heal: return call.Invoke(kHealth, {e.handle, 200}) && call.Invoke(kArmor, {e.handle, 100});

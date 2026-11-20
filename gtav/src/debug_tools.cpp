@@ -5,6 +5,7 @@
 
 #include "frame_pacing.h"
 #include "native/tu27_call.h"
+#include "sandbox/campaign_death.h"
 #include "sandbox/desktop.h"
 
 #ifdef GTAV_DESKTOP_WORKSHOP
@@ -116,6 +117,11 @@ Vec Horizontal(float yaw, float forward, float right, float up) {
 uint32_t PlayablePed(NativeCall& call) {
   // Campaign co-op at 3: keep presence and workshop sync during missions (all story missions playable at 3)
   const bool campaign_missions = sandbox::CurrentMode() == sandbox::Mode::CampaignCoop;
+  // Track mission state for GTA Online style death routing (solo open world vs shared missions).
+  if (campaign_missions) {
+    const bool in_mission = call.Flag(kMission);
+    if (call.Okay()) sandbox::SetCampaignMissionState(in_mission);
+  }
   if (gtav::InFailureEffect() || call.Flag(kNetworkGame) || call.Flag(kNetworkSession) ||
       (!campaign_missions && call.Flag(kMission)) || call.Flag(kCutscene) || call.Flag(kPaused) ||
       call.Flag(kSwitching) || !call.Flag(kFadedIn) || !call.Okay()) return 0;
