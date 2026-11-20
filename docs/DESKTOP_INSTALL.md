@@ -78,9 +78,9 @@ launchers closed. Keep your original until you have checked both profiles in the
 Campaign and Workshop keep their own profiles inside `data/user/`; Workshop uses
 `data/user/sandbox/profile/` and stores layouts in `data/user/sandbox/courses/`. `data/user/` also
 contains the large, read-only Disc 1 install partitions under `0000000000000000/545408A7/00000002`.
-The mode selector and F1 share `data/config/graphics.ini`, outside both save profiles. Neither
-update nor Recompile replaces the player profiles or settings. This is local persistence,
-not cloud synchronization or a backup against manual deletion, local drive failure, or a bad save.
+The mode selector and F1 share `data/config/graphics.ini`, outside both save profiles. Migration
+copies it when present; update and Recompile leave the player profiles and settings in place.
+These files are local, not synced or backed up against deletion, drive failure or a bad save.
 `data/build/` can be removed with the game and setup closed if you need space; the next compile
 will be slower, but it does not remove saves. Never distribute your game data or build outputs.
 

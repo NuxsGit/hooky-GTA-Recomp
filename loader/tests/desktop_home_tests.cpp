@@ -54,6 +54,9 @@ int main() try {
   Put(old / "data/build/obj/gtav_init.o", "local object");
   Put(old / "data/spirv/user.spv", "local shader");
   Put(old / "gtav_settings.ini", "local settings");
+  const auto graphics = fs::path("data/config/graphics.ini");
+  Put(old / graphics, "gtav_native_fsr1=true\n");
+  Put(old / "data/config/graphics.ini.new-orphan", "do not import a partial file");
   Put(old / "logs/native_dump/big-dump", "do not import");
 
 #ifdef __APPLE__
@@ -115,9 +118,10 @@ int main() try {
   fs::create_directory(fresh);  // an empty folder is OK
   CHECK(prepare(fresh, old));
   for (auto rel : {story, workshop, part, fs::path("data/user/sandbox/courses/track.gtcourse"),
-                  fs::path("data/build/obj/gtav_init.o"), fs::path("data/spirv/user.spv"), fs::path("gtav_settings.ini")})
+                  fs::path("data/build/obj/gtav_init.o"), fs::path("data/spirv/user.spv"), fs::path("gtav_settings.ini"), graphics})
     CHECK(Read(fresh / rel) == Read(old / rel) && !Read(fresh / rel).empty());
   CHECK(!fs::exists(fresh / "logs") && !fs::exists(fresh / "data/setup.lock"));
+  CHECK(!fs::exists(fresh / "data/config/graphics.ini.new-orphan"));
   Put(fresh / story, "played after migration");
   CHECK(!prepare(fresh, old) && Read(old / story) == "first story save" && Read(fresh / story) == "played after migration");
 

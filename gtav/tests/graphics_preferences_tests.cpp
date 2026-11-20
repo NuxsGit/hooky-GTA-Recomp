@@ -25,7 +25,7 @@ int main() {
   CHECK(!p.Edit(Key::FrameLimit, "0") && !p.Edit(Key::Vsync, "junk") && !p.Edit(Key::ExactCache, "true"));
   CHECK(!p.Edit(Key::SceneScale, "1,0") && !p.Edit(Key::Output, "4320"));
   // The hub applies edits, including startup values, before the guest is launched.
-  CHECK(p.Edit(Key::Output, "1080") && p.Edit(Key::Fsr1, "true"));
+  CHECK(p.Edit(Key::Output, "1080") && p.Edit(Key::Fsr1, "true") && p.Edit(Key::FsrSharpen, "false"));
   CHECK(flags[Key::Output] == "1080" && flags[Key::Fsr1] == "true" && !p.PendingRestart());
   CHECK(p.Save() == SaveState::Saved && Read(legacy) == old);
   // F1 applies live edits and stages restart edits without changing the active cvar.
@@ -43,7 +43,8 @@ int main() {
   restarted.BeginRun();
   CHECK(restarted.LoadedPath() == primary && restarted.InvalidEntries() == 0 && !restarted.PendingRestart());
   CHECK(fresh[Key::FrameLimit] == "60" && fresh[Key::Output] == "1080" && fresh[Key::SceneScale] == "0.666667");
-  CHECK(fresh[Key::Fsr1] == "true" && fresh[Key::Vsync] == "false" && fresh[Key::ShortQueue] == "true" && fresh[Key::AmdAntiLag] == "true");
+  CHECK(fresh[Key::Fsr1] == "true" && fresh[Key::FsrSharpen] == "false" && fresh[Key::Vsync] == "false");
+  CHECK(fresh[Key::ShortQueue] == "true" && fresh[Key::AmdAntiLag] == "true");
   // Benchmark mode permits live edits only; neither reading nor writing this file is allowed.
   Flags bench;
   const auto original = Read(primary);
