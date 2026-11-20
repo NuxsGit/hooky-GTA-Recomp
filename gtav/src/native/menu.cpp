@@ -121,9 +121,24 @@ void EnsureContext(uint32_t h) {
   io.Fonts->AddFontDefault(&font);
   ImGui::StyleColorsDark();
   ImGuiStyle& style = ImGui::GetStyle();
-  style.WindowRounding = 6.0f;
-  style.FrameRounding = 4.0f;
+  style.WindowRounding = 10.0f;
+  style.FrameRounding = 6.0f;
+  style.GrabRounding = 6.0f;
+  style.TabRounding = 8.f;
   style.ScaleAllSizes(g_scale);
+  // Global GTA tones — dark window, green selection
+  ImVec4* c = style.Colors;
+  c[ImGuiCol_WindowBg] = ImVec4(0.07f,0.07f,0.08f,0.97f);
+  c[ImGuiCol_Header] = ImVec4(0.18f,0.85f,0.45f,0.18f);
+  c[ImGuiCol_HeaderHovered] = ImVec4(0.18f,0.85f,0.45f,0.30f);
+  c[ImGuiCol_HeaderActive] = ImVec4(0.18f,0.85f,0.45f,0.45f);
+  c[ImGuiCol_Button] = ImVec4(0.13f,0.13f,0.14f,1.f);
+  c[ImGuiCol_ButtonHovered] = ImVec4(0.18f,0.85f,0.45f,0.28f);
+  c[ImGuiCol_CheckMark] = ImVec4(0.18f,0.85f,0.45f,1.f);
+  c[ImGuiCol_SliderGrab] = ImVec4(0.18f,0.85f,0.45f,1.f);
+  c[ImGuiCol_Tab] = ImVec4(0.11f,0.11f,0.12f,1.f);
+  c[ImGuiCol_TabHovered] = ImVec4(0.18f,0.85f,0.45f,0.28f);
+  c[ImGuiCol_TabActive] = ImVec4(0.18f,0.85f,0.45f,0.42f);
   if (previous) ImGui::SetCurrentContext(previous);
 }
 
@@ -190,12 +205,29 @@ void BuildSettings(uint32_t fps, double frame_ms, const PresentationInfo& info) 
 void BuildDebug(uint32_t fps, double frame_ms) {
   const auto display = ImGui::GetIO().DisplaySize;
   ImGui::SetNextWindowSize(ImVec2(std::min(820.f * g_scale, display.x - 20),
-                                std::min(520.f * g_scale, display.y - 20)), ImGuiCond_FirstUseEver);
+                                std::min(540.f * g_scale, display.y - 20)), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowPos(ImVec2(display.x * .5f, display.y * .5f), ImGuiCond_Appearing, ImVec2(.5f, .5f));
   bool open = true;
-  if (ImGui::Begin("GTA V Recomp | Debug (F2 / Esc)", &open, ImGuiWindowFlags_NoCollapse))
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
+  if (ImGui::Begin("HOOKY  //  DEBUG  [F2]", &open, ImGuiWindowFlags_NoCollapse)) {
+    ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "LOS SANTOS  //  DEBUG & WORKSHOP");
+    ImGui::TextDisabled("F2 debug  |  F6 Workshop  |  F8 Build  |  P/Phone  |  Esc fermer");
+#ifdef GTAV_DESKTOP_WORKSHOP
+    // Quick GTA shortcuts inside F2 — satisfies the “menu dans F2” alternative
+    if (sandbox::Active()) {
+      ImGui::Separator();
+      if (ImGui::Button("Ouvrir Telephone (P)")) { SwitchPanel(Panel::Phone, Panel::Debug); }
+      ImGui::SameLine();
+      if (ImGui::Button("Workshop (F6)")) { SwitchPanel(Panel::Workshop, Panel::Debug); }
+      ImGui::SameLine();
+      if (workshop::BuildAllowed() && ImGui::Button("Build (F8)")) { SwitchPanel(Panel::Build, Panel::Debug); }
+      ImGui::Separator();
+    }
+#endif
     debug::DrawPanel(fps, frame_ms, g_scale);
+  }
   ImGui::End();
+  ImGui::PopStyleVar();
   if (!open && g_panel == Panel::Debug) Close();
 }
 
@@ -203,11 +235,13 @@ void BuildDebug(uint32_t fps, double frame_ms) {
 void BuildWorkshop() {
   const auto screen = ImGui::GetIO().DisplaySize;
   ImGui::SetNextWindowPos(ImVec2(screen.x * .5f, screen.y * .5f), ImGuiCond_Appearing, ImVec2(.5f, .5f));
-  ImGui::SetNextWindowSize(ImVec2(std::min(760.f * g_scale, screen.x - 16), std::min(545.f * g_scale, screen.y - 16)),
+  ImGui::SetNextWindowSize(ImVec2(std::min(760.f * g_scale, screen.x - 16), std::min(565.f * g_scale, screen.y - 16)),
                            ImGuiCond_FirstUseEver);
   bool open = true;
-  if (ImGui::Begin("GTA V Recomp | Workshop (F6 / Esc)", &open, ImGuiWindowFlags_NoCollapse)) sandbox::DrawWorkshop();
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
+  if (ImGui::Begin("WORKSHOP  //  LOS SANTOS  [F6]", &open, ImGuiWindowFlags_NoCollapse)) sandbox::DrawWorkshop();
   ImGui::End();
+  ImGui::PopStyleVar();
   if (!open && g_panel == Panel::Workshop) Close();
 }
 #endif
@@ -251,8 +285,11 @@ bool ToggleBuild() {
   return true;
 }
 bool OpenPhone() {
-  // Let arrows and P reach the current text/nav widget; never open over a text field.
-  if (!sandbox::Active() || IsOpen()) return false;
+  // Phone is essential in story and coop — keep it available in Campaign as well.
+  // The phone UI itself adapts to the current mode (Workshop vs Campaign).
+  if (IsOpen()) return false;
+  // Allow P/Up even when a text field is not focused; Block only if another overlay is open.
+  // Previously blocked when !sandbox::Active() (i.e. single-player Campaign) which broke story.
   SwitchPanel(Panel::Phone, Panel::Closed);
   return true;
 }

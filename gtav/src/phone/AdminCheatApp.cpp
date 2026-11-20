@@ -22,6 +22,14 @@ void Button(const char* label, bool enabled, Command cmd) {
   if (ImGui::Button(label)) Submit(std::move(cmd));
   ImGui::EndDisabled();
 }
+void GtaButton(const char* label, bool enabled, Command cmd, ImVec2 size = {}) {
+  ImGui::BeginDisabled(!enabled);
+  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.13f, 0.13f, 0.14f, 1.f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.85f, 0.45f, 0.30f));
+  if (ImGui::Button(label, size)) Submit(std::move(cmd));
+  ImGui::PopStyleColor(2);
+  ImGui::EndDisabled();
+}
 void Check(const char* label, bool enabled, bool value, Command cmd) {
   ImGui::BeginDisabled(!enabled);
   if (ImGui::Checkbox(label, &value)) { cmd.on = value; Submit(std::move(cmd)); }
@@ -86,8 +94,8 @@ void MovementPage(const DesktopView& v, const PlayerView& local) {
   ImGui::EndDisabled();
   if (!v.caps.Has(Effect::Noclip)) ImGui::TextDisabled("Noclip needs the extended TU27 ABI opt-in.");
   ImGui::TextWrapped("Close the phone to steer: ZQSD (WASD positions), Space up, Ctrl down. On foot only.");
-  Button("Health 200 + armor 100", can && v.caps.Has(Tool::Heal), {Op::Heal});
-  Button("Clear blood and weapon damage", can && v.caps.Has(Tool::Damage), {Op::Damage});
+  GtaButton("Health 200 + armor 100", can && v.caps.Has(Tool::Heal), {Op::Heal});
+  GtaButton("Clear blood and weapon damage", can && v.caps.Has(Tool::Damage), {Op::Damage});
 }
 void GivePage(Panel& ui, const DesktopView& v, const PlayerView& local) {
   const auto& target = Target(ui, v, local);
@@ -102,8 +110,8 @@ void GivePage(Panel& ui, const DesktopView& v, const PlayerView& local) {
     }
     ImGui::EndCombo();
   }
-  Button("Give selected", can && v.caps.Has(Tool::Weapon), {Op::Weapon, target.id, weapons[size_t(ui.weapon)].hash});
-  ImGui::SameLine(); Button("Give armory", can && v.caps.Has(Tool::Weapon), {Op::Armory, target.id});
+  GtaButton("Give selected", can && v.caps.Has(Tool::Weapon), {Op::Weapon, target.id, weapons[size_t(ui.weapon)].hash});
+  ImGui::SameLine(); GtaButton("Give armory", can && v.caps.Has(Tool::Weapon), {Op::Armory, target.id});
   ImGui::TextWrapped("Only weapons available in the loaded TU27 build are given. Bulk give streams one request per frame.");
   Check("Infinite clip (self)", v.playable && local.mode == Mode::Creative && v.caps.Has(Effect::InfiniteAmmo),
         v.cheats.Has(Effect::InfiniteAmmo), {.op = Op::Effect, .value = unsigned(Effect::InfiniteAmmo)});
@@ -119,40 +127,40 @@ void GivePage(Panel& ui, const DesktopView& v, const PlayerView& local) {
     ImGui::EndCombo();
   }
   ImGui::BeginDisabled(!v.caps.Has(Tool::Warp)); ImGui::Checkbox("Driver seat + start engine", &ui.warp); ImGui::EndDisabled();
-  Button("Spawn in front", v.build && v.caps.Has(Feature::Vehicle) && picked && !v.busy,
+  GtaButton("Spawn in front", v.build && v.caps.Has(Feature::Vehicle) && picked && !v.busy,
          {.op = Op::QuickVehicle, .value = ui.vehicle, .on = ui.warp && v.caps.Has(Tool::Warp)});
-  Button("Repair current vehicle", v.playable && v.caps.Has(Tool::Repair), {Op::Repair});
-  ImGui::SameLine(); Button("Clean", v.playable && v.caps.Has(Tool::Clean), {Op::Clean});
+  GtaButton("Repair current vehicle", v.playable && v.caps.Has(Tool::Repair), {Op::Repair});
+  ImGui::SameLine(); GtaButton("Clean", v.playable && v.caps.Has(Tool::Clean), {Op::Clean});
 
   ImGui::SeparatorText("Workshop wallet");
   ImGui::Text("Balance: %u credits (not GTA story cash)", target.wallet);
-  Button("+1,000", true, {Op::Cash, target.id, 1000}); ImGui::SameLine();
-  Button("+50,000", true, {Op::Cash, target.id, 50000}); ImGui::SameLine();
-  Button("+1,000,000", true, {Op::Cash, target.id, 1000000});
-  Button("Survival kit", can && v.caps.Has(Tool::Heal) && v.caps.Has(Tool::Weapon), {Op::Kit, target.id});
+  GtaButton("+1,000", true, {Op::Cash, target.id, 1000}); ImGui::SameLine();
+  GtaButton("+50,000", true, {Op::Cash, target.id, 50000}); ImGui::SameLine();
+  GtaButton("+1,000,000", true, {Op::Cash, target.id, 1000000});
+  GtaButton("Survival kit", can && v.caps.Has(Tool::Heal) && v.caps.Has(Tool::Weapon), {Op::Kit, target.id});
 }
 void WorldPage(Panel& ui, const DesktopView& v) {
   const auto dest = Destinations();
-  Button("Travel to waypoint", v.playable && v.caps.Has(Feature::Waypoint), {Op::Waypoint});
+  GtaButton("Travel to waypoint", v.playable && v.caps.Has(Feature::Waypoint), {Op::Waypoint});
   if (ImGui::BeginCombo("Landmark", dest[size_t(ui.dest)].name)) {
     for (size_t i = 0; i < dest.size(); ++i) if (ImGui::Selectable(dest[i].name, int(i) == ui.dest)) ui.dest = int(i);
     ImGui::EndCombo();
   }
-  Button("Travel to landmark", v.playable && v.caps.Has(Feature::Teleport) && v.caps.Has(Feature::Ground), {.op = Op::Landmark, .value = unsigned(ui.dest)});
+  GtaButton("Travel to landmark", v.playable && v.caps.Has(Feature::Teleport) && v.caps.Has(Feature::Ground), {.op = Op::Landmark, .value = unsigned(ui.dest)});
   ImGui::TextWrapped("Checks collision and ground before moving. Drivers take their vehicle; passengers can't travel this way.");
   ImGui::SeparatorText("World");
   const auto weather = WeatherNames();
   ImGui::Combo("Weather", &ui.weather, weather.data(), int(weather.size()));
-  Button("Apply weather", v.playable && v.caps.Has(Tool::Weather), {.op = Op::Weather, .value = unsigned(ui.weather)});
+  GtaButton("Apply weather", v.playable && v.caps.Has(Tool::Weather), {.op = Op::Weather, .value = unsigned(ui.weather)});
   ImGui::SliderInt("Hour", &ui.hour, 0, 23);
-  Button("Set clock", v.playable && v.caps.Has(Tool::Clock), {.op = Op::Time, .value = unsigned(ui.hour)});
+  GtaButton("Set clock", v.playable && v.caps.Has(Tool::Clock), {.op = Op::Time, .value = unsigned(ui.hour)});
   Check("Freeze clock", v.playable && v.caps.Has(Tool::PauseClock), v.clock_frozen, {Op::PauseClock});
   Check("Lunar gravity", v.playable && v.caps.Has(Tool::Gravity), v.low_gravity, {Op::Gravity});
   if (!v.caps.Has(Feature::Ground)) ImGui::TextDisabled("Ground streaming / weather require extended TU27 ABI opt-in.");
 }
 void PlayersPage(Panel& ui, const DesktopView& v, const PlayerView& local) {
   if (v.practice) {
-    Button("Load / respawn three practice players", v.playable && v.caps.Has(Feature::Ped), {Op::Practice});
+    GtaButton("Load / respawn three practice players", v.playable && v.caps.Has(Feature::Ped), {Op::Practice});
     ImGui::TextDisabled("Simulated peds, not online accounts.");
   } else ImGui::TextWrapped("Private v2 peers are in F6. The v2 link doesn't authenticate a durable player identity.");
   const auto& p = Target(ui, v, local);
@@ -161,28 +169,28 @@ void PlayersPage(Panel& ui, const DesktopView& v, const PlayerView& local) {
   PickMode("Mode override", p, true);
   const bool others = local.id != p.id, ready = v.playable && p.ready;
   const bool moderate = PermissionManager::Moderate(local.role, p.role, !others);
-  Button("Go to player", ready && others && v.caps.Has(Feature::Teleport), {Op::GoTo, p.id});
-  ImGui::SameLine(); Button("Bring player", ready && others && v.caps.Has(Feature::Teleport), {Op::Bring, p.id});
+  GtaButton("Go to player", ready && others && v.caps.Has(Feature::Teleport), {Op::GoTo, p.id});
+  ImGui::SameLine(); GtaButton("Bring player", ready && others && v.caps.Has(Feature::Teleport), {Op::Bring, p.id});
   Check("Anchor / freeze", ready && moderate && v.caps.Has(Feature::Anchor), p.frozen, {Op::Freeze, p.id});
-  Button("Heal + armor", ready && v.caps.Has(Tool::Heal), {Op::Heal, p.id});
-  ImGui::SameLine(); Button("Revive", ready && others && v.caps.Has(Tool::Revive), {Op::Revive, p.id});
-  Button("Give survival kit", ready && v.caps.Has(Tool::Heal) && v.caps.Has(Tool::Weapon), {Op::Kit, p.id});
+  GtaButton("Heal + armor", ready && v.caps.Has(Tool::Heal), {Op::Heal, p.id});
+  ImGui::SameLine(); GtaButton("Revive", ready && others && v.caps.Has(Tool::Revive), {Op::Revive, p.id});
+  GtaButton("Give survival kit", ready && v.caps.Has(Tool::Heal) && v.caps.Has(Tool::Weapon), {Op::Kit, p.id});
   if (local.role == Role::Owner && others) {
-    Button(p.role == Role::Admin ? "Demote to Player" : "Promote to Admin", p.role != Role::Owner,
+    GtaButton(p.role == Role::Admin ? "Demote to Player" : "Promote to Admin", p.role != Role::Owner,
            {.op = Op::Promote, .target = p.id, .on = p.role != Role::Admin});
   }
   ImGui::SeparatorText("Moderation");
   ImGui::BeginDisabled(!moderate);
   ImGui::InputTextWithHint("##moderation-reason", "Required reason", ui.reason, sizeof ui.reason);
-  Button("Kick", ValidText(Trim(ui.reason), 160), {.op = Op::Kick, .target = p.id, .text = ui.reason});
-  ImGui::SameLine(); Button("Ban", ValidText(Trim(ui.reason), 160), {.op = Op::Ban, .target = p.id, .text = ui.reason});
+  GtaButton("Kick", ValidText(Trim(ui.reason), 160), {.op = Op::Kick, .target = p.id, .text = ui.reason});
+  ImGui::SameLine(); GtaButton("Ban", ValidText(Trim(ui.reason), 160), {.op = Op::Ban, .target = p.id, .text = ui.reason});
   ImGui::EndDisabled();
   if (ImGui::CollapsingHeader("Persistent ban list")) {
     for (size_t i = 0; i < v.bans.size(); ++i) {
       const auto& b = v.bans[i]; ImGui::PushID(int(i));
       ImGui::TextUnformatted(b.name.c_str()); ImGui::SameLine(); ImGui::TextDisabled("%s", b.utc.c_str());
       ImGui::TextWrapped("%s", b.reason.c_str());
-      Button("Unban", true, {.op = Op::Unban, .text = b.identity});
+      GtaButton("Unban", true, {.op = Op::Unban, .text = b.identity});
       ImGui::PopID();
     }
     if (v.bans.empty()) ImGui::TextDisabled("No workshop bans");
@@ -193,11 +201,27 @@ void PlayersPage(Panel& ui, const DesktopView& v, const PlayerView& local) {
 void DrawAdminCheatApp(const DesktopView& v, const PlayerView& local) {
   if (!v.admin || !LocalAuthority() || !PermissionManager::AdminOS(local.role)) return;
   static Panel ui;
-  constexpr const char* tabs[]{"Gamemode & Map", "Movement", "Give", "Teleport & World", "Players & Moderation"};
-  if (ImGui::BeginCombo("##admin-tab", tabs[ui.tab])) {
-    for (unsigned i = 0; i < std::size(tabs); ++i) if (ImGui::Selectable(tabs[i], ui.tab == i)) ui.tab = i;
-    ImGui::EndCombo();
+  // GTA pill tabs — remplace le combo terne
+  constexpr const char* tabs[]{"MAP", "MOVE", "GIVE", "WORLD", "PLAYERS"};
+  constexpr const char* tab_labels[]{"Gamemode & Map", "Movement", "Give", "Teleport & World", "Players & Moderation"};
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.f);
+  for (unsigned i = 0; i < std::size(tabs); ++i) {
+    if (i) ImGui::SameLine(0, 6);
+    const bool active = ui.tab == i;
+    if (active) {
+      ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.85f, 0.45f, 1.f));
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.05f, 0.05f, 1.f));
+    } else {
+      ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.14f, 0.15f, 1.f));
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.86f, 1.f));
+    }
+    if (ImGui::Button(tabs[i])) ui.tab = i;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tab_labels[i]);
+    ImGui::PopStyleColor(2);
   }
+  ImGui::PopStyleVar();
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(0.18f, 0.85f, 0.45f, 1.f), "%s", tab_labels[ui.tab]);
   if (ImGui::BeginChild("admin-scroll", ImVec2(0, -ImGui::GetTextLineHeightWithSpacing() * 1.25f))) {
     if (!v.playable) ImGui::TextDisabled("Waiting for a controllable TU27 player in free roam.");
     if (v.storage_error) ImGui::TextColored({1.f, .65f, .27f, 1.f}, "Config save error / incompatible version");
