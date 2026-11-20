@@ -157,7 +157,7 @@ void Performance(Controls& ui, const PresentationInfo& info) {
       if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", preset.help.en);
     }
     ImGui::EndDisabled();
-    ImGui::TextWrapped("Preset changes keep the FPS limit, display overrides and locked options. Potato targets low-memory PCs; Extra Potato (33% scene, GTA IV faces) runs on 3x rien ultra-low hardware. Compatible Vulkan graphics are still required.");
+    ImGui::TextWrapped("Preset changes keep the FPS limit, display overrides and locked options. Potato targets low-memory PCs; Extra Potato (33%% scene, GTA IV faces) runs on 3x rien ultra-low hardware. Compatible Vulkan graphics are still required.");
     ImGui::TextDisabled("This run: %.0f%% scene  /  %u GPU slot%s  /  %s caches%s", info.scene_scale * 100,
                         info.gpu_slots, info.gpu_slots == 1 ? "" : "s", info.lean_memory ? "reduced" : "normal",
                         info.scene_scale < 0.4f ? " (Extra Potato)" : "");

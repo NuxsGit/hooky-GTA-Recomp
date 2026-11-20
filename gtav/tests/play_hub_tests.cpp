@@ -95,13 +95,13 @@ int main(int argc, char** argv) {
     Hub french(true, true, prefs), english(true, false, prefs);
     CHECK(french.Okay() && english.Okay());
     CHECK(!french.Click({1200, 181}, 1) && french.GraphicsOpen());
-    CHECK(!french.Click({394, 306}, 1));  // Standard button, clears Potato
+    CHECK(!french.Click({297, 306}, 1));  // Standard button, clears Potato (6 presets: Extra Potato shifts right-aligned row)
     CHECK(flags[Key::SceneScale] == "1" && flags[Key::LowMemory] == "false");
-    CHECK(!french.Click({510, 306}, 1));  // Ultra button
+    CHECK(!french.Click({413, 306}, 1));  // Ultra button
     CHECK(flags[Key::SceneScale] == "1.5" && flags[Key::MaterialFiltering] == "true");
     CHECK(!french.Click({913, 468}, 1));  // right chevron on the spatial upscaler row
     CHECK(flags[Key::Fsr1] == "true" && prefs.LastSave() == gfx::SaveState::Saved);
-    CHECK(!french.Click({626, 306}, 1));  // Potato resets FSR and visual extras
+    CHECK(!french.Click({529, 306}, 1));  // Potato resets FSR and visual extras
     CHECK(flags[Key::LowMemory] == "true" && flags[Key::MaterialFiltering] == "false" && flags[Key::Fsr1] == "false");
     if (argc >= 2) {
       const std::string prefix = argv[1];
