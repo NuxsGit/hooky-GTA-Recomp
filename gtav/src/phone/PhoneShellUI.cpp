@@ -176,30 +176,30 @@ PhoneAction DrawPhone(const DesktopView& v, unsigned fps, float scale) {
       if (isCampaignCoop) {
         if (GtaAppTile("CAMPAGNE\nEtat", "★", kGtaGreen, scale, tile)) page = Page::Campaign;
         ImGui::SameLine();
-        if (GtaAppTile("SESSION\nF6 Atelier", "◉", kGtaGreen, scale, tile)) action = PhoneAction::Session;
+        if (GtaAppTile("SESSION\nWorkshop F6", "◉", kGtaGreen, scale, tile)) action = PhoneAction::Session;
       } else if (isCampaign) {
         if (GtaAppTile("CAMPAGNE\nHistoire", "★", kGtaGreen, scale, tile)) page = Page::Campaign;
         ImGui::SameLine();
-        if (GtaAppTile("CARTE\nLos Santos", "▢", kGtaGray, scale, tile)) page = Page::Status;
+        if (GtaAppTile("STATUS\nWorld & room", "▢", kGtaGray, scale, tile)) page = Page::Status;
       } else {
-        if (GtaAppTile("SESSION\nF6 Atelier", "◉", kGtaGreen, scale, tile)) action = PhoneAction::Session;
+        if (GtaAppTile("SESSION\nWorkshop F6", "◉", kGtaGreen, scale, tile)) action = PhoneAction::Session;
         ImGui::SameLine();
-        if (GtaAppTile("ETAT\nMonde & salon", "●", ImVec4(0.35f,0.55f,0.95f,1.f), scale, tile)) page = Page::Status;
+        if (GtaAppTile("STATUS\nWorld & room", "●", ImVec4(0.35f,0.55f,0.95f,1.f), scale, tile)) page = Page::Status;
       }
 
       bool hasBuildTile = false;
       if (isWorkshop && build) {
-        if (GtaAppTile("BUILD\nOutils creatifs", "⬢", kGtaYellow, scale, tile)) action = PhoneAction::Build;
+        if (GtaAppTile("BUILD\nCreative tools", "⬢", kGtaYellow, scale, tile)) action = PhoneAction::Build;
         hasBuildTile = true;
       } else if (isCampaignCoop) {
-        if (GtaAppTile("INVITATION\nCopier code", "✉", ImVec4(0.95f,0.55f,0.10f,1.f), scale, tile)) {
+        if (GtaAppTile("INVITE\nCopy code", "✉", ImVec4(0.95f,0.55f,0.10f,1.f), scale, tile)) {
           if (!camp.invite.empty()) ImGui::SetClipboardText(camp.invite.c_str());
         }
         hasBuildTile = true;
       }
       if (authority) {
         if (hasBuildTile) ImGui::SameLine();
-        if (GtaAppTile("ADMIN OS\nHote", "♛", ImVec4(0.95f,0.25f,0.25f,1.f), scale, tile)) page = Page::Admin;
+        if (GtaAppTile("ADMIN OS\nHost controls", "♛", ImVec4(0.95f,0.25f,0.25f,1.f), scale, tile)) page = Page::Admin;
         hasBuildTile = true;
       }
       if (isWorkshop && !hasBuildTile) {
