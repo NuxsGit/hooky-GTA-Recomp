@@ -1,3 +1,4 @@
+// Launcher 0.8.6 - phone fix preserved: base GTA phone (P/Haut) via guest, Workshop phone O/F7/Y panel supplementaire
 #include "desktop_home.h"
 
 #include "setup_lock.h"
