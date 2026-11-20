@@ -74,9 +74,12 @@ bool JoinCampaign(std::string_view address_or_invitation, std::string name, std:
 CampaignView ViewCampaign();
 void PublishCampaignPresence(std::optional<Presence> point);
 
-namespace rex { struct PathConfig; }
-// Called by desktop Configure when Mode::CampaignCoop is selected.
-bool ConfigureCampaign(rex::PathConfig& paths, std::filesystem::path& installed_content_root,
-                       std::string& error_out);
+} // namespace gtav::sandbox
 
+namespace rex { struct PathConfig; }
+
+namespace gtav::sandbox {
+// Called by desktop Configure when Mode::CampaignCoop is selected.
+bool ConfigureCampaign(::rex::PathConfig& paths, std::filesystem::path& installed_content_root,
+                       std::string& error_out);
 } // namespace gtav::sandbox

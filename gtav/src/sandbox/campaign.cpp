@@ -197,7 +197,7 @@ void PublishCampaignPresence(std::optional<Presence> point) {
   Party().Publish(std::move(point));
 }
 
-bool ConfigureCampaign(rex::PathConfig& paths, std::filesystem::path& installed_content_root, std::string& error_out) {
+bool ConfigureCampaign(::rex::PathConfig& paths, std::filesystem::path& installed_content_root, std::string& error_out) {
   (void)paths; (void)installed_content_root; (void)error_out;
   // Desktop's Configure handles this directly via PrepareCampaignWorkspace.
   // Kept for API parity; real wiring happens in desktop.cpp.
