@@ -55,10 +55,11 @@ Guest GuestState() {
 }
 
 const char* GuestLabel() {
+  const bool campaign = CurrentMode() == Mode::CampaignCoop;
   switch (GuestState()) {
-    case Guest::Loading: return "Waiting for the TU27 world. Load a sandbox save and enter free roam.";
-    case Guest::Ready: return "Free roam ready. F6: Workshop | F8: Creative Build | P / Up: phone.";
-    case Guest::Busy: return "Waiting for free roam (not during a cutscene, mission or pause).";
+    case Guest::Loading: return campaign ? "Campaign co-op ready. All missions playable at 3 from start." : "Waiting for the TU27 world. Load a sandbox save and enter free roam.";
+    case Guest::Ready: return campaign ? "Campaign co-op ready. Missions at 3 - F6: Session | F8: Build | P: phone." : "Free roam ready. F6: Workshop | F8: Creative Build | P / Up: phone.";
+    case Guest::Busy: return campaign ? "Waiting for world (cutscene/pause) - missions stay synced at 3." : "Waiting for free roam (not during a cutscene, mission or pause).";
     default: return "TU27 native context unavailable. Local vehicles and map markers are disabled.";
   }
 }
@@ -159,7 +160,7 @@ void ShowNetwork(const SessionView& view) {
   static std::string notice;
   const bool is_campaign = CurrentMode() == Mode::CampaignCoop;
   ImGui::TextUnformatted(LinkLabel(view.link));
-  if (is_campaign) ImGui::TextDisabled("Campaign coop: 3 slots locked to Michael / Franklin / Trevor. Saves are isolated.");
+  if (is_campaign) ImGui::TextDisabled("Campaign coop: 3 slots locked to Michael / Franklin / Trevor. All missions at 3 - saves isolated.");
   if (!view.error.empty()) ImGui::TextWrapped("%s", view.error.c_str());
   const bool idle = view.link == Link::Idle || view.link == Link::Failed;
   if (idle) {
@@ -185,7 +186,7 @@ void ShowNetwork(const SessionView& view) {
         // Note: desktop does not write launcher file directly; launcher owns it.
       }
     }
-    if (is_campaign) ImGui::TextDisabled("Up to 3 players. Each protagonist is locked to one slot from the start.");
+    if (is_campaign) ImGui::TextDisabled("Up to 3 players. Each protagonist locked. All story missions co-op at 3.");
     ImGui::SeparatorText("Join a friend");
     ImGui::InputTextWithHint("Server", "IPv4:port or paste the full invitation", address, sizeof(address));
     ImGui::InputTextWithHint("Invite code", "Leave blank if pasted with the address", code, sizeof(code));
@@ -248,9 +249,9 @@ void ShowNetwork(const SessionView& view) {
 void ShowCampaignStatus() {
   if (CurrentMode() != Mode::CampaignCoop) return;
   const auto view = ViewCampaign();
-  ImGui::SeparatorText("Campaign co-op");
+  ImGui::SeparatorText("Campaign co-op - Missions at 3");
   ImGui::Text("Save: isolated under data/user/campaign_coop (solo saves untouched)");
-  ImGui::Text("Unlock: Michael, Franklin and Trevor are available from the start");
+  ImGui::Text("Unlock: Michael/Franklin/Trevor from start - all missions co-op at 3");
   if (view.self_character)
     ImGui::Text("You are: %s", CharacterLabel(*view.self_character));
   else if (view.link == Link::Joined || view.link == Link::Hosting)

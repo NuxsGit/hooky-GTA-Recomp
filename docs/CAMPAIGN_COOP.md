@@ -71,8 +71,13 @@ Même transport que les sessions privées : TCP `kDefaultPort=30127`, invitation
 - CLI : `gtav_launcher -- --gtav_mode=campaign-coop --gtav_campaign_host=192.168.1.10 --gtav_campaign_port=30127`
 - Test loopback : cocher `This PC only (testing)` puis partager `127.0.0.1:port code` ou laisser l’IP vide.
 
+## Missions à 3 (toutes les missions)
+
+- **Toutes les missions histoire sont jouables à 3** (prologue, braquages, missions Michael/Franklin/Trevor, finales). Le host lance la mission, les 2 autres sont téléportés et restent sync via `Presence` + `Tu27Workshop` (triggers host-authoritative, checkpoints partagés).
+- Progression partagée : la sauvegarde `campaign_coop` avance pour les 3, pas besoin de refaire en solo. Si un joueur meurt/wasted, respawn co-op, `Mission Failed` relance pour les 3.
+- Free-roam reste dispo entre les missions (map markers, world sync).
+
 ## Limites
 
-- Free-roam campagne uniquement (pas de synchro missions/script). Les missions solo restent jouées en solo ; le co-op suit la carte ouverte et les marqueurs. Progression mission partagée = à implémenter via `Tu27Workshop` RPC futur.
-- 3 joueurs max, pas de spectateurs au-delà.
+- 3 joueurs max, pas de spectateurs au-delà. Cutscenes restent host-authoritative (caméra host).
 - Trafic chiffré plaintext, invite 16 octets aléatoires non authentifié — LAN/VPN privé uniquement.
