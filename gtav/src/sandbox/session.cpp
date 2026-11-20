@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <system_error>
 #include <utility>
 
 namespace gtav::sandbox {
@@ -188,12 +189,12 @@ struct Peer {
   uint32_t id = 0;
 };
 
-bool FinishConnect(Sock socket, std::stop_token stop) {
+bool FinishConnect(Sock socket, const std::atomic<bool>& stop_requested) {
 #ifndef _WIN32
   if (socket >= FD_SETSIZE) return false;
 #endif
   const auto until = NowMs() + kHandshakeMs;
-  while (!stop.stop_requested() && NowMs() < until) {
+  while (!stop_requested.load(std::memory_order_relaxed) && NowMs() < until) {
     fd_set writable, failed;
     FD_ZERO(&writable);
     FD_ZERO(&failed);
@@ -218,7 +219,7 @@ bool FinishConnect(Sock socket, std::stop_token stop) {
 
 Session::~Session() {
   // Don't reconstruct UI state from a destructor.
-  if (worker_.joinable()) { worker_.request_stop(); worker_.join(); }
+  StopWorker();
 }
 
 bool Session::Available() const { return link_ == Link::Idle || link_ == Link::Failed; }
@@ -239,7 +240,13 @@ bool Session::Host(uint16_t port, std::string name, bool loopback_only) {
     link_ = Link::Opening;
     ResetRoom(std::move(name));
   }
-  worker_ = std::jthread([this, port, loopback_only](std::stop_token stop) { RunHost(stop, port, loopback_only); });
+  stop_requested_.store(false, std::memory_order_relaxed);
+  try {
+    worker_ = std::thread([this, port, loopback_only] { RunHost(port, loopback_only); });
+  } catch (const std::system_error&) {
+    Fail("Could not start the private session worker.");
+    return false;
+  }
   return true;
 }
 
@@ -255,9 +262,15 @@ bool Session::Join(std::string ipv4, uint16_t port, std::string name, std::strin
     link_ = Link::Connecting;
     port_ = port;
   }
-  worker_ = std::jthread([this, ipv4 = std::move(ipv4), port, name = std::move(name), invite = *invite](std::stop_token stop) {
-    RunClient(stop, ipv4, port, name, invite);
-  });
+  stop_requested_.store(false, std::memory_order_relaxed);
+  try {
+    worker_ = std::thread([this, ipv4 = std::move(ipv4), port, name = std::move(name), invite = *invite] {
+      RunClient(ipv4, port, name, invite);
+    });
+  } catch (const std::system_error&) {
+    Fail("Could not start the private session worker.");
+    return false;
+  }
   return true;
 }
 
@@ -266,8 +279,15 @@ void Session::Stop() {
   StopLocked();
 }
 
+void Session::StopWorker() {
+  // The worker never takes lifecycle_. Don't join while holding mutex_.
+  if (!worker_.joinable()) return;
+  stop_requested_.store(true, std::memory_order_relaxed);
+  worker_.join();
+}
+
 void Session::StopLocked() {
-  if (worker_.joinable()) { worker_.request_stop(); worker_.join(); }
+  StopWorker();
   std::lock_guard lock(mutex_);
   link_ = Link::Idle;
   port_ = 0;
@@ -336,7 +356,7 @@ void Session::ResetRace() {
   if (link_ == Link::Hosting || Available()) room_.Reset();
 }
 
-void Session::RunHost(std::stop_token stop, uint16_t port, bool loopback_only) {
+void Session::RunHost(uint16_t port, bool loopback_only) {
   Sockets sockets;
   Socket listener(sockets.ready ? socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) : kInvalid);
   wire::Invite invite{};
@@ -370,7 +390,7 @@ void Session::RunHost(std::stop_token stop, uint16_t port, bool loopback_only) {
   }
   std::vector<Peer> peers;
   int64_t snapshot_at = 0;
-  while (!stop.stop_requested()) {
+  while (!stop_requested_.load(std::memory_order_relaxed)) {
     const auto now = NowMs();
     for (unsigned i = 0; i < 3; ++i) {
       Socket incoming(accept(listener.Get(), nullptr, nullptr));
@@ -427,7 +447,7 @@ void Session::RunHost(std::stop_token stop, uint16_t port, bool loopback_only) {
   }
 }
 
-void Session::RunClient(std::stop_token stop, std::string ipv4, uint16_t port, std::string name, wire::Invite invite) {
+void Session::RunClient(const std::string& ipv4, uint16_t port, const std::string& name, wire::Invite invite) {
   Sockets sockets;
   Socket connection(sockets.ready ? socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) : kInvalid);
   auto addr = Address(port, 0);
@@ -438,8 +458,8 @@ void Session::RunClient(std::stop_token stop, std::string ipv4, uint16_t port, s
   }
   LowLatency(connection.Get());
   if (connect(connection.Get(), reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0 &&
-      !(InProgress(SocketError()) && FinishConnect(connection.Get(), stop))) {
-    if (!stop.stop_requested()) Fail("Cannot reach the host. Check address, TCP port and firewall/forwarding.");
+      !(InProgress(SocketError()) && FinishConnect(connection.Get(), stop_requested_))) {
+    if (!stop_requested_.load(std::memory_order_relaxed)) Fail("Cannot reach the host. Check address, TCP port and firewall/forwarding.");
     return;
   }
   const auto begin = NowMs();
@@ -447,7 +467,7 @@ void Session::RunClient(std::stop_token stop, std::string ipv4, uint16_t port, s
   pipe.Queue(wire::Hello(invite, name), begin);
   uint32_t self = 0;
   int64_t update_at = 0, rtt_at = 0;
-  while (!stop.stop_requested()) {
+  while (!stop_requested_.load(std::memory_order_relaxed)) {
     const auto now = NowMs();
     if ((!self && now - begin >= kHandshakeMs) || !pipe.Read(now, [&](const wire::Frame& frame) {
           auto view = wire::ReadSnapshot(frame);
@@ -459,7 +479,7 @@ void Session::RunClient(std::stop_token stop, std::string ipv4, uint16_t port, s
           remote_ = std::move(*view);
           return true;
         }) || !pipe.Send(now)) {
-      if (!stop.stop_requested()) Fail(self ? "Disconnected from the host." :
+      if (!stop_requested_.load(std::memory_order_relaxed)) Fail(self ? "Disconnected from the host." :
           "The host did not accept this connection. Check invite, room capacity and game version.");
       return;
     }

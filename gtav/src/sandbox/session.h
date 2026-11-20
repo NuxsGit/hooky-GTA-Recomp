@@ -2,6 +2,7 @@
 
 #include "protocol.h"
 
+#include <atomic>
 #include <mutex>
 #include <thread>
 
@@ -39,12 +40,13 @@ class Session {
   void ResetRace();
 
  private:
-  void RunHost(std::stop_token stop, uint16_t port, bool loopback_only);
-  void RunClient(std::stop_token stop, std::string ipv4, uint16_t port, std::string name, wire::Invite invite);
+  void RunHost(uint16_t port, bool loopback_only);
+  void RunClient(const std::string& ipv4, uint16_t port, const std::string& name, wire::Invite invite);
   void Fail(std::string error);
   bool Available() const;
   void ResetRoom(std::string name);
   void StopLocked();
+  void StopWorker();
 
   std::mutex lifecycle_;
   mutable std::mutex mutex_;
@@ -57,6 +59,8 @@ class Session {
   std::optional<Presence> local_pose_;
   std::optional<uint32_t> rtt_ms_;
   int64_t last_pose_ms_ = 0, last_snapshot_ms_ = 0;
-  std::jthread worker_;  // joined before the fields a worker uses are destroyed
+  // Explicit stop/join also works with the libc++ shipped by older Xcode versions.
+  std::atomic<bool> stop_requested_{false};
+  std::thread worker_;  // joined before the fields a worker uses are destroyed
 };
 }  // namespace gtav::sandbox

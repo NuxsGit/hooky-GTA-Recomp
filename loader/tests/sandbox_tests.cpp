@@ -272,6 +272,7 @@ void Loopback() {
 
   CHECK(client.Join("127.0.0.1", listening.port, "Friend", listening.invite));
   CHECK(Until([&] { return client.View().link == Link::Joined; }));
+  CHECK(client.LinkState() == Link::Joined && !client.View().Owner());
   CHECK(!client.SetCourse({"Cannot edit host map", {}}) && !client.StartRace());
 #ifdef __linux__
   CHECK(Until([&] { return client.View().rtt_ms.has_value(); }));
@@ -335,7 +336,16 @@ void Loopback() {
   CHECK(Until([&] { return host.View().link == Link::Hosting; }));
   CHECK(host.View().invite != listening.invite);
   CHECK(host.View().world.course == kTrack);
+  // Cancel a newly scheduled join (before or during the connection), then start another
+  // worker on the same object. Stop must join the old worker before clearing state.
+  Session cancelled;
+  CHECK(cancelled.Join("127.0.0.1", listening.port, "Cancel", host.View().invite));
+  cancelled.Stop();
+  CHECK(cancelled.LinkState() == Link::Idle && !cancelled.View().rtt_ms);
+  CHECK(cancelled.Host(0, "Restart", true));
+  CHECK(Until([&] { return cancelled.LinkState() == Link::Hosting; }));
   host.Stop();
+  // The still-hosting fixture is also closed by the destructor, without resetting a room.
 }
 
 int main() {

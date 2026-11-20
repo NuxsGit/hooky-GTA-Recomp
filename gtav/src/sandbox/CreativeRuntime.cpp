@@ -17,8 +17,15 @@ class StorageWriter {
  public:
   StorageWriter(ConfigStorage storage, std::function<void(uint8_t)> failed)
       : storage_(std::move(storage)), error_(storage_.Unreadable()), failed_(std::move(failed)),
-        thread_([this](std::stop_token token) { Run(token); }) {}
-  ~StorageWriter() { thread_.request_stop(); cv_.notify_all(); }
+        thread_([this] { Run(); }) {}
+  ~StorageWriter() {
+    {
+      std::lock_guard lock(mutex_);
+      stopping_ = true;
+    }
+    cv_.notify_one();
+    thread_.join();  // any queued write finishes before shutdown returns
+  }
   void Post(Config config, uint8_t dirty) {
     if (!dirty) return;
     {
@@ -30,10 +37,10 @@ class StorageWriter {
   }
   uint8_t Error() const { return error_; }
  private:
-  void Run(std::stop_token token) {
+  void Run() {
     for (;;) {
       std::unique_lock lock(mutex_);
-      cv_.wait(lock, token, [&] { return pending_.has_value(); });
+      cv_.wait(lock, [this] { return stopping_ || pending_.has_value(); });
       if (!pending_) return;
       const auto flags = std::exchange(documents_, 0);
       auto cfg = std::exchange(pending_, {});
@@ -47,10 +54,11 @@ class StorageWriter {
   std::atomic<uint8_t> error_;
   std::function<void(uint8_t)> failed_;
   std::mutex mutex_;
-  std::condition_variable_any cv_;
+  std::condition_variable cv_;
   std::optional<Config> pending_;
   uint8_t documents_{};
-  std::jthread thread_;
+  bool stopping_ = false;
+  std::thread thread_;
 };
 
 struct Runtime {
