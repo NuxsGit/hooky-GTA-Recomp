@@ -58,6 +58,8 @@ REXCVAR_DEFINE_STRING(gtav_native, "off", "GTAV", "Native renderer: off | shadow
 REXCVAR_DEFINE_BOOL(gtav_native_vsync, true, "GTAV", "Native renderer: wait for vertical sync when presenting");
 REXCVAR_DEFINE_BOOL(gtav_native_low_memory, false, "GTAV",
                     "Desktop native renderer: smaller caches and upload chunks, one GPU frame in flight, load shaders on demand (restart)");
+REXCVAR_DEFINE_BOOL(gtav_native_extra_potato, false, "GTAV",
+                    "Desktop ultra-lean: 33% scene, aggressive LOD, 96 MiB texture / 32 MiB buffer / 8 MiB upload, GTA IV faces on 3x rien (restart, lean implies)");
 #ifdef _WIN32
 REXCVAR_DEFINE_INT32(gtav_native_output, -1, "GTAV",
                      "Windows output height: -1 (Auto) | 540 | 720 | 1080 | 1440 | 2160 | 0 (borderless desktop)");
@@ -254,7 +256,7 @@ class Renderer {
   }
 
   void PrefetchPipelineCache() {
-    if (REXCVAR_GET(gtav_native_low_memory) || pipeline_cache_seed_.valid()) return;
+    if (REXCVAR_GET(gtav_native_low_memory) || REXCVAR_GET(gtav_native_extra_potato) || pipeline_cache_seed_.valid()) return;
     try {
       pipeline_cache_seed_ = std::async(std::launch::async, ReadDriverCache);
     } catch (const std::system_error&) {
@@ -519,9 +521,10 @@ class Renderer {
     constexpr uint64_t kDefaultChunk = 64 * kMiB;
 #endif
 #ifdef GTAV_DESKTOP_WORKSHOP
-    memory_ = MakeGraphicsMemoryPolicy(REXCVAR_GET(gtav_native_low_memory), kDefaultChunk);
+    memory_ = MakeGraphicsMemoryPolicy(REXCVAR_GET(gtav_native_low_memory),
+                                       REXCVAR_GET(gtav_native_extra_potato), kDefaultChunk);
 #else
-    memory_ = MakeGraphicsMemoryPolicy(false, kDefaultChunk);
+    memory_ = MakeGraphicsMemoryPolicy(false, false, kDefaultChunk);
 #endif
 #ifdef __ANDROID__
     // Plume reports its Vulkan failures on stderr, which Android discards.

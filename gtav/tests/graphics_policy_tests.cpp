@@ -14,7 +14,8 @@ int main() {
   CHECK(SceneScale(2.0, 1, true, limit) == 1.5f);
   CHECK(SceneScale(1.5, 1, true, 4096) == 1.0f);  // shrunken max VkImage2D, not a bad allocation
   CHECK(SceneScale(1.5, 0.75f, false, limit) == 1.0f);
-  CHECK(SceneScale(0.25, 1, true, limit) == 0.5f);
+  CHECK(SceneScale(0.25, 1, true, limit) == kMinSceneScale);
+  CHECK(SceneScale(0.333333, 1, true, limit) == kExtraPotatoSceneScale);
   CHECK(SceneScale(std::numeric_limits<double>::quiet_NaN(), 0.75f, false, limit) == 0.75f);
   for (const float scale : {0.5f, 0.75f, 1.0f, 1.5f}) {
     CHECK(TargetScale(scale, 320, 2) == 1.0f);   // water pre-pass 4x MSAA
@@ -25,6 +26,10 @@ int main() {
   }
   auto shape = [](float scale) { return Extent{ScaledTexels(1280, scale), ScaledTexels(720, scale)}; };
   CHECK(shape(1.5f) == Extent{1920, 1080} && shape(0.5f) == Extent{640, 360});
+  {
+    auto e = shape(kExtraPotatoSceneScale);
+    CHECK(e.width < 640 && e.height == 240);
+  }
   // Full-width colour and depth resolves share host texels with their source, including tiled
   // destination points. Both scales are applied to this guest rect only once.
   const ResolveRegion guest{0, 60, 1280, 360, 0, 360};
@@ -42,11 +47,16 @@ int main() {
 
   constexpr auto standard = MakeGraphicsMemoryPolicy(false, 64 * kMiB);
   constexpr auto potato = MakeGraphicsMemoryPolicy(true, 64 * kMiB);
+  constexpr auto extra = MakeGraphicsMemoryPolicy(true, true, 64 * kMiB);
   CHECK(standard.frame_slots == 2 && NextFrameSlot(0, standard) == 1 && NextFrameSlot(1, standard) == 0);
   CHECK(potato.frame_slots == 1 && NextFrameSlot(0, potato) == 0 && potato.lean);
+  CHECK(extra.frame_slots == 1 && extra.extra_potato && extra.lean);
   CHECK(potato.budget_interval < standard.budget_interval && potato.min_idle < standard.min_idle);
+  CHECK(extra.budget_interval < potato.budget_interval && extra.min_idle < potato.min_idle);
   CHECK(potato.texture_budget_mib == 192 && potato.buffer_budget_mib == 64 && standard.buffer_budget_mib == 0);
+  CHECK(extra.texture_budget_mib == 96 && extra.buffer_budget_mib == 32);
   CHECK(potato.upload_chunk == 16 * kMiB && standard.upload_chunk == 64 * kMiB);
+  CHECK(extra.upload_chunk == 8 * kMiB);
   CHECK(MakeGraphicsMemoryPolicy(false, 32 * kMiB).upload_chunk == 32 * kMiB);
   // Cache accounting observes replacements and removals, rather than repeatedly polling the
   // heap. An unlimited buffer budget is not a 0 MiB allowance.

@@ -82,6 +82,7 @@ int main() {
   constexpr auto& standard = gfx::kPresets[0];
   constexpr auto& ultra = gfx::kPresets[1];
   constexpr auto& potato = gfx::kPresets[2];
+  constexpr auto& extra_potato = gfx::kPresets[3];
   Flags preset_flags;
   auto presets = preset_flags.Open(presets_file);
   CHECK(gfx::PresetIndex(presets) == 0);
@@ -103,9 +104,26 @@ int main() {
   potato_reloaded.BeginRun();
   CHECK(potato_boot[Key::LowMemory] == "true" && potato_boot[Key::MaterialFiltering] == "false");
   CHECK(gfx::ApplyPreset(potato_reloaded, standard).edited && potato_reloaded.Save() == SaveState::Saved);
+  // Extra Potato: ultra-lean, GTA IV faces, runs on 3x rien; check pending restart and persisted flags.
+  {
+    Flags extra_flags;
+    auto extra_prefs = extra_flags.Open(presets_file);
+    extra_prefs.BeginRun();
+    CHECK(gfx::ApplyPreset(extra_prefs, extra_potato).edited && extra_prefs.Save() == SaveState::Saved);
+    CHECK(gfx::PresetIndex(extra_prefs) == 3 && extra_prefs.PendingRestart());
+    CHECK(extra_flags[Key::LowMemory] == "false" && extra_prefs.Value(Key::LowMemory) == "true");
+    CHECK(extra_prefs.Value(Key::SceneScale) == "0.333333" && extra_prefs.Value(Key::ExtraPotato) == "true");
+    Flags extra_boot;
+    auto extra_reloaded = extra_boot.Open(presets_file);
+    extra_reloaded.BeginRun();
+    CHECK(extra_boot[Key::LowMemory] == "true" && extra_boot[Key::ExtraPotato] == "true");
+    CHECK(extra_boot[Key::SceneScale] == "0.333333");
+    CHECK(gfx::ApplyPreset(extra_reloaded, standard).edited && extra_reloaded.Save() == SaveState::Saved);
+  }
   Flags standard_boot;
   CHECK(gfx::PresetIndex(standard_boot.Open(presets_file)) == 0);
   CHECK(standard_boot[Key::LowMemory] == "false" && standard_boot[Key::MaterialFiltering] == "false");
+  CHECK(standard_boot[Key::ExtraPotato] == "false");
   // A force-locked scene value doesn't get overwritten on disk or mislabelled as Ultra.
   gfx::Locks scale_lock{};
   scale_lock[Index(Key::SceneScale)] = true;
