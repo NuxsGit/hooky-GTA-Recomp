@@ -164,6 +164,19 @@ int main() {
   auto graphics = realism_boot.Open(realism_file, {}, {}, false, gfx::Platform::Desktop);
   CHECK(realism_boot[Key::MaterialAnisotropy] == "16" && realism_boot[Key::ContactRays] == "2");
   for (const auto& preset : gfx::kPresets) {
+    // N100 Ultra is Cyberpunk-low: it intentionally forces 1x aniso, no contact, fog stripped
+    if (preset.ultra_potato) {
+      Flags ultra_flags;
+      ultra_flags[Key::MaterialAnisotropy] = "16";
+      ultra_flags[Key::ContactRays] = "2";
+      ultra_flags[Key::ContactStrength] = "75";
+      ultra_flags[Key::ReduceFog] = "false";
+      auto ultra_prefs = ultra_flags.Open(dir.root / "realism_ultra.ini", {}, {}, false, gfx::Platform::Desktop);
+      // Test without BeginRun so staged restart values are visible via flags as well as Value
+      CHECK(gfx::ApplyPreset(ultra_prefs, preset).edited);
+      CHECK(ultra_flags[Key::MaterialAnisotropy] == "1" && ultra_flags[Key::ContactRays] == "0" && ultra_flags[Key::ReduceFog] == "true" && ultra_flags[Key::ContactStrength] == "75");
+      continue;
+    }
     CHECK(gfx::ApplyPreset(graphics, preset).edited);
     CHECK(graphics.Value(Key::MaterialAnisotropy) == "16" && graphics.Value(Key::ContactRays) == "2" &&
           graphics.Value(Key::ContactStrength) == "75");

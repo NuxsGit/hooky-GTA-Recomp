@@ -39,6 +39,7 @@
 #ifdef GTAV_DESKTOP_WORKSHOP
 REXCVAR_DECLARE(bool, gtav_native_low_memory);
 REXCVAR_DECLARE(bool, gtav_native_extra_potato);
+REXCVAR_DECLARE(bool, gtav_native_ultra_potato);
 #endif
 
 // iOS cannot start processes: every shader comes precompiled from the Mac (spirv dir).
@@ -262,7 +263,7 @@ void Enqueue(const std::string& name) {
     // machines with more cores get more (a third of them).
     int workers = std::max(2, int(std::thread::hardware_concurrency()) / 3);
 #ifdef GTAV_DESKTOP_WORKSHOP
-    if (REXCVAR_GET(gtav_native_extra_potato) || REXCVAR_GET(gtav_native_low_memory)) workers = 1;
+    if (REXCVAR_GET(gtav_native_ultra_potato) || REXCVAR_GET(gtav_native_extra_potato) || REXCVAR_GET(gtav_native_low_memory)) workers = 1;
 #endif
     for (int i = 0; i < workers; i++) std::thread(Worker).detach();
   }

@@ -157,10 +157,10 @@ void Performance(Controls& ui, const PresentationInfo& info) {
       if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", preset.help.en);
     }
     ImGui::EndDisabled();
-    ImGui::TextWrapped("Preset changes keep the FPS limit, display overrides and locked options. Potato targets low-memory PCs; Extra Potato (33%% scene, GTA IV faces) runs on 3x rien ultra-low hardware. Compatible Vulkan graphics are still required.");
+    ImGui::TextWrapped("Preset changes keep the FPS limit, display overrides and locked options. Potato targets low-memory PCs; Extra Potato (33%%) GTA IV faces ultra-low. N100 Ultra (25%%) Cyberpunk-low for N100 8GB - every optimization enabled - Vulkan still required.");
     ImGui::TextDisabled("This run: %.0f%% scene  /  %u GPU slot%s  /  %s caches%s", info.scene_scale * 100,
                         info.gpu_slots, info.gpu_slots == 1 ? "" : "s", info.lean_memory ? "reduced" : "normal",
-                        info.scene_scale < 0.4f ? " (Extra Potato)" : "");
+                        info.scene_scale < 0.26f ? " (N100 Ultra)" : (info.scene_scale < 0.4f ? " (Extra Potato)" : ""));
     ImGui::Separator();
     ImGui::TextUnformatted("Quality tweaks");
     ui.Check(Key::MaterialFiltering, "Enhanced material filtering (restart)",
@@ -171,6 +171,10 @@ void Performance(Controls& ui, const PresentationInfo& info) {
              "33% scene, ultra-lean caches, aggressive LOD: GTA IV-level faces for 3x rien ultra-low hardware. Vulkan still required.");
     if (ui.prefs.Value(Key::ExtraPotato) == "true")
       ImGui::TextColored(kAmber, "Extra Potato active: GTA IV-style geometry on minimal hardware.");
+    ui.Check(Key::UltraPotato, "N100 Ultra - Cyberpunk low (restart)",
+             "25% scene, 64 MiB/16 MiB caches, 4 MiB upload, FSR1, 1x aniso, no contact rays, fog stripped. For Intel N100 8GB ultra-low. Vulkan still required.");
+    if (ui.prefs.Value(Key::UltraPotato) == "true")
+      ImGui::TextColored(kAmber, "N100 Ultra active: Cyberpunk-low - every optimization for N100 8GB!");
   }
 #ifdef __ANDROID__
   // Keep the existing mobile presets: these change pacing as well as compile policy.

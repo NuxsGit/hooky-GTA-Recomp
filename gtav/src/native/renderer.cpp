@@ -60,6 +60,8 @@ REXCVAR_DEFINE_BOOL(gtav_native_low_memory, false, "GTAV",
                     "Desktop native renderer: smaller caches and upload chunks, one GPU frame in flight, load shaders on demand (restart)");
 REXCVAR_DEFINE_BOOL(gtav_native_extra_potato, false, "GTAV",
                     "Desktop ultra-lean: 33% scene, aggressive LOD, 96 MiB texture / 32 MiB buffer / 8 MiB upload, GTA IV faces on 3x rien (restart, lean implies)");
+REXCVAR_DEFINE_BOOL(gtav_native_ultra_potato, false, "GTAV",
+                    "N100 Cyberpunk ultra: 25% scene, 64 MiB texture / 16 MiB buffer / 4 MiB upload, 1x aniso, no contact, fog stripped - Intel N100 8GB (restart, extra implies)");
 #ifdef _WIN32
 REXCVAR_DEFINE_INT32(gtav_native_output, -1, "GTAV",
                      "Windows output height: -1 (Auto) | 540 | 720 | 1080 | 1440 | 2160 | 0 (borderless desktop)");
@@ -256,7 +258,7 @@ class Renderer {
   }
 
   void PrefetchPipelineCache() {
-    if (REXCVAR_GET(gtav_native_low_memory) || REXCVAR_GET(gtav_native_extra_potato) || pipeline_cache_seed_.valid()) return;
+    if (REXCVAR_GET(gtav_native_low_memory) || REXCVAR_GET(gtav_native_extra_potato) || REXCVAR_GET(gtav_native_ultra_potato) || pipeline_cache_seed_.valid()) return;
     try {
       pipeline_cache_seed_ = std::async(std::launch::async, ReadDriverCache);
     } catch (const std::system_error&) {
@@ -522,9 +524,10 @@ class Renderer {
 #endif
 #ifdef GTAV_DESKTOP_WORKSHOP
     memory_ = MakeGraphicsMemoryPolicy(REXCVAR_GET(gtav_native_low_memory),
-                                       REXCVAR_GET(gtav_native_extra_potato), kDefaultChunk);
+                                       REXCVAR_GET(gtav_native_extra_potato),
+                                       REXCVAR_GET(gtav_native_ultra_potato), kDefaultChunk);
 #else
-    memory_ = MakeGraphicsMemoryPolicy(false, false, kDefaultChunk);
+    memory_ = MakeGraphicsMemoryPolicy(false, false, false, kDefaultChunk);
 #endif
 #ifdef __ANDROID__
     // Plume reports its Vulkan failures on stderr, which Android discards.

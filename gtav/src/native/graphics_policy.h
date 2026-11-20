@@ -11,9 +11,10 @@ namespace gtav::native {
 inline constexpr uint32_t kFullScenePitch = 1280;
 inline constexpr uint32_t kMaxTargetRows = 4096;  // includes the stacked sun shadow cascades
 inline constexpr float kUltraSceneScale = 1.5f;
-inline constexpr float kMinSceneScale = 0.333333f;  // Extra Potato: GTA IV-level geometry budget
+inline constexpr float kMinSceneScale = 0.25f;  // N100 Ultra: 25% scene for Intel N100 / 8GB low-power
 inline constexpr float kPotatoSceneScale = 0.5f;
 inline constexpr float kExtraPotatoSceneScale = 0.333333f;
+inline constexpr float kUltraPotatoSceneScale = 0.25f;  // Cyberpunk-style ultra-low: 25% for N100
 inline constexpr uint32_t kMaxFrameSlots = 2;
 inline constexpr uint64_t kMiB = 1ull << 20;
 
@@ -54,20 +55,25 @@ struct GraphicsMemoryPolicy {
   uint64_t upload_chunk = 64 * kMiB;
   bool lean = false;
   bool extra_potato = false;  // ultra-lean: GTA IV faces on 3x rien hardware
+  bool ultra_potato = false;  // N100 Cyberpunk ultra: 25% scene, 64/16 MiB, 4 MiB chunk, max LOD cull
 };
 
-constexpr GraphicsMemoryPolicy MakeGraphicsMemoryPolicy(bool lean, bool extra_potato, uint64_t default_upload_chunk) {
+constexpr GraphicsMemoryPolicy MakeGraphicsMemoryPolicy(bool lean, bool extra_potato, bool ultra_potato, uint64_t default_upload_chunk) {
   // Soft budgets for evictable caches only; active textures, resolves and guest memory are not capped.
-  // Extra Potato aggressively trims caches and upload arena to stay smooth on minimal GPUs (saccades-free).
-  if (extra_potato) return {1, 10, 20, 96, 32, 8 * kMiB, true, true};
-  if (lean) return {1, 15, 30, 192, 64, 16 * kMiB, true, false};
+  // N100 Ultra: even leaner than Extra Potato for 8GB / UHD - saccades-free on N100.
+  if (ultra_potato) return {1, 8, 15, 64, 16, 4 * kMiB, true, true, true};
+  if (extra_potato) return {1, 10, 20, 96, 32, 8 * kMiB, true, true, false};
+  if (lean) return {1, 15, 30, 192, 64, 16 * kMiB, true, false, false};
   GraphicsMemoryPolicy policy;
   policy.upload_chunk = default_upload_chunk;
   return policy;
 }
 
+constexpr GraphicsMemoryPolicy MakeGraphicsMemoryPolicy(bool lean, bool extra_potato, uint64_t default_upload_chunk) {
+  return MakeGraphicsMemoryPolicy(lean, extra_potato, false, default_upload_chunk);
+}
 constexpr GraphicsMemoryPolicy MakeGraphicsMemoryPolicy(bool lean, uint64_t default_upload_chunk) {
-  return MakeGraphicsMemoryPolicy(lean, false, default_upload_chunk);
+  return MakeGraphicsMemoryPolicy(lean, false, false, default_upload_chunk);
 }
 
 constexpr uint32_t NextFrameSlot(uint32_t slot, const GraphicsMemoryPolicy& policy) {

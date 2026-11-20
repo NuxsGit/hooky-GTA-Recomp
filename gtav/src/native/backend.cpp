@@ -87,6 +87,7 @@ REXCVAR_DECLARE(std::string, gtav_native_spirv_dir);
 REXCVAR_DECLARE(bool, gtav_native_compile);
 REXCVAR_DECLARE(bool, gtav_native_flicker_catch);
 REXCVAR_DECLARE(bool, gtav_native_extra_potato);
+REXCVAR_DECLARE(bool, gtav_native_ultra_potato);
 REXCVAR_DEFINE_INT32(gtav_native_dump_rt, 0x2D0, "GTAV",
                      "Frame dumps: EDRAM base of the color target snapshotted after every draw (0x2D0 = scene HDR)");
 REXCVAR_DEFINE_INT32(gtav_native_dump_rt_skip, 0, "GTAV",
@@ -6271,14 +6272,17 @@ FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
 #ifdef GTAV_DESKTOP_WORKSHOP
   if (s.fog.BeginFrame(REXCVAR_GET(gtav_native_reduce_fog))) s.held_valid = false;
 #endif
-  // Extra Potato: force 1x anisotropy and drop top mip on eligible materials for 3x rien bandwidth (saccades-free).
-  const int32_t lean_aniso = s.memory.extra_potato ? 1 : 2;
+  // N100 Ultra / Extra Potato: force 1x anisotropy and drop mips for ultra-low bandwidth (saccades-free on N100).
+  // Ultra skips 2 mips (Cyberpunk-low), Extra skips 1.
+  const int32_t lean_aniso = s.memory.ultra_potato ? 1 : (s.memory.extra_potato ? 1 : 2);
   s.sampler_anisotropy_cap = s.MemoryDefault("gtav_native_max_anisotropy", REXCVAR_GET(gtav_native_max_anisotropy), lean_aniso);
   s.sampler_skip_mips = REXCVAR_GET(gtav_native_texture_min_lod);
-  if (s.memory.extra_potato && rex::cvar::GetFlagSource("gtav_native_texture_min_lod") == rex::cvar::Source::kDefault) {
+  if (s.memory.ultra_potato && rex::cvar::GetFlagSource("gtav_native_texture_min_lod") == rex::cvar::Source::kDefault) {
+    s.sampler_skip_mips = std::max(s.sampler_skip_mips, 2);
+  } else if (s.memory.extra_potato && rex::cvar::GetFlagSource("gtav_native_texture_min_lod") == rex::cvar::Source::kDefault) {
     s.sampler_skip_mips = std::max(s.sampler_skip_mips, 1);
   }
-  s.skip_material_mip = (s.memory.extra_potato || s.memory.lean) && rex::cvar::GetFlagSource("gtav_native_texture_min_lod") == rex::cvar::Source::kDefault;
+  s.skip_material_mip = (s.memory.ultra_potato || s.memory.extra_potato || s.memory.lean) && rex::cvar::GetFlagSource("gtav_native_texture_min_lod") == rex::cvar::Source::kDefault;
   s.PreHash();
   if (int threads = REXCVAR_GET(gtav_native_convert_threads); threads > 0 && !s.converter_pool)
     s.converter_pool = std::make_unique<StreamConverter>(std::min(threads, 6));

@@ -205,8 +205,10 @@ endif()
 # functions). The code is far below 2 GB, so the default model (direct calls) works. x86-64-v3
 # (Haswell / Excavator and newer) adds MOVBE (a big-endian guest load or store is one
 # instruction), BMI2 and AVX2. GTAV_X86_64_V3=OFF builds for any x86-64 with SSE4.1.
+# N100 / low-power compatibility: default OFF so Intel N100 (Gracemont, no AVX2) and older CPUs
+# run without Illegal Instruction. Enable ON for Haswell+ for ~5-10% faster guest loads.
 if(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    option(GTAV_X86_64_V3 "Build the game code for x86-64-v3 CPUs (MOVBE, BMI2, AVX2)" ON)
+    option(GTAV_X86_64_V3 "Build the game code for x86-64-v3 CPUs (MOVBE, BMI2, AVX2)" OFF)
     foreach(_gtav_target gtav gtav_recomp)
         if(NOT TARGET ${_gtav_target})
             continue()
@@ -231,7 +233,8 @@ elseif(ANDROID)
     target_link_options(gtav PRIVATE -Wl,-Bsymbolic-functions)
 elseif(WIN32 AND NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     # Windows: the SDK already uses the default code model; only the CPU level is added.
-    option(GTAV_X86_64_V3 "Build the game code for x86-64-v3 CPUs (MOVBE, BMI2, AVX2)" ON)
+    # Default OFF for N100 compatibility (no AVX2). Set -DGTAV_X86_64_V3=ON for Haswell+ speed.
+    option(GTAV_X86_64_V3 "Build the game code for x86-64-v3 CPUs (MOVBE, BMI2, AVX2)" OFF)
     if(GTAV_X86_64_V3)
         foreach(_gtav_target gtav gtav_recomp)
             if(TARGET ${_gtav_target})
@@ -240,6 +243,9 @@ elseif(WIN32 AND NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
         endforeach()
     endif()
 endif()
+# Windows MSVC N100 compatibility: default to SSE4.1 baseline, AVX2 is optional via /arch:AVX2.
+# The ReXGlue SDK's hot guest loads use MOVBE/BMI2 only when GTAV_X86_64_V3 is ON (clang path above).
+# MSVC builds keep baseline SSE2/SSE4.1 so N100 (no AVX2) runs without Illegal Instruction.
 
 # The SDK exports REXGLUE_ENABLE_PROFILING / _PERF_COUNTERS to every non-Release build: each
 # indirect guest call then does an atomic add on one shared counter in rexruntime (~3% of every

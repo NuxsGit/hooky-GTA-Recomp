@@ -14,7 +14,7 @@ namespace gtav::native::settings {
 enum class Key {
   FrameLimit, Vsync, Counter, SunShadows, AsyncPipelines, GuestGpuLag, ExactCache,
   TextureRecheck, Touch, Output, SceneScale, Fsr1, ShortQueue, AmdAntiLag, FsrSharpen,
-  MaterialFiltering, LowMemory, MaterialAnisotropy, ContactRays, ContactStrength, ReduceFog, ExtraPotato, FrameGeneration, Count
+  MaterialFiltering, LowMemory, MaterialAnisotropy, ContactRays, ContactStrength, ReduceFog, ExtraPotato, UltraPotato, FrameGeneration, Count
 };
 
 enum class Platform { Mobile, Desktop, Windows };
@@ -47,6 +47,7 @@ inline constexpr std::array<Setting, Index(Key::Count)> kSettings{{
     {"gtav_native_contact_strength", false, Platform::Desktop},
     {"gtav_native_reduce_fog", false, Platform::Desktop},
     {"gtav_native_extra_potato", true, Platform::Desktop},
+    {"gtav_native_ultra_potato", true, Platform::Desktop},
     {"gtav_native_frame_generation", false, Platform::Desktop},
 }};
 constexpr const Setting& Spec(Key key) { return kSettings[Index(key)]; }
