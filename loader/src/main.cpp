@@ -92,6 +92,7 @@ struct CheckReply { unsigned generation; UpdateResult result; };
 UpdatePreferences g_preferences;
 UpdateResult g_update_result;
 std::wstring g_update_notice = L"Aucune recherche effectuée.";
+std::string g_last_notified_version; // pour notifier une fois par version
 ULONGLONG g_next_check = 0, g_update_attempt_after = 0;
 InstallStatus g_status = InstallStatus::NeedsSources;
 int g_phone_job = 0;  // the running job: 0 install, 1 iPhone build, 2 Android build
@@ -990,6 +991,31 @@ LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         g_update_attempt_after = GetTickCount64() + 3'000;  // let Play or a channel change take precedence
         g_update_notice = UpdateSummary(g_update_result);
         AppendLog(std::wstring(ChannelName(g_preferences.channel)) + L" | " + Widen(g_update_result.message));
+        // Notification à chaque nouvelle version détectée (même sans asset, pour prévenir le mainteneur)
+        if (!g_update_result.latest.empty() && g_update_result.latest != g_last_notified_version &&
+            (g_update_result.status == UpdateStatus::Available || g_update_result.status == UpdateStatus::NoPackage)) {
+          g_last_notified_version = g_update_result.latest;
+          const bool has_asset = bool(g_update_result.asset);
+          std::wstring title = has_asset ? L"🔔 Mise à jour disponible : v" + Widen(g_update_result.latest)
+                                         : L"⚠️ Nouvelle version sans paquet Windows : v" + Widen(g_update_result.latest);
+          std::wstring body = Widen(g_update_result.message);
+          body += has_asset ? L"\n\nLe paquet est vérifié (SHA-256). Veux-tu ouvrir l’onglet Mises à jour pour l’installer ?"
+                            : L"\n\nLe tag existe mais le ZIP Windows x64 n’a pas été publié. Vérifie les Actions GitHub.";
+          // Faire clignoter la barre des tâches et émettre un son système, même en arrière-plan
+          FlashWindow(g_wnd, TRUE);
+          MessageBeep(MB_ICONASTERISK);
+          // Si la fenêtre est visible, proposer d’ouvrir l’onglet Updates ; sinon le message reste dans les logs
+          if (IsWindowVisible(g_wnd)) {
+            int btn = MessageBoxW(g_wnd, (title + L"\n\n" + body).c_str(), L"Hooky GTA Recomp — Mise à jour", MB_YESNO | MB_ICONINFORMATION);
+            if (btn == IDYES) ShowPage(Page::Updates);
+          } else {
+            // Fenêtre masquée : on reste discret mais la prochaine mise au premier plan montrera la bannière
+            AppendLog(title + L" | " + body);
+          }
+        } else if (g_update_result.status == UpdateStatus::NoRelease) {
+          // Canal vide : réinitialiser la mémoire de notification pour ne pas bloquer une future version du même numéro
+          // (ne rien faire, on garde le dernier notifié pour éviter le spam sur le même - vide)
+        }
       }
       RefreshUpdateControls();
       return 0;

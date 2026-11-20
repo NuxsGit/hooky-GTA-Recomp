@@ -22,7 +22,7 @@
 REXCVAR_DEFINE_STRING(gtav_mode, "campaign", "GTAV", "Desktop startup mode: menu | solo | multiplayer | campaign | campaign-coop");
 REXCVAR_DEFINE_BOOL(gtav_workshop_scene, true, "GTAV", "Workshop: show local props and remote ghosts in free roam");
 REXCVAR_DEFINE_STRING(gtav_campaign_host, "", "GTAV", "Campaign coop host IP (launcher editable, empty=auto)");
-REXCVAR_DEFINE_INT(gtav_campaign_port, 30127, "GTAV", "Campaign coop host TCP port");
+REXCVAR_DEFINE_INT32(gtav_campaign_port, 30127, "GTAV", "Campaign coop host TCP port");
 
 namespace gtav::sandbox {
 namespace fs = std::filesystem;
