@@ -114,8 +114,10 @@ Vec Horizontal(float yaw, float forward, float right, float up) {
 }
 
 uint32_t PlayablePed(NativeCall& call) {
+  // Campaign co-op at 3: keep presence and workshop sync during missions (all story missions playable at 3)
+  const bool campaign_missions = sandbox::CurrentMode() == sandbox::Mode::CampaignCoop;
   if (gtav::InFailureEffect() || call.Flag(kNetworkGame) || call.Flag(kNetworkSession) ||
-      call.Flag(kMission) || call.Flag(kCutscene) || call.Flag(kPaused) ||
+      (!campaign_missions && call.Flag(kMission)) || call.Flag(kCutscene) || call.Flag(kPaused) ||
       call.Flag(kSwitching) || !call.Flag(kFadedIn) || !call.Okay()) return 0;
   const auto player = call.Read(kPlayer);
   if (!call.Okay() || player >= 32 || !call.Flag(kPlayerControl, {player})) return 0;

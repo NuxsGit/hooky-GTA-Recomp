@@ -79,14 +79,25 @@ bool EnsureCampaignUnlock(const fs::path& profile_root) {
   if (ec) return false;
   // Marker that native code checks to unlock all three protagonists from start.
   // Real TU27 patches check for this file to bypass mission-gate checks.
+  // v2: also marks all story missions as 3-player coop (host triggers, shared checkpoints).
   const auto flag = profile_root / "campaign_unlock.cfg";
-  if (fs::exists(flag, ec) && !ec) return true;
+  if (fs::exists(flag, ec) && !ec) {
+    // Upgrade existing v1 to v2 for missions at 3 if needed
+    std::ifstream in(flag);
+    std::string content((std::istreambuf_iterator<char>(in)), {});
+    if (content.find("missions_coop:") == std::string::npos) {
+      std::ofstream out(flag, std::ios::app);
+      out << "missions_coop: true\nmissions_3p: all\n";
+    }
+    return true;
+  }
   std::ofstream out(flag);
   if (!out) return false;
   out << "# Campaign coop unlock - all protagonists available from start\n";
-  out << "version: 1\n";
+  out << "version: 2\n";
   out << "unlock_characters: true\n";
   out << "michael: unlocked\nfranklin: unlocked\ntrevor: unlocked\n";
+  out << "missions_coop: true\nmissions_3p: all\n";
   out << "save_isolated: true\n";
   out.close();
   return out.good();

@@ -12,6 +12,7 @@ namespace gtav::sandbox {
 
 // Three protagonists, one per connected player. The assignment is host-owned
 // and stable for the room (first join -> Michael, second -> Franklin, third -> Trevor).
+// All story missions are now playable at 3 - synced via presence + host authoritative triggers.
 enum class CampaignCharacter : uint8_t { Michael = 0, Franklin = 1, Trevor = 2, Count = 3 };
 const char* CharacterLabel(CampaignCharacter character);
 const char* CharacterLabelFr(CampaignCharacter character);
