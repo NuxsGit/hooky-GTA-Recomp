@@ -42,7 +42,7 @@ inline std::string Read(const fs::path& path) {
 struct Flags {
   std::array<std::string, Index(Key::Count)> values{
       "30", "false", "false", "true", "true", "4", "false", "30", "false", "-1", "1.000000", "false", "false", "false", "true",
-      "false", "false", "0", "0", "50", "false", "false"};
+      "false", "false", "0", "0", "50", "false", "false", "0"};
   std::optional<Key> reject;
   std::string& operator[](Key key) { return values[Index(key)]; }
   gfx::Preferences Open(const fs::path& path, const fs::path& legacy = {}, gfx::Locks forced = {},

@@ -112,6 +112,11 @@ std::string CanonicalValue(Key key, std::string_view value) {
       if (n == -1 || n == 0 || n == 540 || n == 720 || n == 1080 || n == 1440 || n == 2160) return std::to_string(*n);
       return {};
     }
+    case Key::FrameGeneration: {
+      const auto n = Int(value);
+      if (n == 0 || n == 2 || n == 3 || n == 4 || n == 8) return std::to_string(*n);
+      return {};
+    }
     case Key::SceneScale: {
       // Locale independent; also works on libc++ versions without floating-point from_chars.
       // Allow Extra Potato down to 0.333 (GTA IV faces on ultra-low hardware); Potato stays at 0.5.

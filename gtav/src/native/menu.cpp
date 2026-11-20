@@ -212,12 +212,13 @@ void BuildDebug(uint32_t fps, double frame_ms) {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
   if (ImGui::Begin("HOOKY  //  DEBUG  [F2]", &open, ImGuiWindowFlags_NoCollapse)) {
     ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "LOS SANTOS  //  DEBUG & WORKSHOP");
-    ImGui::TextDisabled("F2 debug  |  F6 Workshop  |  F8 Build  |  P/Phone  |  Esc fermer");
+    ImGui::TextDisabled("F2 debug  |  F6 Workshop  |  F8 Build  |  O/F7 Workshop Phone  |  Esc fermer");
+    ImGui::TextDisabled("Base phone P/Haut restore - Workshop phone sur O / F7 / Y (manette) - panel supplementaire");
 #ifdef GTAV_DESKTOP_WORKSHOP
-    // Quick GTA shortcuts inside F2 — satisfies the “menu dans F2” alternative
+    // Quick GTA shortcuts inside F2 — Workshop phone separate from base GTA phone (base phone restored)
     if (sandbox::Active()) {
       ImGui::Separator();
-      if (ImGui::Button("Ouvrir Telephone (P)")) { SwitchPanel(Panel::Phone, Panel::Debug); }
+      if (ImGui::Button("Workshop Phone (O/F7/Y)")) { SwitchPanel(Panel::Phone, Panel::Debug); }
       ImGui::SameLine();
       if (ImGui::Button("Workshop (F6)")) { SwitchPanel(Panel::Workshop, Panel::Debug); }
       ImGui::SameLine();
@@ -286,11 +287,9 @@ bool ToggleBuild() {
   return true;
 }
 bool OpenPhone() {
-  // Phone is essential in story and coop — keep it available in Campaign as well.
-  // The phone UI itself adapts to the current mode (Workshop vs Campaign).
+  // Workshop phone (Hooky) - base GTA phone restored on P/Haut. Workshop phone on O/F7/Y (panel supplementaire).
+  // Keep available in Campaign as well; UI adapts to mode. Base phone now handled by guest - not consumed here.
   if (IsOpen()) return false;
-  // Allow P/Up even when a text field is not focused; Block only if another overlay is open.
-  // Previously blocked when !sandbox::Active() (i.e. single-player Campaign) which broke story.
   SwitchPanel(Panel::Phone, Panel::Closed);
   return true;
 }

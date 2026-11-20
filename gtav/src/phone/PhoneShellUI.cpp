@@ -164,7 +164,7 @@ PhoneAction DrawPhone(const DesktopView& v, unsigned fps, float scale) {
         for (const auto& p : view.world.players) ImGui::BulletText("%s%s", p.name.c_str(), p.id == view.world.self ? " (toi)" : "");
         ImGui::TextWrapped("RTT estime local. Les actions AdminOS ne sont pas repliquees en v2.");
       } else ImGui::TextWrapped("Aucun salon. La campagne solo et le Workshop utilisent des sauvegardes separees.");
-      if (isWorkshop) ImGui::TextDisabled("Workshop : P / Haut pour ouvrir, Esc / B pour fermer.");
+      if (isWorkshop) ImGui::TextDisabled("Workshop Phone O/F7/Y | Base phone P/Haut (GTA) | Esc / B fermer.");
     } else {
       const char* header = isCampaignCoop ? "CAMPAGNE  /  CO-OP" : isCampaign ? "TELEPHONE  /  HISTOIRE" : "iFRUIT  /  WORKSHOP";
       ImGui::TextColored(kGtaYellow, "%s", header);
@@ -212,7 +212,8 @@ PhoneAction DrawPhone(const DesktopView& v, unsigned fps, float scale) {
       ImGui::SameLine();
       if (GtaAppTile("MESSAGES\nEquipe", "✉", ImVec4(0.60f,0.40f,0.95f,1.f), scale, tile)) page = Page::Status;
       ImGui::Spacing();
-      ImGui::TextDisabled("P / Haut pour ouvrir  \xC2\xB7  Esc / B pour ranger");
+      ImGui::TextDisabled("Workshop Phone O/F7/Y  \xC2\xB7  Base phone P/Haut (GTA natif)  \xC2\xB7  Esc / B ranger");
+      ImGui::TextColored(kGtaGreen, "Base phone restaure - panel supplementaire pour Workshop");
       if (isCampaignCoop) ImGui::TextColored(kGtaGray, "Sauvegarde campagne isolee \xE2\x80\x94 solo intacte.");
       else if (isWorkshop) ImGui::TextDisabled("Build / AdminOS locaux, non repliques en v2.");
       else ImGui::TextDisabled("Telephone histoire \xE2\x80\x94 disponible des le debut.");
