@@ -41,9 +41,12 @@ class Session {
 
   // Port 0 is for loopback tests only. Startup/stop serialize across UI and shutdown.
   bool Host(uint16_t port, std::string name, bool loopback_only = false);
+  // Campaign coop variant: same transport but host enforces 3-player cap (Michael/Franklin/Trevor).
+  bool HostCampaign(uint16_t port, std::string name, bool loopback_only = false);
   // An IPv4[:port] with a separate code, or the host's single pasted "IPv4:port code".
   // Inline codes take precedence. Invalid input is rejected before starting a socket worker.
   bool Join(std::string_view address_or_invitation, std::string name, std::string_view invite = {});
+  bool JoinCampaign(std::string_view address_or_invitation, std::string name, std::string_view invite = {});
   void Stop();
   SessionView View() const;
   Link LinkState() const;
@@ -51,6 +54,8 @@ class Session {
   bool SetCourse(Course course);
   bool StartRace();
   void ResetRace();
+  bool CampaignMode() const;
+  void SetCampaignMode(bool enabled);
 
  private:
   void RunHost(uint16_t port, bool loopback_only);
@@ -73,6 +78,7 @@ class Session {
   std::optional<Presence> local_pose_;
   std::optional<uint32_t> rtt_ms_;
   int64_t last_pose_ms_ = 0, last_snapshot_ms_ = 0;
+  bool campaign_mode_ = false;
   // Explicit stop/join also works with the libc++ shipped by older Xcode versions.
   std::atomic<bool> stop_requested_{false};
   std::thread worker_;  // joined before the fields a worker uses are destroyed

@@ -61,8 +61,10 @@ int main(int argc, char** argv) {
   launch(true, {SDLK_ESCAPE}, {});
   launch(true, {SDLK_RETURN}, Mode::Solo);
   launch(true, {SDLK_DOWN, SDLK_RETURN}, Mode::Multiplayer);
-  launch(true, {SDLK_LEFT, SDLK_DOWN, SDLK_RETURN, SDLK_UP, SDLK_RETURN}, Mode::Campaign);
+  launch(true, {SDLK_LEFT, SDLK_DOWN, SDLK_RETURN}, Mode::CampaignCoop);
+  launch(true, {SDLK_LEFT, SDLK_RETURN}, Mode::Campaign);
   launch(false, {SDLK_RETURN}, Mode::Campaign);
+  launch(false, {SDLK_LEFT, SDLK_DOWN, SDLK_RETURN}, {}); // co-op requires native
   // F1 opens the top preset row. Right applies Ultra, a second right applies Potato.
   launch(true, {SDLK_F1, SDLK_RIGHT, SDLK_ESCAPE, SDLK_RETURN}, Mode::Solo);
   CHECK(flags[Key::SceneScale] == "1.5" && flags[Key::MaterialFiltering] == "true");

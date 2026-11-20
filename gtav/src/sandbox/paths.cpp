@@ -5,10 +5,18 @@ namespace fs = std::filesystem;
 namespace {
 bool EnsureSeparateDirectory(const fs::path& path) {
   std::error_code ec;
-  fs::create_directory(path, ec);
-  if (ec || !fs::is_directory(fs::symlink_status(path, ec))) return false;
-  // Also reject directory junctions that can appear as directories on Windows.
-  return fs::canonical(path, ec) == path && !ec;
+  // create_directories handles a missing parent tree; create_directory alone would fail
+  // if sandbox/ does not yet exist when creating sandbox/profile.
+  fs::create_directories(path, ec);
+  if (ec) return false;
+  // Use symlink_status to detect reparse points / directory junctions before canonical check.
+  const auto status = fs::symlink_status(path, ec);
+  if (ec || !fs::is_directory(status)) return false;
+  // Reject junctions or symlinked folders: canonical must equal the normalized path itself.
+  const auto canon = fs::canonical(path, ec);
+  if (ec) return false;
+  // Normalize both sides for comparison (avoid trailing slash mismatches on Windows).
+  return fs::weakly_canonical(path, ec) == canon && !ec;
 }
 }  // namespace
 

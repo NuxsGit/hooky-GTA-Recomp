@@ -46,9 +46,9 @@ constexpr std::array kTiles{
          {"SOLO", "SOLO"}, {"Continue your story with your local campaign saves.", "Reprends ton histoire avec tes sauvegardes de campagne."}},
     Tile{{730, 284, 650, 251}, {"SANDBOX", "BAC À SABLE"}, {"02   /   WORKSHOP", "02   /   ATELIER"},
          {"SOLO", "SOLO"}, {"Free roam, place props and build courses. Uses a separate profile.", "Explore, place des objets et crée des parcours. Profil séparé."}},
-    Tile{{60, 555, 650, 163}, {"CAMPAIGN CO-OP", "CAMPAGNE COOP"}, {"03   /   STORY MODE", "03   /   MODE HISTOIRE"},
-         {"UNAVAILABLE", "INDISPONIBLE"}, {"Story missions and progress cannot be synchronized between players.",
-                                         "Les missions et la progression ne sont pas synchronisées entre joueurs."}},
+    Tile{{60, 555, 650, 163}, {"CAMPAIGN CO-OP", "CAMPAGNE COOP"}, {"03   /   STORY CO-OP", "03   /   HISTOIRE COOP"},
+         {"3 PLAYERS", "3 JOUEURS"}, {"Michael / Franklin / Trevor locked; 3-player story free-roam. Isolated save under campaign_coop.",
+                                      "Micka\u00ebl / Franklin / Trevor verrouill\u00e9s ; free-roam histoire \u00e0 3. Sauvegarde isol\u00e9e campaign_coop."}},
     Tile{{730, 555, 650, 163}, {"PRIVATE SESSION", "SESSION PRIVÉE"}, {"04   /   SANDBOX MULTIPLAYER", "04   /   BAC À SABLE MULTI"},
          {"MULTIPLAYER", "MULTIJOUEUR"}, {"Open Workshop (F6) to host or join a friend. No public matchmaking.",
                                          "Ouvre l’Atelier (F6) pour héberger ou rejoindre un ami. Pas de matchmaking."}},
@@ -306,16 +306,27 @@ class Hub {
       return out;
     }
 
-    SDL_Surface* art[] = {story_.get(), sandbox_.get(), nullptr, party_.get()};
+    // Campaign co-op reuses the story art with a tint; keep the sandbox night art for the workshop card.
+    SDL_Surface* art[] = {story_.get(), sandbox_.get(), story_.get(), party_.get()};
     for (size_t n = 0; n < kTiles.size(); ++n) {
       const auto card = Card(n);
       const auto& tile = kTiles[n];
       auto rect = tile.rect;
       const bool ready = PlayMode(card, workshop_).has_value();
-      if (art[n]) SDL_BlitSurface(art[n], nullptr, out, &rect);
-      else {
+      if (art[n]) {
+        SDL_BlitSurface(art[n], nullptr, out, &rect);
+        if (card == Card::StoryCoop) {
+          // Subtle warm wash to distinguish the co-op tile from solo campaign
+          for (int y = 0; y < rect.h; ++y) {
+            auto* row = static_cast<Uint8*>(out->pixels) + (rect.y + y) * out->pitch + rect.x * 4;
+            for (int x = 0; x < rect.w; ++x) {
+              row[x*4] = Uint8(std::min(255, int(row[x*4]) + 10));
+              row[x*4+1] = Uint8(std::min(255, int(row[x*4+1]) + 4));
+            }
+          }
+        }
+      } else {
         Fill(out, rect, kPanel);
-        // A quiet placeholder for the locked card, not an illustration suggesting playable co-op.
         for (int j = 0; j < 8; ++j)
           Fill(out, {rect.x + rect.w - 237 + j * 29, rect.y + 1, 1, rect.h - 2}, kLine);
         display_.Label(out, "II", rect.x + rect.w - 160, rect.y + 30, 145, {40, 41, 57});
@@ -333,7 +344,7 @@ class Hub {
     Fill(out, {60, 741, 1320, 1}, kLine);
     Fill(out, {60, 762, 4, 50}, accent);
     body_.Label(out, L(kTiles[i].label), 77, 755, 21, accent);
-    const char* description = (playable || focus == Card::StoryCoop) ? L(kTiles[i].description) :
+    const char* description = playable ? L(kTiles[i].description) :
         L({"Sandbox requires the native renderer.", "Le bac à sable nécessite le moteur de rendu natif."});
     body_.Label(out, description, 76, 783, 27, kWhite);
     Tag(out, kAction, playable ? L({"PLAY    >", "JOUER    >"}) : L({"UNAVAILABLE", "INDISPONIBLE"}),

@@ -1,5 +1,6 @@
 #include "desktop.h"
 #include "CreativeRuntime.h"
+#include "campaign.h"
 
 #include "courses.h"
 #include "../frontend/play_hub.h"
@@ -18,10 +19,13 @@
 #include <cmath>
 #include <utility>
 
-REXCVAR_DEFINE_STRING(gtav_mode, "campaign", "GTAV", "Desktop startup mode: menu | solo | multiplayer | campaign");
+REXCVAR_DEFINE_STRING(gtav_mode, "campaign", "GTAV", "Desktop startup mode: menu | solo | multiplayer | campaign | campaign-coop");
 REXCVAR_DEFINE_BOOL(gtav_workshop_scene, true, "GTAV", "Workshop: show local props and remote ghosts in free roam");
+REXCVAR_DEFINE_STRING(gtav_campaign_host, "", "GTAV", "Campaign coop host IP (launcher editable, empty=auto)");
+REXCVAR_DEFINE_INT(gtav_campaign_port, 30127, "GTAV", "Campaign coop host TCP port");
 
 namespace gtav::sandbox {
+namespace fs = std::filesystem;
 namespace {
 std::atomic<Mode> mode{Mode::Campaign};
 std::filesystem::path courses;
@@ -153,30 +157,50 @@ void ShowNetwork(const SessionView& view) {
   static bool local_only = false;
   static size_t selected_address = 0;
   static std::string notice;
+  const bool is_campaign = CurrentMode() == Mode::CampaignCoop;
   ImGui::TextUnformatted(LinkLabel(view.link));
+  if (is_campaign) ImGui::TextDisabled("Campaign coop: 3 slots locked to Michael / Franklin / Trevor. Saves are isolated.");
   if (!view.error.empty()) ImGui::TextWrapped("%s", view.error.c_str());
   const bool idle = view.link == Link::Idle || view.link == Link::Failed;
   if (idle) {
     ImGui::InputText("Nickname", name, sizeof(name));
-    ImGui::SeparatorText("Host on this PC");
+    ImGui::SeparatorText(is_campaign ? "Host campaign on this PC" : "Host on this PC");
+    // Prefill launcher-editable port if available
+    if (host_port == kDefaultPort) {
+      const int cfg_port = REXCVAR_GET(gtav_campaign_port);
+      if (cfg_port > 0 && cfg_port <= 65535) host_port = cfg_port;
+    }
     ImGui::InputInt("TCP port", &host_port, 0);
     ImGui::Checkbox("This PC only (testing)", &local_only);
-    if (ImGui::Button("Host here")) {
+    if (ImGui::Button(is_campaign ? "Host campaign here" : "Host here")) {
       selected_address = 0;
-      notice = host_port > 0 && host_port <= 65535 && Party().Host(uint16_t(host_port), name, local_only) ? "" :
-          "Enter a port from 1 to 65535 and a nickname (letters, digits, spaces, - or _).";
+      bool ok = false;
+      if (host_port > 0 && host_port <= 65535) {
+        ok = is_campaign ? Party().HostCampaign(uint16_t(host_port), name, local_only)
+                         : Party().Host(uint16_t(host_port), name, local_only);
+      }
+      notice = ok ? "" : "Enter a port from 1 to 65535 and a nickname (letters, digits, spaces, - or _).";
+      if (is_campaign && ok) {
+        // Persist host choice for next launch (launcher can also edit this file)
+        // Note: desktop does not write launcher file directly; launcher owns it.
+      }
     }
+    if (is_campaign) ImGui::TextDisabled("Up to 3 players. Each protagonist is locked to one slot from the start.");
     ImGui::SeparatorText("Join a friend");
     ImGui::InputTextWithHint("Server", "IPv4:port or paste the full invitation", address, sizeof(address));
     ImGui::InputTextWithHint("Invite code", "Leave blank if pasted with the address", code, sizeof(code));
     if (ImGui::Button("Join friend")) {
       if (!ValidName(name)) notice = "Enter a nickname (letters, digits, spaces, - or _).";
-      else notice = Party().Join(address, name, code) ? "" :
-          "Paste the full invitation, or enter the host's IPv4:port and 32-character invite code.";
+      else {
+        bool ok = is_campaign ? Party().JoinCampaign(address, name, code)
+                              : Party().Join(address, name, code);
+        notice = ok ? "" : "Paste the full invitation, or enter the host's IPv4:port and 32-character invite code.";
+      }
     }
   } else {
     if (view.link == Link::Hosting) {
       ImGui::Text("Listening on TCP %u. The room stays open while your game is running.", unsigned(view.port));
+      if (is_campaign) ImGui::Text("Campaign coop: %zu / 3 protagonists assigned", view.world.players.size(), size_t(3));
       if (view.host_addresses.empty()) {
         ImGui::TextWrapped("No local IPv4 detected at startup. Connect to the LAN/VPN and restart the room, "
                            "or share a reachable IPv4 and the code manually.");
@@ -198,6 +222,18 @@ void ShowNetwork(const SessionView& view) {
       if (ImGui::Button("Copy code")) ImGui::SetClipboardText(view.invite.c_str());
       ImGui::TextWrapped("Invite: %s", view.invite.c_str());
     }
+    if (is_campaign) {
+      const auto camp = ViewCampaign();
+      if (!camp.assignments.empty()) {
+        ImGui::SeparatorText("Protagonist locks");
+        for (auto [id, ch] : camp.assignments) {
+          const bool is_self = id == camp.world.self;
+          ImGui::BulletText("%s: %s%s", CharacterLabel(ch),
+                            [&]()->const char* { for (auto &p : camp.world.players) if (p.id==id) return p.name.c_str(); return "?";}(),
+                            is_self ? " (you)" : "");
+        }
+      }
+    }
     if (ImGui::Button(view.link == Link::Hosting ? "Stop server" : "Disconnect")) {
       Party().Stop();
       notice.clear();
@@ -207,6 +243,23 @@ void ShowNetwork(const SessionView& view) {
   ImGui::TextWrapped("Share invitations privately. Allow inbound TCP on the host's firewall. For remote friends, "
                      "use a trusted private VPN, or forward TCP manually if your Internet connection permits it. "
                      "IPv4 only; traffic is not encrypted.");
+}
+
+void ShowCampaignStatus() {
+  if (CurrentMode() != Mode::CampaignCoop) return;
+  const auto view = ViewCampaign();
+  ImGui::SeparatorText("Campaign co-op");
+  ImGui::Text("Save: isolated under data/user/campaign_coop (solo saves untouched)");
+  ImGui::Text("Unlock: Michael, Franklin and Trevor are available from the start");
+  if (view.self_character)
+    ImGui::Text("You are: %s", CharacterLabel(*view.self_character));
+  else if (view.link == Link::Joined || view.link == Link::Hosting)
+    ImGui::TextDisabled("Assigning protagonist...");
+  for (auto [id, ch] : view.assignments) {
+    const char* name = "?";
+    for (auto &p : view.world.players) if (p.id == id) { name = p.name.c_str(); break; }
+    ImGui::BulletText("%s -> %s", name, CharacterLabel(ch));
+  }
 }
 }  // namespace
 
@@ -224,11 +277,50 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
     chosen = *selected;
   } else if (requested == "solo") chosen = Mode::Solo;
   else if (requested == "multiplayer") chosen = Mode::Multiplayer;
-  else if (requested == "campaign-coop") return Error("Campaign co-op is unavailable: story missions are not synchronized.");
-  else if (requested != "campaign") return Error("Unknown mode. Use menu, solo, multiplayer or campaign.");
+  else if (requested == "campaign-coop" || requested == "campaign_coop") chosen = Mode::CampaignCoop;
+  else if (requested != "campaign") return Error("Unknown mode. Use menu, solo, multiplayer, campaign or campaign-coop.");
 
   if (chosen == Mode::Campaign) return true;
   if (!workshop_enabled) return Error("Workshop modes need the native renderer (--gtav_native=on).");
+
+  if (chosen == Mode::CampaignCoop) {
+    // Isolated save: data/user/campaign_coop/profile - never touches data/user/* solo saves
+    CampaignWorkspaceError cerr{};
+    auto campaign = PrepareCampaignWorkspace(paths.user_data_root, cerr);
+    // Also keep legacy check for path.h compatibility
+    if (!campaign) {
+      return Error(cerr == CampaignWorkspaceError::MissingInstall ?
+          "Installed TU27 game data is missing. Install the game with the launcher first." :
+          "Could not create separate campaign coop folders. Use a writable installation without links in those folders.");
+    }
+    if (!EnsureCampaignUnlock(campaign->profile_root)) {
+      return Error("Could not write campaign unlock flag. Check write permissions for the campaign profile.");
+    }
+    paths.user_data_root = campaign->profile_root;
+    installed_content_root = campaign->common_content_root;
+    courses = campaign->course_root;
+    // Minimal workshop init for ghosts/markers if available; campaign coop reuses the same presence transport
+    // but does not require full build permissions.
+    if (fs::exists(campaign->profile_root)) {
+      // Seed a workshop storage so overlay helpers do not crash when queried
+      workshop::Start(campaign->profile_root, false, {
+          [](std::string_view line) { REXLOG_INFO("{}", line); },
+          [](uint8_t failed) { REXLOG_WARN("[campaign] could not write config documents (mask {})", unsigned(failed)); },
+      });
+    }
+    mode.store(chosen, std::memory_order_relaxed);
+    native::menu::OpenWorkshop();
+    REXLOG_INFO("[campaign] coop mode: 3 protagonists unlocked from start, save isolated at %s",
+                campaign->profile_root.string().c_str());
+    // Pre-apply launcher-editable host defaults to cvars so ShowNetwork can prefill
+    {
+      const auto host_ip = REXCVAR_GET(gtav_campaign_host);
+      const auto host_port = REXCVAR_GET(gtav_campaign_port);
+      (void)host_ip; (void)host_port;
+    }
+    return true;
+  }
+
   WorkspaceError error{};
   const auto workspace = PrepareWorkspace(paths.user_data_root, error);
   if (!workspace) {
@@ -267,17 +359,39 @@ void DrawWorkshop() {
   if (!Active()) return;
   const auto view = Party().View();
   const auto* local = Myself(view.world);
-  ImGui::TextUnformatted(CurrentMode() == Mode::Solo ? "SANDBOX SOLO" : "PRIVATE MULTIPLAYER");
+  if (CurrentMode() == Mode::CampaignCoop) {
+    ImGui::TextUnformatted("CAMPAIGN CO-OP  /  3 protagonists");
+  } else {
+    ImGui::TextUnformatted(CurrentMode() == Mode::Solo ? "SANDBOX SOLO" : "PRIVATE MULTIPLAYER");
+  }
   ImGui::TextWrapped("%s", GuestLabel());
   if (!SceneEnabled() || !scene_available.load()) ImGui::TextDisabled("Local props and ghost actors are disabled; map markers still work.");
   if (!ImGui::BeginTabBar("workshop-tabs")) return;
-  if (CurrentMode() == Mode::Multiplayer && ImGui::BeginTabItem("Session")) {
+  if ((CurrentMode() == Mode::Multiplayer || CurrentMode() == Mode::CampaignCoop) && ImGui::BeginTabItem("Session")) {
     ShowNetwork(view);
     ImGui::Separator();
-    ImGui::Text("Players: %zu / %u", view.world.players.size(), kMaxPlayers);
-    for (const auto& p : view.world.players)
-      ImGui::BulletText("%s%s%s", p.name.c_str(), p.id == view.world.self ? " (you)" : "",
-                        p.pose ? "" : " | loading / absent");
+    if (CurrentMode() == Mode::CampaignCoop) {
+      const auto camp = ViewCampaign();
+      ImGui::Text("Players: %zu / 3", view.world.players.size());
+      for (auto [id, ch] : camp.assignments) {
+        const char* name = "?";
+        for (auto &p : view.world.players) if (p.id == id) { name = p.name.c_str(); break; }
+        bool is_self = id == view.world.self;
+        const char* pose_state = "";
+        for (auto &p : view.world.players) if (p.id == id) { pose_state = p.pose ? "" : " | loading"; break; }
+        ImGui::BulletText("%s: %s%s%s", CharacterLabel(ch), name, is_self ? " (you)" : "", pose_state);
+      }
+      if (camp.assignments.empty() && !view.world.players.empty()) {
+        for (const auto& p : view.world.players)
+          ImGui::BulletText("%s%s%s", p.name.c_str(), p.id == view.world.self ? " (you)" : "", p.pose ? "" : " | loading");
+      }
+      ShowCampaignStatus();
+    } else {
+      ImGui::Text("Players: %zu / %u", view.world.players.size(), kMaxPlayers);
+      for (const auto& p : view.world.players)
+        ImGui::BulletText("%s%s%s", p.name.c_str(), p.id == view.world.self ? " (you)" : "",
+                          p.pose ? "" : " | loading / absent");
+    }
     ImGui::EndTabItem();
   }
   if (ImGui::BeginTabItem("Map builder")) {
@@ -325,7 +439,22 @@ void DrawHud() {
   constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
       ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing;
   if (ImGui::Begin("##workshop-hud", nullptr, flags)) {
-    if (world.race == Race::Countdown)
+    if (CurrentMode() == Mode::CampaignCoop) {
+      const auto camp = ViewCampaign();
+      const char* who = camp.self_character ? CharacterLabel(*camp.self_character) : "?";
+      if (world.race == Race::Countdown)
+        ImGui::Text("Campaign %s | %s | Starts in %u", who, world.course.name.c_str(), (world.clock_ms + 999) / 1000);
+      else if (world.race == Race::Running || world.race == Race::Finished)
+        ImGui::Text("Campaign %s | %u/%zu | %.2f s%s", who, local->Passed(), world.course.points.size(),
+                    (local->finish_ms ? local->finish_ms : world.clock_ms) / 1000.0, local->finish_ms ? "  FINISHED" : "");
+      else {
+        const size_t campaign_players = view.world.players.size();
+        ImGui::Text("Campaign %s | %zu/3  [F6] %s", who, campaign_players, LinkLabel(view.link));
+      }
+      if (camp.self_character) {
+        ImGui::TextDisabled("Locked protagonist: %s  |  Saves: campaign_coop (isolated)", who);
+      }
+    } else if (world.race == Race::Countdown)
       ImGui::Text("%s | Starts in %u", world.course.name.c_str(), (world.clock_ms + 999) / 1000);
     else if (world.race == Race::Running || world.race == Race::Finished)
       ImGui::Text("%s | %u/%zu | %.2f s%s", world.course.name.c_str(), local->Passed(), world.course.points.size(),

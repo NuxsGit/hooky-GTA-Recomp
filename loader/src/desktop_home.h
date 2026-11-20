@@ -1,5 +1,7 @@
 // Desktop install location and one-time import. Updates keep the existing game home;
 // this code is only used before opening it, not on every rebuild or play.
+// Campaign coop saves (data/user/campaign_coop) are isolated from solo (data/user)
+// and are handled as mutable local state alongside the sandbox profile.
 #pragma once
 
 #include <filesystem>

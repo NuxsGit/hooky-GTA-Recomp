@@ -5,6 +5,7 @@
 #include "paths.h"
 #include "session.h"
 #include "scene.h"
+#include "campaign.h"
 
 namespace rex { struct PathConfig; }
 

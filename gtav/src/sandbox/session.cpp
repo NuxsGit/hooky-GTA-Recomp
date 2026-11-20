@@ -337,6 +337,7 @@ bool Session::Host(uint16_t port, std::string name, bool loopback_only) {
   {
     std::lock_guard lock(mutex_);
     link_ = Link::Opening;
+    campaign_mode_ = false;
     ResetRoom(std::move(name));
   }
   stop_requested_.store(false, std::memory_order_relaxed);
@@ -349,6 +350,27 @@ bool Session::Host(uint16_t port, std::string name, bool loopback_only) {
   return true;
 }
 
+bool Session::HostCampaign(uint16_t port, std::string name, bool loopback_only) {
+  if ((!port && !loopback_only) || !ValidName(name)) return false;
+  std::lock_guard lifecycle(lifecycle_);
+  { std::lock_guard lock(mutex_); if (!Available()) return false; }
+  StopLocked();
+  {
+    std::lock_guard lock(mutex_);
+    link_ = Link::Opening;
+    campaign_mode_ = true;
+    ResetRoom(std::move(name));
+  }
+  stop_requested_.store(false, std::memory_order_relaxed);
+  try {
+    worker_ = std::thread([this, port, loopback_only] { RunHost(port, loopback_only); });
+  } catch (const std::system_error&) {
+    Fail("Could not start the campaign session worker.");
+    return false;
+  }
+  return true;
+}
+
 bool Session::Join(std::string_view address, std::string name, std::string_view code) {
   address = Trim(address);
   const auto separator = address.find_first_of(kWhitespace);
@@ -356,7 +378,7 @@ bool Session::Join(std::string_view address, std::string name, std::string_view 
     code = address.substr(separator);
     address = address.substr(0, separator);
   }
-  const auto endpoint = ParseEndpoint(address);
+  const auto endpoint = ParseEndpoint(Trim(address));
   const auto invite = wire::ParseInvite(Trim(code));
   if (!endpoint || !invite || !ValidName(name)) return false;
   std::lock_guard lifecycle(lifecycle_);
@@ -366,6 +388,7 @@ bool Session::Join(std::string_view address, std::string name, std::string_view 
     std::lock_guard lock(mutex_);
     link_ = Link::Connecting;
     port_ = endpoint->port;
+    campaign_mode_ = false;
   }
   stop_requested_.store(false, std::memory_order_relaxed);
   try {
@@ -377,6 +400,46 @@ bool Session::Join(std::string_view address, std::string name, std::string_view 
     return false;
   }
   return true;
+}
+
+bool Session::JoinCampaign(std::string_view address, std::string name, std::string_view code) {
+  address = Trim(address);
+  const auto separator = address.find_first_of(kWhitespace);
+  if (separator != address.npos) {
+    code = address.substr(separator);
+    address = address.substr(0, separator);
+  }
+  const auto endpoint = ParseEndpoint(Trim(address));
+  const auto invite = wire::ParseInvite(Trim(code));
+  if (!endpoint || !invite || !ValidName(name)) return false;
+  std::lock_guard lifecycle(lifecycle_);
+  { std::lock_guard lock(mutex_); if (!Available()) return false; }
+  StopLocked();
+  {
+    std::lock_guard lock(mutex_);
+    link_ = Link::Connecting;
+    port_ = endpoint->port;
+    campaign_mode_ = true;
+  }
+  stop_requested_.store(false, std::memory_order_relaxed);
+  try {
+    worker_ = std::thread([this, endpoint = *endpoint, name = std::move(name), invite = *invite] {
+      RunClient(endpoint, name, invite);
+    });
+  } catch (const std::system_error&) {
+    Fail("Could not start the campaign session worker.");
+    return false;
+  }
+  return true;
+}
+
+bool Session::CampaignMode() const {
+  std::lock_guard lock(mutex_);
+  return campaign_mode_;
+}
+void Session::SetCampaignMode(bool enabled) {
+  std::lock_guard lock(mutex_);
+  campaign_mode_ = enabled;
 }
 
 void Session::Stop() {
@@ -402,6 +465,7 @@ void Session::StopLocked() {
   remote_ = {};
   rtt_ms_.reset();
   last_snapshot_ms_ = 0;
+  campaign_mode_ = false;
   ResetRoom("Player");
 }
 
@@ -415,6 +479,7 @@ void Session::Fail(std::string error) {
   remote_ = {};
   rtt_ms_.reset();
   last_snapshot_ms_ = 0;
+  // Keep campaign_mode_ so UI can show which mode failed; reset only on Stop.
   ResetRoom("Player");
 }
 
@@ -528,6 +593,12 @@ void Session::RunHost(uint16_t port, bool loopback_only) {
           std::string name;
           if (!wire::ReadHello(frame, code, name) || !wire::MatchInvite(invite, code)) return false;
           std::lock_guard lock(mutex_);
+          // Campaign coop is strict 3 slots (Michael/Franklin/Trevor). Reject extra joins
+          // before allocating an id to avoid transient 4+ states.
+          if (campaign_mode_) {
+            const auto current = room_.View(1, now).players.size();
+            if (current >= 3) return false;
+          }
           peer.id = room_.Add(std::move(name));
           if (!peer.id) return false;
           peer.pipe.Queue(wire::Snapshot(room_.View(peer.id, NowMs())), now);

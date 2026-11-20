@@ -89,7 +89,7 @@ else()
     endif()
 endif()
 
-target_sources(gtav_launcher PRIVATE src/update.cpp src/update_http.cpp src/desktop_home.cpp)
+target_sources(gtav_launcher PRIVATE src/update.cpp src/update_http.cpp src/desktop_home.cpp src/campaign_config.cpp)
 gtav_update_definitions(gtav_launcher)
 # Release staging checks this sidecar to catch packaging a launcher built for another version.
 file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/launcher-build-version.in" CONTENT "${GTAV_BUILD_VERSION}\n" @ONLY)
@@ -142,8 +142,9 @@ if(GTAV_LAUNCHER_TESTS)
     set(_workshop ../gtav/src/sandbox)
     add_executable(gtav_sandbox_tests tests/sandbox_tests.cpp
         ${_workshop}/world.cpp ${_workshop}/protocol.cpp ${_workshop}/session.cpp
-        ${_workshop}/courses.cpp ${_workshop}/paths.cpp ${_workshop}/scene.cpp)
-    target_include_directories(gtav_sandbox_tests PRIVATE ${_workshop})
+        ${_workshop}/courses.cpp ${_workshop}/paths.cpp ${_workshop}/scene.cpp ${_workshop}/campaign.cpp)
+    target_include_directories(gtav_sandbox_tests PRIVATE ${_workshop} ../gtav/src)
+    target_compile_definitions(gtav_sandbox_tests PRIVATE GTAV_DESKTOP_WORKSHOP=1)
     target_link_libraries(gtav_sandbox_tests PRIVATE Threads::Threads)
     if(WIN32)
         target_compile_definitions(gtav_sandbox_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

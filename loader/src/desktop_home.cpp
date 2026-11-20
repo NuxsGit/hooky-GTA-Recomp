@@ -68,7 +68,7 @@ bool Within(const fs::path& path, const fs::path& parent) {
 
 constexpr const char* kMutable[] = {
     "data/game", "data/update", "data/user", "data/build", "data/build-iphone", "data/build-android",
-    "data/spirv", "data/shader_cache", "data/config/graphics.ini", "data/launcher.ini", "data/installed.txt",
+    "data/spirv", "data/shader_cache", "data/config/graphics.ini", "data/launcher.ini", "data/campaign_coop.ini", "data/installed.txt",
     "data/install_state.txt",
     "data/data_installed.txt", "data/verified-assets.txt", "data/launcher-updates.txt",
 #ifdef _WIN32

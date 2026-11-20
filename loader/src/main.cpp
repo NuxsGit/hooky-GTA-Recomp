@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "campaign_config.h"
 #include "desktop_home.h"
 #include "install.h"
 #include "sources.h"
@@ -64,6 +65,9 @@ enum : int {
   kIdAuto = 220,
   kIdDownload = 221,
   kIdGoToUpdates = 222,
+  kIdCampaignIp = 223,
+  kIdCampaignPort = 224,
+  kIdCampaignSave = 225,
 };
 constexpr UINT kMsgLog = WM_APP + 1, kMsgStage = WM_APP + 2, kMsgProgress = WM_APP + 3,
                kMsgDone = WM_APP + 4, kMsgAsk = WM_APP + 5, kMsgUpdate = WM_APP + 6;
@@ -80,6 +84,7 @@ HWND g_wnd, g_edit[3], g_install, g_play, g_cancel, g_progress, g_stage, g_log, 
 HWND g_rebuild, g_update, g_update_zip, g_release, g_download, g_stable, g_nightly, g_auto;
 HWND g_update_text, g_feed_text, g_latest_text, g_auto_card, g_channel_hint;
 HWND g_install_label, g_install_text, g_badge, g_kicker, g_title;
+HWND g_campaign_ip, g_campaign_port, g_campaign_save, g_campaign_label;
 bool g_close_after_job = false, g_rebuilding = false, g_installing_update = false, g_update_automatic = false;
 bool g_checking = false, g_no_background = false, g_pause_auto = false;
 unsigned g_check_generation = 0;
@@ -132,6 +137,39 @@ void LoadInputs() {
     if (!std::getline(f, line)) break;
     SetWindowTextW(e, Widen(line).c_str());
   }
+}
+
+void LoadCampaignInputs() {
+  auto cfg = LoadCampaignHostConfig(g_root);
+  std::wstring ip = cfg.address.empty() ? L"" : Widen(cfg.address);
+  std::wstring port = std::to_wstring(cfg.port);
+  if (g_campaign_ip) SetWindowTextW(g_campaign_ip, ip.c_str());
+  if (g_campaign_port) SetWindowTextW(g_campaign_port, port.c_str());
+}
+
+bool SaveCampaignInputs() {
+  if (!g_campaign_ip || !g_campaign_port) return false;
+  wchar_t ip_buf[64] = {}, port_buf[16] = {};
+  GetWindowTextW(g_campaign_ip, ip_buf, 64);
+  GetWindowTextW(g_campaign_port, port_buf, 16);
+  std::string ip = Narrow(ip_buf);
+  std::string port_s = Narrow(port_buf);
+  // Trim
+  auto trim = [](std::string &s){ size_t a=0; while(a<s.size()&& isspace((unsigned char)s[a]))++a; size_t b=s.size(); while(b>a && isspace((unsigned char)s[b-1]))--b; s=s.substr(a,b-a); };
+  trim(ip); trim(port_s);
+  uint16_t port = 30127;
+  try { int p = port_s.empty()?30127:std::stoi(port_s); if (p>0 && p<=65535) port=(uint16_t)p; else return false; } catch(...) { return false; }
+  if (!ip.empty()) {
+    // Validate IPv4 quickly
+    int dots=0; std::string cur; bool bad=false;
+    for(char c: ip){ if(c=='.'){dots++; if(cur.empty()){bad=true;break;} cur.clear();} else if(c>='0'&&c<='9') cur+=c; else {bad=true;break;}}
+    if (bad || dots!=3 || cur.empty()) return false;
+  }
+  CampaignHostConfig cfg;
+  cfg.address = ip;
+  cfg.port = port;
+  cfg.loopback_only = false;
+  return SaveCampaignHostConfig(g_root, cfg);
 }
 
 std::wstring Pick(bool folder, bool iso_filter, bool zip_filter = false) {
@@ -265,6 +303,9 @@ void SetBusy(bool busy) {
     EnableWindow(GetDlgItem(g_wnd, kIdFile + i), editable);
     EnableWindow(GetDlgItem(g_wnd, kIdFolder + i), editable);
   }
+  EnableWindow(g_campaign_ip, editable);
+  EnableWindow(g_campaign_port, editable);
+  EnableWindow(g_campaign_save, editable);
   if (editable) g_status = GetInstallStatus(g_root, g_root);
   const bool ready = g_status == InstallStatus::Ready, needs_build = g_status == InstallStatus::NeedsRebuild;
   EnableWindow(g_install, editable);
@@ -581,6 +622,18 @@ void CreateControls() {
   g_auto_card = Label(Overview, L"", 629, 441, 341, 23, &g_font, kText, SS_ENDELLIPSIS);
   Button(Overview, L"Gérer les mises à jour", 629, 475, 201, 31, kIdGoToUpdates);
 
+  // Campaign co-op server host (launcher-editable IP/port). This reuses the same TCP transport
+  // as private sessions but isolates saves under data/user/campaign_coop and locks characters.
+  g_campaign_label = Label(Overview, L"03  /  CAMPAGNE CO-OP  ·  3 JOUEURS (M / F / T)", 256, 518, 420, 18, &g_small, kMint);
+  Label(Overview, L"IP d’écoute (vide = auto)", 256, 536, 190, 18, &g_small, kMuted);
+  Label(Overview, L"Port TCP", 505, 536, 90, 18, &g_small, kMuted);
+  g_campaign_ip = Make(Overview, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 254, 554, 230, 26, kIdCampaignIp, &g_mono);
+  g_campaign_port = Make(Overview, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 500, 554, 90, 26, kIdCampaignPort, &g_mono);
+  SendMessageW(g_campaign_ip, EM_SETLIMITTEXT, 15, 0);
+  SendMessageW(g_campaign_port, EM_SETLIMITTEXT, 5, 0);
+  g_campaign_save = Button(Overview, L"Enregistrer", 605, 553, 110, 28, kIdCampaignSave);
+  Label(Overview, L"Mickaël / Franklin / Trevor verrouillés dès le début · sauvegarde isolée campaign_coop", 256, 582, 520, 16, &g_small, kMuted);
+
   for (int i = 0; i < 3; ++i) {
     const int y = 145 + i * 84;
     Label(Setup, kRowLabels[i], 256, y, 156, 24, &g_heading);
@@ -624,6 +677,7 @@ void CreateControls() {
   g_cancel = Button(Always, L"Annuler", 845, 569, 131, 42, kIdCancel);
   Layout();
   LoadInputs();
+  LoadCampaignInputs();
   SetBusy(false);
   ShowPage(g_open_setup ? Setup : Overview);
   AppendLog(L"Launcher " + version + L" | " + PathWide(g_root));
@@ -809,7 +863,7 @@ LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
       auto dc = reinterpret_cast<HDC>(wp);
       auto child = reinterpret_cast<HWND>(lp);
       const int id = GetDlgCtrlID(child);
-      if (id == kIdLog || (id >= kIdEdit && id < kIdEdit + 3)) {
+      if (id == kIdLog || (id >= kIdEdit && id < kIdEdit + 3) || id == kIdCampaignIp || id == kIdCampaignPort) {
         SetTextColor(dc, Theme(kText));
         SetBkColor(dc, Theme(kField));
         return reinterpret_cast<LRESULT>(g_field_brush);
@@ -868,6 +922,16 @@ LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         StartUpdateCheck();
       } else if (id == kIdIphone || id == kIdAndroid) {
         StartPhone(id == kIdAndroid);
+      } else if (id == kIdCampaignSave) {
+        if (SaveCampaignInputs()) {
+          SetWindowTextW(g_stage, L"Campagne : IP/port enregistrés (sauvegarde isolée campaign_coop).");
+          AppendLog(L"Campagne host saved: " + Widen(FormatCampaignHost(LoadCampaignHostConfig(g_root))));
+        } else {
+          MessageBoxW(hw, L"IP invalide ou port hors 1-65535. Utilise une IPv4 comme 192.168.1.10 et un port 1024-65535.",
+                      L"Campagne co-op", MB_ICONWARNING);
+          SetWindowTextW(g_stage, L"Campagne : enregistrement échoué. Vérifie l’IP et le port.");
+        }
+        RedrawDashboard();
       } else if (id == kIdCancel) {
         g_cancelled = true;
         EnableWindow(g_cancel, FALSE);
@@ -882,7 +946,15 @@ LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
           StartInstall(true);
         } else {
           std::wstring error;
-          if (LaunchWindowsGame(g_root, &error, {}, &g_game)) {
+          // Forward launcher-editable campaign host settings to the game via cvars,
+          // so the campaign coop overlay can prefill the TCP port / advertise the IP.
+          std::vector<std::wstring> extra_args;
+          {
+            auto cfg = LoadCampaignHostConfig(g_root);
+            if (!cfg.address.empty()) extra_args.push_back(L"--gtav_campaign_host=" + Widen(cfg.address));
+            if (cfg.port != 30127) extra_args.push_back(L"--gtav_campaign_port=" + std::to_wstring(cfg.port));
+          }
+          if (LaunchWindowsGame(g_root, &error, extra_args, &g_game)) {
             AppendLog(L"Jeu démarré.");
             SetBusy(false);
           } else MessageBoxW(hw, error.c_str(), L"Jouer", MB_ICONERROR);

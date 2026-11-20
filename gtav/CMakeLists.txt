@@ -127,7 +127,7 @@ if(NOT ANDROID AND NOT GTAV_IOS)
     target_link_libraries(gtav PRIVATE Threads::Threads)
     target_compile_definitions(gtav PRIVATE GTAV_DESKTOP_WORKSHOP=1)
     target_sources(gtav PRIVATE src/sandbox/desktop.cpp src/sandbox/world.cpp
-        src/sandbox/protocol.cpp src/sandbox/session.cpp src/sandbox/courses.cpp src/sandbox/paths.cpp src/sandbox/scene.cpp)
+        src/sandbox/protocol.cpp src/sandbox/session.cpp src/sandbox/courses.cpp src/sandbox/paths.cpp src/sandbox/scene.cpp src/sandbox/campaign.cpp)
     include(WorkshopCore.cmake)
     target_sources(gtav PRIVATE ${GTAV_WORKSHOP_CORE}
         src/sandbox/CreativeRuntime.cpp src/sandbox/Tu27Workshop.cpp src/sandbox/BuildMenuUI.cpp

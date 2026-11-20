@@ -37,6 +37,7 @@
 #include <gtk/gtk.h>
 #endif
 
+#include "campaign_config.h"
 #include "desktop_home.h"
 #include "install.h"
 #include "sources.h"
@@ -56,6 +57,12 @@ fs::path g_root;
 volatile std::sig_atomic_t g_cancelled = 0;
 
 fs::path SettingsPath() { return g_root / "data" / "launcher.ini"; }
+
+void AppendCampaignArgs(std::vector<std::wstring>& args) {
+  auto cfg = LoadCampaignHostConfig(g_root);
+  if (!cfg.address.empty()) args.push_back(L"--gtav_campaign_host=" + Widen(cfg.address));
+  if (cfg.port != 30127) args.push_back(L"--gtav_campaign_port=" + std::to_wstring(cfg.port));
+}
 
 std::vector<std::string> LoadInputs() {
   std::vector<std::string> v(3);
@@ -260,9 +267,13 @@ int Setup(std::vector<std::string> given, const std::vector<std::wstring>& game_
   fflush(stdout);
   std::string answer;
   if (std::getline(std::cin, answer) && (Trim(answer) == "n" || Trim(answer) == "N")) return 0;
-  if (!LaunchGame(g_root, &error, game_args)) {
-    fprintf(stderr, "%s\n", Narrow(error).c_str());
-    return 1;
+  {
+    auto args = game_args;
+    AppendCampaignArgs(args);
+    if (!LaunchGame(g_root, &error, args)) {
+      fprintf(stderr, "%s\n", Narrow(error).c_str());
+      return 1;
+    }
   }
   return 0;
 }
@@ -693,7 +704,9 @@ class SetupWindow : public InstallUi {
     g.gtk_widget_hide(window_);
     while (g.gtk_events_pending()) g.gtk_main_iteration();
     std::wstring error;
-    if (LaunchGame(g_root, &error, game_args_)) return;
+    auto args = game_args_;
+    AppendCampaignArgs(args);
+    if (LaunchGame(g_root, &error, args)) return;
     g.gtk_widget_show_all(window_);
     ErrorBox(Narrow(error));
   }
@@ -863,7 +876,11 @@ int main(int argc, char** argv) {
   std::wstring error;
   if (!setup && GetInstallStatus(g_root, g_root) == InstallStatus::Ready) {
     if (SameFolder(g_root, DefaultGameHome())) AddDesktopEntry(nullptr);
-    if (LaunchGame(g_root, &error, game_args)) return 0;
+    {
+      auto args = game_args;
+      AppendCampaignArgs(args);
+      if (LaunchGame(g_root, &error, args)) return 0;
+    }
     if (!window) {
       fprintf(stderr, "%s\n", Narrow(error).c_str());
       return 1;
