@@ -37,12 +37,6 @@ enum class Key {
 };
 void OnKey(Key key, bool down);
 
-// Applies gtav_settings.ini (next to the exe) over the command line. Once, before the first frame.
-void LoadSettings();
-
-// Render thread: sets one of the menu's settings as its controls do (logs/menu_set test hook).
-void TestSet(const std::string& name, const std::string& value);
-
 // Render thread. Builds the menu for a display of w x h pixels when it is open; null when closed.
 // `fps` is the presented rate over the last second, `frame_ms` the average time per frame.
 ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const PresentationInfo& info);

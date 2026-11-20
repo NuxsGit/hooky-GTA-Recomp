@@ -2448,27 +2448,40 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
         b->ReadAt(off, buf.data(), size_t(std::min<uint64_t>(buf.size(), b->size() - off)));
     }
   }
+  const auto install_root = fs::absolute(root, ec);
+  if (ec) { *error = L"Could not resolve the installed game folder: " + Widen(ec.message()); return false; }
+  const auto absolute_data = install_root / L"data";
   auto arg = [](const std::wstring& name, const fs::path& p) {
     return L"--" + name + L"=" + PathWide(p);
   };
-  Args args = {PathWide(root / kGameExe), arg(L"game_data_root", data / L"game"),
-               arg(L"user_data_root", data / L"user"), arg(L"update_data_root", data / L"update"),
-               arg(L"log_file", data / L"logs" / L"gtav.log"),
-               arg(L"gtav_native_spirv_dir", data / L"spirv"), L"--gpu_plugin=xenos",
-               L"--headless=true", L"--log_level=info", L"--log_max_file_size_mb=256",
-               L"--log_max_files=2",
+  Args args = {PathWide(install_root / kGameExe)};
+  const Args defaults = {arg(L"game_data_root", absolute_data / L"game"),
+      arg(L"user_data_root", absolute_data / L"user"), arg(L"update_data_root", absolute_data / L"update"),
+      arg(L"log_file", absolute_data / L"logs" / L"gtav.log"),
+      arg(L"gtav_native_spirv_dir", absolute_data / L"spirv"),
+      arg(L"gtav_settings_path", absolute_data / L"config" / L"graphics.ini"), L"--gpu_plugin=xenos",
+      L"--headless=true", L"--log_level=info", L"--log_max_file_size_mb=256", L"--log_max_files=2",
 #ifdef __APPLE__
-               // The runtime's own window would open in a fullscreen Space of its own; the native
-               // renderer hides it and opens the game window on the desktop, leaving the player
-               // looking at an empty black Space.
-               L"--fullscreen=false",
+      // The runtime's own window would open in a fullscreen Space of its own; the native renderer
+      // hides it, leaving the player looking at an empty black Space.
+      L"--fullscreen=false",
 #endif
-               L"--gtav_native=on", L"--gtav_fps_limit=30", L"--gpu_skip_rendering=true",
-               L"--gpu_skip_rendering_lag_ms=4", L"--vsync=false", L"--gtav_native_vsync=false"};
-  // SDK value options cannot be repeated. Supply the mode chooser only when not overridden.
-  if (std::none_of(extra.begin(), extra.end(), [](const auto& opt) {
-        return opt == L"--gtav_mode" || opt.starts_with(L"--gtav_mode=");
-      })) args.push_back(L"--gtav_mode=menu");
+      L"--gtav_native=on", L"--gpu_skip_rendering=true", L"--vsync=false", L"--gtav_mode=menu"};
+  // CLI11 rejects duplicated value options. A caller can replace any launcher default in
+  // --name=value or --name value form (including the SDK's --no-name boolean alias).
+  auto name = [](std::wstring_view opt) {
+    if (!opt.starts_with(L"--")) return std::wstring_view{};
+    opt.remove_prefix(2);
+    return opt.substr(0, opt.find(L'='));
+  };
+  for (const auto& option : defaults) {
+    const auto key = name(option);
+    const bool overridden = std::any_of(extra.begin(), extra.end(), [&](const auto& opt) {
+      const auto explicit_key = name(opt);
+      return explicit_key == key || (explicit_key.starts_with(L"no-") && explicit_key.substr(3) == key);
+    });
+    if (!overridden) args.push_back(option);
+  }
   args.insert(args.end(), extra.begin(), extra.end());
 #ifndef _WIN32
   if (!lock.KeepInChild()) {
@@ -2513,7 +2526,7 @@ bool LaunchGame(const fs::path& root, std::wstring* error, const std::vector<std
   return false;
 #else
   HANDLE inherit[] = {lock.Get()};
-  if (!win::Spawn(root / kGameExe, win::CommandLine(args), root, 0, process, inherit)) {
+  if (!win::Spawn(install_root / kGameExe, win::CommandLine(args), install_root, 0, process, inherit)) {
     *error = L"Could not start gtav_fast.exe";
     return false;
   }

@@ -2006,32 +2006,36 @@ struct Backend::Impl {
   struct FsrSlot {
     FsrTarget easu, rcas;
     Extent failed_size;
-    bool failed_extra_pass = false;
+    Fsr1Route failed_route = Fsr1Route::Bypass;
   };
   FsrSlot fsr_slots[Backend::kFramesInFlight];
   std::unique_ptr<RenderPipeline> fsr_easu, fsr_rcas;
-  bool fsr_init_attempted = false;
+  bool fsr_easu_attempted = false, fsr_rcas_attempted = false;
 
-  bool InitFsr1(RenderFormat format) {
-    if (!fsr_init_attempted) {
-      fsr_init_attempted = true;
-      auto create = [&](const void* data, size_t size, const char* entry) -> std::unique_ptr<RenderPipeline> {
-        auto ps = device->createShader(data, size, entry, RenderShaderFormat::SPIRV);
-        if (!ps) return nullptr;
-        RenderGraphicsPipelineDesc desc;
-        desc.pipelineLayout = layout.get();
-        desc.vertexShader = blit_vs.get();
-        desc.pixelShader = ps.get();
-        desc.renderTargetCount = 1;
-        desc.renderTargetFormat[0] = format;
-        desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
-        return device->createGraphicsPipeline(desc);
-      };
+  bool InitFsr1(RenderFormat format, bool sharpen) {
+    auto create = [&](const void* data, size_t size, const char* entry) -> std::unique_ptr<RenderPipeline> {
+      auto ps = device->createShader(data, size, entry, RenderShaderFormat::SPIRV);
+      if (!ps) return nullptr;
+      RenderGraphicsPipelineDesc desc;
+      desc.pipelineLayout = layout.get();
+      desc.vertexShader = blit_vs.get();
+      desc.pixelShader = ps.get();
+      desc.renderTargetCount = 1;
+      desc.renderTargetFormat[0] = format;
+      desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+      return device->createGraphicsPipeline(desc);
+    };
+    if (!fsr_easu_attempted) {
+      fsr_easu_attempted = true;
       fsr_easu = create(g_native_fsr_easu_ps, sizeof(g_native_fsr_easu_ps), "PSFsrEasu");
-      fsr_rcas = create(g_native_fsr_rcas_ps, sizeof(g_native_fsr_rcas_ps), "PSFsrRcas");
-      if (!fsr_easu || !fsr_rcas) REXLOG_WARN("[native] FSR 1 pipeline creation failed; using linear presentation");
+      if (!fsr_easu) REXLOG_WARN("[native] FSR 1 EASU pipeline creation failed; using linear presentation");
     }
-    return fsr_easu && fsr_rcas;
+    if (fsr_easu && sharpen && !fsr_rcas_attempted) {
+      fsr_rcas_attempted = true;
+      fsr_rcas = create(g_native_fsr_rcas_ps, sizeof(g_native_fsr_rcas_ps), "PSFsrRcas");
+      if (!fsr_rcas) REXLOG_WARN("[native] FSR 1 RCAS pipeline creation failed; using linear presentation");
+    }
+    return fsr_easu && (!sharpen || fsr_rcas);
   }
 
   void ReleaseFsrTarget(FsrTarget& target) {
@@ -2086,36 +2090,45 @@ struct Backend::Impl {
   }
 
   PresentationInfo PresentGame(RenderCommandList* list, FrontBuffer front, const RenderFramebuffer* output,
-                               Extent extent, RenderFormat format, bool fsr1) {
+                               Extent extent, RenderFormat format, bool fsr1, bool sharpen) {
     // The guest display is 16:9. A framebuffer rounded by the internal render scale may be
     // a fraction of a pixel off that ratio. Never stretch the result to an arbitrary window.
     const OutputRect rect = FitAspect(extent, {16, 9});
     PresentationInfo info{front.size};
     auto& scratch = fsr_slots[slot];
     const Extent fsr_size = fsr1 ? Fsr1Extent(front.size, rect.size) : Extent{};
-    bool direct_rcas = false;
-    if (!fsr_size.Empty()) {
-      const bool extra_pass = fsr_size != rect.size;
-      const bool failed_before = scratch.failed_size == fsr_size && scratch.failed_extra_pass == extra_pass;
-      if (!extra_pass) ReleaseFsrTarget(scratch.rcas);
-      if (!failed_before && InitFsr1(format) && EnsureFsrTarget(scratch.easu, fsr_size, format) &&
-          (!extra_pass || EnsureFsrTarget(scratch.rcas, fsr_size, format))) {
+    const auto route = PlanFsr1(fsr_size, rect, sharpen);
+    const RenderPipeline* final_fsr_pass = nullptr;
+    if (route != Fsr1Route::Bypass) {
+      const bool direct_easu = route == Fsr1Route::DirectEasu;
+      const bool extra_rcas = route == Fsr1Route::RcasThenLinear;
+      const bool failed_before = scratch.failed_size == fsr_size && scratch.failed_route == route;
+      if (direct_easu) ReleaseFsrTarget(scratch.easu);
+      if (!extra_rcas) ReleaseFsrTarget(scratch.rcas);
+      const bool pipeline_ok = !failed_before && InitFsr1(format, sharpen);
+      if (pipeline_ok && (direct_easu || EnsureFsrTarget(scratch.easu, fsr_size, format)) &&
+          (!extra_rcas || EnsureFsrTarget(scratch.rcas, fsr_size, format))) {
         scratch.failed_size = {};
         info.status = UpscaleStatus::kFsr1;
         info.fsr_output = fsr_size;
-        DrawFsrTarget(list, fsr_easu.get(), front, scratch.easu);
-        front = {scratch.easu.descriptor, fsr_size};
-        if (extra_pass) {
+        info.fsr_sharpened = sharpen;
+        if (direct_easu) {
+          final_fsr_pass = fsr_easu.get();
+        } else {
+          DrawFsrTarget(list, fsr_easu.get(), front, scratch.easu);
+          front = {scratch.easu.descriptor, fsr_size};
+        }
+        if (extra_rcas) {
           DrawFsrTarget(list, fsr_rcas.get(), front, scratch.rcas);
           front = {scratch.rcas.descriptor, fsr_size};
-        } else {
-          direct_rcas = true;
+        } else if (route == Fsr1Route::DirectRcas) {
+          final_fsr_pass = fsr_rcas.get();
         }
       } else {
-        if (!failed_before && fsr_easu && fsr_rcas)
+        if (pipeline_ok)
           REXLOG_WARN("[native] FSR 1 targets unavailable ({}x{}); using linear presentation", fsr_size.width, fsr_size.height);
         scratch.failed_size = fsr_size;
-        scratch.failed_extra_pass = extra_pass;
+        scratch.failed_route = route;
         info.status = UpscaleStatus::kUnavailable;
         ReleaseFsrTarget(scratch.easu);
         ReleaseFsrTarget(scratch.rcas);
@@ -2129,8 +2142,8 @@ struct Backend::Impl {
     list->setFramebuffer(output);
     if (rect.size != extent) list->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 1.0f));
     PresentViewport(list, rect);
-    if (direct_rcas)
-      DrawFsr1(list, fsr_rcas.get(), front, rect.size);
+    if (final_fsr_pass)
+      DrawFsr1(list, final_fsr_pass, front, rect.size);
     else
       BlitTo(list, front.descriptor, format);
     if (rect.size != extent) PresentViewport(list, {0, 0, extent});
@@ -5982,6 +5995,8 @@ Backend::Backend() : impl_(std::make_unique<Impl>()) {}
 Backend::~Backend() = default;
 
 bool Backend::Init(RenderDevice* device) { return impl_->Init(device); }
+
+float Backend::RenderScale() const { return impl_->rs; }
 bool Backend::SpirvListed(const std::string& name) { return g_spirv_preload.Listed(name); }
 
 FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
@@ -6322,8 +6337,8 @@ void Backend::Blit(RenderCommandList* list, uint32_t descriptor, RenderFormat ta
 
 #ifdef _WIN32
 PresentationInfo Backend::PresentGame(RenderCommandList* list, FrontBuffer front, const RenderFramebuffer* output,
-                                      Extent extent, RenderFormat format, bool fsr1) {
-  return impl_->PresentGame(list, front, output, extent, format, fsr1);
+                                      Extent extent, RenderFormat format, bool fsr1, bool sharpen) {
+  return impl_->PresentGame(list, front, output, extent, format, fsr1, sharpen);
 }
 #endif
 

@@ -49,7 +49,7 @@ std::wstring Quote(const fs::path& path) { return L"\"" + path.wstring() + L"\""
 
 constexpr std::array kPreserved = {"data/user/save", "data/user/sandbox/profile/save",
     "data/user/sandbox/courses/course-Track.gtcourse", "data/game/original", "data/update/title-update",
-    "data/build/obj/cache", "gtav_game.dll", "gtav.toml", "gtav_settings.ini", "args.txt",
+    "data/build/obj/cache", "data/config/graphics.ini", "gtav_game.dll", "gtav.toml", "gtav_settings.ini", "args.txt",
     "gamecontrollerdb.txt", "shader_cache/kept", "android/export"};
 
 struct TestProcess {
@@ -219,36 +219,56 @@ void VerifyHostSelector(const fs::path& root) {
   // The fixture DLL satisfies the imports, and traps any attempt to run a guest function. A missing
   // install must be recognized before the title runs. No GPU or original game material is needed.
   const auto workspace = root / "data/user/sandbox";
-  enum class Case { Close, MissingInstall, UnicodeHome };
-  for (auto test : {Case::Close, Case::MissingInstall, Case::UnicodeHome}) {
-    const bool enter = test != Case::Close, have_partitions = test == Case::UnicodeHome;
+  const auto settings = root / "data/config/graphics.ini";
+  const auto legacy = root / "gtav_settings.ini";
+  const char* legacy_values = "gtav_native_output=720\ngtav_fps_limit=60\n";
+  Put(legacy, legacy_values);
+  enum class Case { SaveGraphics, ReloadGraphics, CliOverride, MissingInstall, UnicodeHome };
+  for (auto test : {Case::SaveGraphics, Case::ReloadGraphics, Case::CliOverride, Case::MissingInstall, Case::UnicodeHome}) {
+    const bool enter = test == Case::MissingInstall || test == Case::UnicodeHome;
+    const bool have_partitions = test == Case::UnicodeHome;
     if (have_partitions) fs::create_directories(root / "data/user/0000000000000000/545408A7/00000002");
     TestProcess process;
-    const auto command = Quote(host) + L" --gtav_mode=menu --gtav_native=on --headless=true " +
+    const auto log = root / "data/logs" / ("host-smoke-" + std::to_string(int(test)) + ".log");
+    auto command = Quote(host) + L" --gtav_mode=menu --gtav_native=on --headless=true " +
         Quote(L"--user_data_root=" + (root / "data/user").wstring()) + L" " +
-        Quote(L"--log_file=" + (root / "data/logs/host-smoke.log").wstring());
+        Quote(L"--gtav_settings_path=" + settings.wstring()) + L" " + Quote(L"--log_file=" + log.wstring());
+    if (test == Case::CliOverride) command += L" --gtav_native_output=1440";
     CHECK(win::Spawn(host, command, root, 0, &process.handle));
     const auto pid = GetProcessId(process.handle.Get());
     CHECK(pid);
     auto modes = WaitWindow({L"GTA V Recomp | Play", nullptr, pid, {}}, process.handle.Get());
-    if (!modes) error = Widen(Text(root / "data/logs/host-smoke.log"));
+    if (!modes) error = Widen(Text(log));
     CHECK(modes);
     wchar_t class_name[64]{};
     CHECK(GetClassNameW(modes, class_name, 64) && std::wstring_view(class_name) != L"#32770");  // not the fallback
+    auto key = [&](WPARAM vk) {
+      CHECK(PostMessageW(modes, WM_KEYDOWN, vk, 0));  // virtual-key input, no hardware required
+      CHECK(PostMessageW(modes, WM_KEYUP, vk, 0));
+    };
+    CHECK(PostMessageW(modes, WM_SETFOCUS, 0, 0));
+    if (test == Case::SaveGraphics || test == Case::CliOverride) {
+      key(VK_F1);
+      key(VK_RIGHT);  // 720p -> 1080p on the first launch, ignored on the explicit override launch.
+      key(VK_DOWN);
+      if (test == Case::SaveGraphics) {
+        key(VK_RIGHT);  // scene scale 100 -> 87.5%
+        key(VK_DOWN);
+        key(VK_RIGHT);  // linear -> FSR 1
+      } else {
+        key(VK_LEFT);   // change another value while output is forced
+      }
+      key(VK_ESCAPE);   // closes Graphics, not the startup window
+    }
     if (!enter) CHECK(PostMessageW(modes, WM_CLOSE, 0, 0));
     if (enter) {
-      auto key = [&](WPARAM vk) {
-        CHECK(PostMessageW(modes, WM_KEYDOWN, vk, 0));  // virtual-key input, no hardware required
-        CHECK(PostMessageW(modes, WM_KEYUP, vk, 0));
-      };
-      CHECK(PostMessageW(modes, WM_SETFOCUS, 0, 0));
       key(VK_LEFT);
       key(VK_DOWN);
       key(VK_RETURN);  // campaign co-op is locked, Enter must not leave the hub
       key(VK_RIGHT);
       key(VK_UP);
       key(VK_RETURN);  // Sandbox solo routes through Workshop's original validation
-      // The third pass supplies only the installed-content directory, not the game or even
+      // The final pass supplies only the installed-content directory, not the game or even
       // --game_data_root. The hub must mount the exact Workshop path (including the accented
       // name in the launcher fixture) and the SDK must then reject the missing game root.
       auto missing = WaitWindow({have_partitions ? L"ReXGlue" : L"GTA V Recomp | Workshop", L"#32770", pid, {}},
@@ -258,6 +278,18 @@ void VerifyHostSelector(const fs::path& root) {
       CHECK(PostMessageW(missing, WM_COMMAND, IDCANCEL, 0));
     }
     WaitExit(process.handle.Get(), 10'000, have_partitions ? 1 : 0);
+    CHECK(Text(legacy) == legacy_values);
+    const auto saved = Text(settings);
+    CHECK(saved.find("gtav_native_output=1080\n") != std::string::npos && saved.find("gtav_fps_limit=60\n") != std::string::npos);
+    CHECK(saved.find("gtav_native_fsr1=true\n") != std::string::npos);
+    CHECK(saved.find(test == Case::SaveGraphics || test == Case::ReloadGraphics ?
+        "gtav_native_render_scale=0.875\n" : "gtav_native_render_scale=1\n") != std::string::npos);
+    for (const auto& entry : fs::directory_iterator(settings.parent_path()))
+      CHECK(!entry.path().filename().wstring().starts_with(L"graphics.ini.new-"));
+    const auto lines = Text(log);
+    const auto* output = test == Case::SaveGraphics ? "=720" : test == Case::CliOverride ? "=1440 (launch override)" : "=1080";
+    CHECK(lines.find(std::string("[graphics] startup gtav_native_output") + output) != std::string::npos);
+    if (test != Case::SaveGraphics) CHECK(lines.find("[graphics] startup gtav_native_fsr1=true") != std::string::npos);
     CHECK(fs::is_directory(workspace / "profile") == have_partitions);
     CHECK(fs::is_directory(workspace / "courses") == have_partitions);
     const auto config = workspace / "profile/config";
@@ -270,7 +302,7 @@ void VerifyHostSelector(const fs::path& root) {
       }
     }
   }
-  std::cout << "Packaged host rendered the mode hub, blocked campaign co-op and flushed the isolated Workshop profile without running the title\n";
+  std::cout << "Packaged host saved/reloaded graphics in the accented install, honored a CLI override, blocked co-op and flushed the isolated Workshop profile\n";
 }
 }  // namespace
 

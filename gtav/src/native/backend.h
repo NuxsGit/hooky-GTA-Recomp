@@ -38,6 +38,7 @@ class Backend {
   Backend();
   ~Backend();
   bool Init(plume::RenderDevice* device);
+  float RenderScale() const;
   // <name> (e.g. "ps_<HASH>.spv") was in the SPIR-V folder read at start-up (no disk access).
   static bool SpirvListed(const std::string& name);
 
@@ -90,7 +91,7 @@ class Backend {
   // bound with a full-size viewport/scissor so that the host overlays stay unscaled.
   PresentationInfo PresentGame(plume::RenderCommandList* list, FrontBuffer front,
                                const plume::RenderFramebuffer* output, Extent extent,
-                               plume::RenderFormat format, bool fsr1);
+                               plume::RenderFormat format, bool fsr1, bool sharpen = true);
 #endif
 
   // Draws `value` as an on-screen counter with its top-left corner at (x, y).

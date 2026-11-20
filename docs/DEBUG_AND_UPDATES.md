@@ -18,7 +18,7 @@
   against a local test feed with the exact ZIP. It checks waiting for the game/setup lock, applying
   the ZIP, restarting, preserving data and switching preferences. It also boots the managed Games layout and smokes the illustrated mode hub without a retail DLL.
   The shipped launcher uses WinHTTP; the test-only executable is never packaged.
-- Saves, Workshop layouts, `gtav.toml`, `gtav_settings.ini`, `args.txt`, custom pad mappings, local game
+- Saves, Workshop layouts, `data/config/graphics.ini`, `gtav.toml`, legacy `gtav_settings.ini`, `args.txt`, custom pad mappings, local game
   DLL, shader caches and `data/build/` survive. A compatible build ID needs no recompilation. For a
   changed build ID, inspect the number of reused/compiled C++ units in `data/logs/install.log`.
 - The installer opens verified ZIPs with Windows `tar.exe` and swaps only the standard package’s

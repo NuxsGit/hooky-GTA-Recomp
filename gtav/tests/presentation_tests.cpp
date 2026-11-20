@@ -50,6 +50,21 @@ int main() {
   CHECK(Fsr1Extent({1280, 720}, {1024, 576}).Empty());
   CHECK(Fsr1Extent({}, {3840, 2160}).Empty());
 
+  CHECK(PlanFsr1({}, {0, 0, {1280, 720}}, false) == Fsr1Route::Bypass);
+  CHECK(PlanFsr1({1920, 1080}, {0, 0, {1920, 1080}}, false) == Fsr1Route::DirectEasu);
+  CHECK(PlanFsr1({1920, 1080}, {16, 0, {1920, 1080}}, false) == Fsr1Route::EasuThenLinear);
+  CHECK(PlanFsr1({1920, 1080}, {0, 12, {1920, 1080}}, false) == Fsr1Route::EasuThenLinear);
+  CHECK(PlanFsr1({1920, 1080}, {16, 0, {1920, 1080}}, true) == Fsr1Route::DirectRcas);
+  CHECK(PlanFsr1({2560, 1440}, {0, 0, {3840, 2160}}, true) == Fsr1Route::RcasThenLinear);
+  CHECK(PlanFsr1({2560, 1440}, {0, 0, {3840, 2160}}, false) == Fsr1Route::EasuThenLinear);
+
+  // A header alone isn't hardware support. The feature needs both device enablement and a call
+  // from the guest input path; repeated polls within a frame don't pace the GPU again.
+  CHECK(DriverPacing(false, true, false, false) == AntiLagStatus::Unsupported);
+  CHECK(DriverPacing(true, false, false, false) == AntiLagStatus::Off);
+  CHECK(DriverPacing(true, true, false, false) == AntiLagStatus::Fallback);
+  CHECK(DriverPacing(true, true, true, false) == AntiLagStatus::Ready);
+  CHECK(DriverPacing(true, true, true, true) == AntiLagStatus::Pacing);
   // A genuine depth-only draw is not dropped. A color draw must not touch the depth buffer or
   // pipeline cache until its own fragment shader is available.
   CHECK(!SkipMissingPixelShader(0, false));

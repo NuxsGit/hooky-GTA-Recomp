@@ -10,6 +10,10 @@ on:
       - 'gtav/src/sandbox/**'
       - 'gtav/src/utils/ConfigStorage.*'
       - 'gtav/WorkshopCore.cmake'
+      - 'gtav/src/native/graphics_preferences.*'
+      - 'gtav/src/native/presentation.h'
+      - 'gtav/src/native/input_pacing.h'
+      - 'gtav/tests/**'
       - '.github/workflows/desktop-launcher.yml'
   workflow_dispatch:
 
@@ -45,3 +49,8 @@ jobs:
           fi
       - name: Run storage, update policy and Workshop checks without retail data
         run: ctest --test-dir build/desktop-launcher --output-on-failure
+      - name: Check graphics preference migration and restart policy
+        run: |
+          cmake -S gtav/tests -B build/graphics-policy -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/graphics-policy --parallel 4
+          ctest --test-dir build/graphics-policy --output-on-failure

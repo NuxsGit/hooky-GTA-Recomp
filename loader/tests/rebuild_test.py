@@ -86,7 +86,15 @@ assert f'--user_data_root={root}/data/user' in sys.argv
 assert '--fixture-game-arg' in sys.argv
 modes = [arg for arg in sys.argv if arg.startswith('--gtav_mode=')]
 assert len(modes) == 1, sys.argv
-assert '--headless=true' in sys.argv
+assert f'--gtav_settings_path={root}/data/config/graphics.ini' in sys.argv
+if '--no-headless' in sys.argv:
+    assert '--headless=true' not in sys.argv
+else:
+    assert '--headless=true' in sys.argv
+if '--gtav_native=shadow' in sys.argv:
+    assert '--gtav_native=on' not in sys.argv and '--log_level=info' not in sys.argv
+    assert sys.argv[sys.argv.index('--log_level') + 1] == 'debug', sys.argv
+assert '--gtav_fps_limit=30' not in sys.argv and '--gtav_native_vsync=false' not in sys.argv
 print('fake game started:', modes[0])
 if os.getenv('FIXTURE_BLOCK_GAME'):
     (root / 'data/logs/fixture-playing').touch()
@@ -233,6 +241,8 @@ sys.stdout.write(body + '\\n' + os.environ['FIXTURE_HTTP'])
         # Reopen from the archive or the installed directory. Neither route moves local saves.
         run("--play", "--", "--fixture-game-arg", contains="fake game started: --gtav_mode=menu")
         run("--play", "--", "--fixture-game-arg", "--gtav_mode=campaign", contains="fake game started: --gtav_mode=campaign")
+        run("--play", "--", "--fixture-game-arg", "--gtav_native=shadow", "--log_level", "debug",
+            "--no-headless", "--gtav_fps_limit=60", contains="fake game started: --gtav_mode=menu")
         entry = Path(env["XDG_DATA_HOME"]) / "applications/gtav-recomp.desktop"
         assert f'Exec="{home / "gtav_launcher"}"' in entry.read_text()
         assert not (incoming / "data").exists() and not (incoming / "gtav_game.so").exists()

@@ -151,7 +151,7 @@ index acfedce..d49581a 100644
              return addRange(RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, binding, count, nullptr));
          }
 diff --git a/plume_render_interface_types.h b/plume_render_interface_types.h
-index ad63e0e..2ad1ad4 100644
+index ad63e0e..51981fc 100644
 --- a/plume_render_interface_types.h
 +++ b/plume_render_interface_types.h
 @@ -166,6 +166,7 @@ namespace plume {
@@ -208,8 +208,19 @@ index ad63e0e..2ad1ad4 100644
  
          RenderFramebufferDesc() = default;
  
+@@ -1796,6 +1806,10 @@ namespace plume {
+         bool presentWait = false;
+         bool displayTiming = false;
+ 
++        // VK_AMD_anti_lag: require the feature as well as the advertised extension.
++        bool amdAntiLagSupported = false;
++        bool amdAntiLagEnabled = false;
++
+         // Framebuffers.
+         uint64_t maxTextureSize = 0;
+ 
 diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
-index 4fdc4bf..47b3e08 100644
+index 4fdc4bf..c4e0613 100644
 --- a/plume_vulkan.cpp
 +++ b/plume_vulkan.cpp
 @@ -11,7 +11,16 @@
@@ -734,9 +745,9 @@ index 4fdc4bf..47b3e08 100644
 -            activeRenderPass = targetFramebuffer->renderPass;
 +            activeRenderPass = beginInfo.renderPass;
 +            g_statRenderPasses++;
-         }
-     }
- 
++        }
++    }
++
 +    void VulkanCommandList::setFragmentShadingRate(uint32_t width, uint32_t height) {
 +        const uint32_t rate = (width << 4) | height;
 +        if (!queue->device->fragmentShadingRateSupported || rate == shadingRate) {
@@ -768,10 +779,10 @@ index 4fdc4bf..47b3e08 100644
 +            }
 +            g_statClearsPartial++;
 +            return false;
-+        }
+         }
 +        return true;
-+    }
-+
+     }
+ 
      void VulkanCommandList::endActiveRenderPass() {
 +        if (activeRenderPass == VK_NULL_HANDLE && pendingClearMask != 0 && targetFramebuffer != nullptr) {
 +            // Clears with no draw after them still happen: an empty pass that only clears.
@@ -805,7 +816,37 @@ index 4fdc4bf..47b3e08 100644
          if (res != VK_SUCCESS) {
              fprintf(stderr, "vkWaitForFences failed with error code 0x%X.\n", res);
              return;
-@@ -3914,6 +4216,14 @@ namespace plume {
+@@ -3765,7 +4067,7 @@ namespace plume {
+ 
+     // VulkanDevice
+     
+-    VulkanDevice::VulkanDevice(VulkanInterface *renderInterface, const std::string &preferredDeviceName) {
++    VulkanDevice::VulkanDevice(VulkanInterface *renderInterface, const std::string &preferredDeviceName, [[maybe_unused]] bool requestAntiLag) {
+         assert(renderInterface != nullptr);
+ 
+         this->renderInterface = renderInterface;
+@@ -3862,10 +4164,20 @@ namespace plume {
+ 
+         // Check for supported features.
+         void *featuresChain = nullptr;
++#ifdef VK_AMD_anti_lag
++        VkPhysicalDeviceAntiLagFeaturesAMD antiLagFeatures = {};
++        const bool antiLagFound = std::any_of(availableExtensions.begin(), availableExtensions.end(),
++            [](const VkExtensionProperties &e) { return strcmp(e.extensionName, VK_AMD_ANTI_LAG_EXTENSION_NAME) == 0; });
++        if (antiLagFound) {
++            antiLagFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD;
++            featuresChain = &antiLagFeatures;
++        }
++#endif
+         VkPhysicalDeviceDescriptorIndexingFeatures indexingFeatures = {};
+         const bool descriptorIndexingFound = supportedOptionalExtensions.find(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) != supportedOptionalExtensions.end();
+         if (descriptorIndexingFound) {
+             indexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
++            indexingFeatures.pNext = featuresChain;
+             featuresChain = &indexingFeatures;
+         }
+ 
+@@ -3914,6 +4226,14 @@ namespace plume {
              featuresChain = &portabilityFeatures;
          }
  
@@ -820,7 +861,7 @@ index 4fdc4bf..47b3e08 100644
          VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures = {};
          VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures = {};
          const bool rayTracingFound = (supportedOptionalExtensions.find(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) != supportedOptionalExtensions.end()) && (supportedOptionalExtensions.find(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) != supportedOptionalExtensions.end());
-@@ -3931,6 +4241,7 @@ namespace plume {
+@@ -3931,6 +4251,7 @@ namespace plume {
          deviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
          deviceFeatures.pNext = featuresChain;
          vkGetPhysicalDeviceFeatures2(physicalDevice, &deviceFeatures);
@@ -828,7 +869,7 @@ index 4fdc4bf..47b3e08 100644
  
          // Check for properties.
          if (rayTracingFound) {
-@@ -4001,6 +4312,15 @@ namespace plume {
+@@ -4001,6 +4322,15 @@ namespace plume {
              createDeviceChain = &portabilityFeatures;
          }
  
@@ -844,7 +885,43 @@ index 4fdc4bf..47b3e08 100644
          // Retrieve the information for the queue families.
          uint32_t queueFamilyCount = 0;
          vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
-@@ -4092,6 +4412,22 @@ namespace plume {
+@@ -4080,7 +4410,35 @@ namespace plume {
+         createInfo.enabledExtensionCount = uint32_t(enabledExtensions.size());
+         createInfo.pEnabledFeatures = &deviceFeatures.features;
+ 
++#ifdef VK_AMD_anti_lag
++        capabilities.amdAntiLagSupported = antiLagFound && antiLagFeatures.antiLag;
++        const bool enableAntiLag = requestAntiLag && capabilities.amdAntiLagSupported;
++        if (enableAntiLag) {
++            enabledExtensions.push_back(VK_AMD_ANTI_LAG_EXTENSION_NAME);
++            createInfo.ppEnabledExtensionNames = enabledExtensions.data();
++            createInfo.enabledExtensionCount = uint32_t(enabledExtensions.size());
++            antiLagFeatures.pNext = createDeviceChain;
++            createInfo.pNext = &antiLagFeatures;
++        }
++#endif
+         VkResult res = vkCreateDevice(physicalDevice, &createInfo, nullptr, &vk);
++#ifdef VK_AMD_anti_lag
++        if (enableAntiLag) {
++            if (res == VK_SUCCESS) {
++                antiLagUpdate = reinterpret_cast<PFN_vkAntiLagUpdateAMD>(vkGetDeviceProcAddr(vk, "vkAntiLagUpdateAMD"));
++            }
++            if (antiLagUpdate == nullptr) {
++                fprintf(stderr, "VK_AMD_anti_lag could not be enabled (device creation 0x%X); retrying without it.\n", res);
++                if (res == VK_SUCCESS) vkDestroyDevice(vk, nullptr);
++                vk = VK_NULL_HANDLE;
++                enabledExtensions.pop_back();
++                createInfo.enabledExtensionCount = uint32_t(enabledExtensions.size());
++                createInfo.pNext = createDeviceChain;
++                res = vkCreateDevice(physicalDevice, &createInfo, nullptr, &vk);
++            }
++            capabilities.amdAntiLagEnabled = antiLagUpdate != nullptr;
++        }
++#endif
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vkCreateDevice failed with error code 0x%X.\n", res);
+             return;
+@@ -4092,6 +4450,22 @@ namespace plume {
              }
          }
  
@@ -867,7 +944,7 @@ index 4fdc4bf..47b3e08 100644
          VmaVulkanFunctions vmaFunctions = {};
          vmaFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
          vmaFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
-@@ -4120,6 +4456,11 @@ namespace plume {
+@@ -4120,6 +4494,11 @@ namespace plume {
          allocatorInfo.pVulkanFunctions = &vmaFunctions;
          allocatorInfo.instance = renderInterface->instance;
          allocatorInfo.vulkanApiVersion = renderInterface->appInfo.apiVersion;
@@ -879,7 +956,9 @@ index 4fdc4bf..47b3e08 100644
  
          res = vmaCreateAllocator(&allocatorInfo, &allocator);
          if (res != VK_SUCCESS) {
-@@ -4198,3 +4539,7 @@ namespace plume {
+@@ -4196,19 +4575,33 @@ namespace plume {
+     }
+ 
      std::unique_ptr<RenderShader> VulkanDevice::createShader(const void *data, uint64_t size, const char *entryPointName, RenderShaderFormat format) {
 -        return std::make_unique<VulkanShader>(this, data, size, entryPointName, format);
 +        auto shader = std::make_unique<VulkanShader>(this, data, size, entryPointName, format);
@@ -888,7 +967,8 @@ index 4fdc4bf..47b3e08 100644
 +        }
 +        return shader;
      }
-@@ -4203,12 +4548,22 @@ namespace plume {
+ 
+     std::unique_ptr<RenderSampler> VulkanDevice::createSampler(const RenderSamplerDesc &desc) {
          return std::make_unique<VulkanSampler>(this, desc);
      }
  
@@ -913,7 +993,9 @@ index 4fdc4bf..47b3e08 100644
      }
  
      std::unique_ptr<RenderPipeline> VulkanDevice::createRaytracingPipeline(const RenderRaytracingPipelineDesc &desc, const RenderPipeline *previousPipeline) {
-@@ -4226,3 +4581,8 @@ namespace plume {
+@@ -4224,7 +4617,12 @@ namespace plume {
+     }
+ 
      std::unique_ptr<RenderTexture> VulkanDevice::createTexture(const RenderTextureDesc &desc) {
 -        return std::make_unique<VulkanTexture>(this, nullptr, desc);
 +        auto texture = std::make_unique<VulkanTexture>(this, nullptr, desc);
@@ -923,7 +1005,11 @@ index 4fdc4bf..47b3e08 100644
 +        }
 +        return texture;
      }
-@@ -4250,3 +4610,7 @@ namespace plume {
+ 
+     std::unique_ptr<RenderAccelerationStructure> VulkanDevice::createAccelerationStructure(const RenderAccelerationStructureDesc &desc) {
+@@ -4248,13 +4646,21 @@ namespace plume {
+     }
+ 
      std::unique_ptr<RenderFramebuffer> VulkanDevice::createFramebuffer(const RenderFramebufferDesc &desc) {
 -        return std::make_unique<VulkanFramebuffer>(this, desc);
 +        auto framebuffer = std::make_unique<VulkanFramebuffer>(this, desc);
@@ -932,7 +1018,8 @@ index 4fdc4bf..47b3e08 100644
 +        }
 +        return framebuffer;
      }
-@@ -4255,6 +4619,10 @@ namespace plume {
+ 
+     std::unique_ptr<RenderQueryPool> VulkanDevice::createQueryPool(uint32_t queryCount) {
          return std::make_unique<VulkanQueryPool>(this, queryCount);
      }
  
@@ -943,7 +1030,7 @@ index 4fdc4bf..47b3e08 100644
      void VulkanDevice::setBottomLevelASBuildInfo(RenderBottomLevelASBuildInfo &buildInfo, const RenderBottomLevelASMesh *meshes, uint32_t meshCount, bool preferFastBuild, bool preferFastTrace) {
          assert(meshes != nullptr);
          assert(meshCount > 0);
-@@ -4463,6 +4831,11 @@ namespace plume {
+@@ -4463,6 +4869,11 @@ namespace plume {
      void VulkanDevice::release() {
          nullBuffer = nullptr; // force destruction before destroying allocator
  
@@ -955,7 +1042,7 @@ index 4fdc4bf..47b3e08 100644
          if (allocator != VK_NULL_HANDLE) {
              vmaDestroyAllocator(allocator);
              allocator = VK_NULL_HANDLE;
-@@ -4495,7 +4868,27 @@ namespace plume {
+@@ -4495,7 +4906,27 @@ namespace plume {
  #else
      VulkanInterface::VulkanInterface() {
  #endif
@@ -983,7 +1070,37 @@ index 4fdc4bf..47b3e08 100644
          if (res != VK_SUCCESS) {
              fprintf(stderr, "volkInitialize failed with error code 0x%X.\n", res);
              return;
-@@ -4666,6 +5059,26 @@ namespace plume {
+@@ -4654,6 +5085,29 @@ namespace plume {
+         return createdDevice->isValid() ? std::move(createdDevice) : nullptr;
+     }
+ 
++    std::unique_ptr<RenderDevice> CreateVulkanDevice(RenderInterface *interface, const std::string &preferredDeviceName,
++                                                     bool requestAntiLag) {
++        std::unique_ptr<VulkanDevice> device = std::make_unique<VulkanDevice>(static_cast<VulkanInterface *>(interface),
++                                                                           preferredDeviceName, requestAntiLag);
++        return device->isValid() ? std::move(device) : nullptr;
++    }
++
++    bool VulkanAntiLagBeforeInput([[maybe_unused]] RenderDevice *device) {
++#ifdef VK_AMD_anti_lag
++        auto *vkDevice = static_cast<VulkanDevice *>(device);
++        if (vkDevice->antiLagUpdate != nullptr) {
++            // Standard driver pacing, not the paired INPUT/PRESENT marker mode. Do not place a
++            // second FPS limiter in front of the title's existing limiter.
++            VkAntiLagDataAMD data = {};
++            data.sType = VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD;
++            data.mode = VK_ANTI_LAG_MODE_ON_AMD;
++            vkDevice->antiLagUpdate(vkDevice->vk, &data);
++            return true;
++        }
++#endif
++        return false;
++    }
++
+     const RenderInterfaceCapabilities &VulkanInterface::getCapabilities() const {
+         return capabilities;
+     }
+@@ -4666,6 +5120,26 @@ namespace plume {
          return instance != nullptr;
      }
  
@@ -1011,7 +1128,7 @@ index 4fdc4bf..47b3e08 100644
  
  #if defined(PLUME_SDL2_VULKAN_ENABLED)
 diff --git a/plume_vulkan.h b/plume_vulkan.h
-index 1d36b12..0de1495 100644
+index 1d36b12..1470f62 100644
 --- a/plume_vulkan.h
 +++ b/plume_vulkan.h
 @@ -279,14 +279,25 @@ namespace plume {
@@ -1082,15 +1199,23 @@ index 1d36b12..0de1495 100644
          VmaAllocator allocator = VK_NULL_HANDLE;
          uint32_t queueFamilyIndices[3] = {};
          std::vector<VulkanQueueFamily> queueFamilies;
-@@ -416,6 +437,7 @@ namespace plume {
+@@ -416,9 +437,14 @@ namespace plume {
          VkPhysicalDeviceSampleLocationsPropertiesEXT sampleLocationProperties = {};
          std::unique_ptr<RenderBuffer> nullBuffer;
          bool loadStoreOpNoneSupported = false;
 +        bool fragmentShadingRateSupported = false;
          bool nullDescriptorSupported = false;
  
-         VulkanDevice(VulkanInterface *renderInterface, const std::string &preferredDeviceName);
-@@ -436,6 +458,7 @@ namespace plume {
+-        VulkanDevice(VulkanInterface *renderInterface, const std::string &preferredDeviceName);
++#ifdef VK_AMD_anti_lag
++        PFN_vkAntiLagUpdateAMD antiLagUpdate = nullptr;
++#endif
++
++        VulkanDevice(VulkanInterface *renderInterface, const std::string &preferredDeviceName, bool requestAntiLag = false);
+         ~VulkanDevice() override;
+         std::unique_ptr<RenderDescriptorSet> createDescriptorSet(const RenderDescriptorSetDesc &desc) override;
+         std::unique_ptr<RenderShader> createShader(const void *data, uint64_t size, const char *entryPointName, RenderShaderFormat format) override;
+@@ -436,6 +462,7 @@ namespace plume {
          std::unique_ptr<RenderCommandSemaphore> createCommandSemaphore() override;
          std::unique_ptr<RenderFramebuffer> createFramebuffer(const RenderFramebufferDesc &desc) override;
          std::unique_ptr<RenderQueryPool> createQueryPool(uint32_t queryCount) override;
@@ -1098,7 +1223,7 @@ index 1d36b12..0de1495 100644
          void setBottomLevelASBuildInfo(RenderBottomLevelASBuildInfo &buildInfo, const RenderBottomLevelASMesh *meshes, uint32_t meshCount, bool preferFastBuild, bool preferFastTrace) override;
          void setTopLevelASBuildInfo(RenderTopLevelASBuildInfo &buildInfo, const RenderTopLevelASInstance *instances, uint32_t instanceCount, bool preferFastBuild, bool preferFastTrace) override;
          void setShaderBindingTableInfo(RenderShaderBindingTableInfo &tableInfo, const RenderShaderBindingGroups &groups, const RenderPipeline *pipeline, RenderDescriptorSet **descriptorSets, uint32_t descriptorSetCount) override;
-@@ -466,4 +489,9 @@ namespace plume {
+@@ -466,4 +493,12 @@ namespace plume {
          const std::vector<std::string> &getDeviceNames() const override;
          bool isValid() const;
      };
@@ -1107,4 +1232,7 @@ index 1d36b12..0de1495 100644
 +    // device's cache (to persist between runs). Cache creation failures fall back to no cache.
 +    void SetVulkanPipelineCacheData(std::vector<uint8_t> data);
 +    std::vector<uint8_t> GetVulkanPipelineCacheData(RenderDevice *device);
++    std::unique_ptr<RenderDevice> CreateVulkanDevice(RenderInterface *interface, const std::string &preferredDeviceName,
++                                                     bool requestAntiLag);
++    bool VulkanAntiLagBeforeInput(RenderDevice *device);
  };

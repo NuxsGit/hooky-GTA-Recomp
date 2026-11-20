@@ -10,6 +10,7 @@
 #include "debug_tools.h"
 #include "native/input.h"
 #include "native/renderer.h"
+#include "native/settings_runtime.h"
 #include "native/touch_controls.h"
 #include "sandbox/desktop.h"
 #include <rex/system/kernel_state.h>
@@ -47,7 +48,11 @@ class GtavApp : public rex::ReXApp {
   }
 
   // Override virtual hooks for customization:
-  void OnPostInitLogging() override { gtav::debug::InstallLogCapture(); }
+  void OnPostInitLogging() override {
+    gtav::debug::InstallLogCapture();
+    gtav::native::settings::Initialize();
+  }
+  void OnPreLaunchModule() override { gtav::native::settings::Player().BeginRun(); }
   void OnPreSetup(rex::RuntimeConfig& config) override {
     gtav::native::input::Configure();
     config.input_factory = [](bool tool_mode) -> std::unique_ptr<rex::system::IInputSystem> {
@@ -82,8 +87,12 @@ class GtavApp : public rex::ReXApp {
   void OnPostSetup() override {
     // Don't pass gameplay input through the native settings overlay, or replace the SDK's own gate.
     if (gtav::native::Active()) {
-      if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system()))
+      if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
         input->AddActiveCallback(gtav::native::input::GameplayActive);
+#ifdef _WIN32
+        input->SetBeforeStateCallback(gtav::native::PaceGuestInput);
+#endif
+      }
     }
     const char* dir = std::getenv("GTAV_SHOT_DIR");
     if (!dir) return;
@@ -114,6 +123,9 @@ class GtavApp : public rex::ReXApp {
   }
   void OnShutdown() override {
     shutting_down_ = true;
+#ifdef _WIN32
+    gtav::native::StopGuestInputPacing();  // Drain a driver call before guest/input teardown.
+#endif
     gtav::native::input::Shutdown();
 #ifdef GTAV_DESKTOP_WORKSHOP
     gtav::sandbox::Shutdown();

@@ -99,6 +99,13 @@ constexpr COLORREF kCanvas = RGB(15, 18, 25), kRail = RGB(19, 24, 34), kPanel = 
                    kBorder = RGB(54, 66, 85), kText = RGB(246, 244, 242), kMuted = RGB(177, 189, 208),
                    kAccent = RGB(255, 181, 112), kMint = RGB(122, 229, 194), kDark = RGB(30, 25, 24);
 enum class Page { Always, Overview, Setup, Updates, Logs };
+struct Navigation { Page page; UINT id; const wchar_t* title; const wchar_t* subtitle; const wchar_t* number; };
+constexpr Navigation kNavigation[] = {
+    {Page::Overview, kIdOverview, L"Accueil", L"JOUER", L"01"},
+    {Page::Setup, kIdSetupPage, L"Installation", L"DISQUES & TU27", L"02"},
+    {Page::Updates, kIdUpdatesPage, L"Mises à jour", L"STABLE / NIGHTLY", L"03"},
+    {Page::Logs, kIdLogsPage, L"Journaux", L"DIAGNOSTIC", L"04"},
+};
 struct Control { HWND window; Page page; int x, y, width, height; HFONT* font; COLORREF ink; };
 std::vector<Control> g_controls;
 Page g_page = Page::Overview;
@@ -271,7 +278,7 @@ void SetBusy(bool busy) {
                            needs_build ? L"Données présentes — recompilation nécessaire" : L"Choisis tes disques et TU27 pour commencer");
     SetWindowTextW(g_badge, playing ? L"EN JEU" : ready ? L"PRÊT" : needs_build ? L"À RECOMPILER" : L"À CONFIGURER");
     SetWindowTextW(g_install_label, ready ? L"Direction Los Santos." : needs_build ? L"Recompile le jeu." : L"Prépare ton jeu.");
-    SetWindowTextW(g_install_text, ready ? L"Campagne, bac à sable ou multijoueur privé. Tes données restent sur ce PC."
+    SetWindowTextW(g_install_text, ready ? L"Campagne, atelier solo ou session privée. L’onglet Graphismes est disponible avant de jouer."
                        : needs_build ? L"Tes fichiers sont prêts. Recompile cette version sans réimporter tes disques."
                        : L"Importe tes deux disques Xbox 360 et la mise à jour TU27. Le jeu sera compilé sur ce PC.");
     SetWindowTextW(g_play, playing ? L"Jeu en cours" : ready ? L"Choisir le mode" : needs_build ? L"Compiler le jeu" : L"Configurer le jeu");
@@ -546,10 +553,10 @@ void CreateControls() {
   Label(Always, L"HOOKY", 80, 34, 107, 25, &g_heading);
   Label(Always, L"RECOMP  /  DESKTOP", 81, 61, 115, 17, &g_small, kMuted);
   Label(Always, L"BIBLIOTHÈQUE", 26, 117, 150, 20, &g_small, kMuted);
-  Button(Always, L"Accueil", 18, 145, 170, 43, kIdOverview);
-  Button(Always, L"Installation", 18, 194, 170, 43, kIdSetupPage);
-  Button(Always, L"Mises à jour", 18, 243, 170, 43, kIdUpdatesPage);
-  Button(Always, L"Journaux", 18, 292, 170, 43, kIdLogsPage);
+  for (size_t i = 0; i < std::size(kNavigation); ++i) {
+    const auto& nav = kNavigation[i];
+    Button(Always, nav.title, 18, 145 + int(i) * 65, 170, 57, nav.id);
+  }
   Label(Always, L"SUR CE PC", 26, 479, 148, 18, &g_small, kMuted);
   Button(Always, L"Dossier du jeu", 18, 506, 170, 38, kIdOpenFolder);
   Label(Always, L"WINDOWS X64", 26, 579, 149, 18, &g_small, kMuted);
@@ -713,16 +720,18 @@ void PaintDashboard(HWND window) {
 
 void PaintButton(const DRAWITEMSTRUCT& item) {
   const auto id = item.CtlID;
-  const bool rail = id == kIdOverview || id == kIdSetupPage || id == kIdUpdatesPage || id == kIdLogsPage || id == kIdOpenFolder;
-  const bool active_page = (id == kIdOverview && g_page == Page::Overview) || (id == kIdSetupPage && g_page == Page::Setup) ||
-                           (id == kIdUpdatesPage && g_page == Page::Updates) || (id == kIdLogsPage && g_page == Page::Logs);
+  const auto* nav = std::find_if(std::begin(kNavigation), std::end(kNavigation),
+                                 [id](const Navigation& value) { return value.id == id; });
+  const bool navigation = nav != std::end(kNavigation);
+  const bool rail = navigation || id == kIdOpenFolder;
+  const bool active_page = navigation && nav->page == g_page;
   const bool selected = active_page || (id == kIdNightly && g_preferences.channel == UpdateChannel::Nightly) ||
       (id == kIdStable && g_preferences.channel == UpdateChannel::Stable) || (id == kIdAuto && g_preferences.automatic);
   const bool primary = id == kIdPlay || id == kIdInstall || id == kIdDownload;
   const bool disabled = (item.itemState & ODS_DISABLED) != 0;
   const bool down = (item.itemState & ODS_SELECTED) != 0;
-  const auto fill = disabled ? kRail : primary ? (down ? RGB(229, 146, 85) : kAccent) : (selected || down) ? kHero : rail ? kRail : kPanel;
-  Box(item.hDC, item.rcItem, fill, disabled ? kBorder : selected || primary ? kAccent : rail ? kRail : kBorder);
+  const auto fill = disabled ? kRail : primary ? (down ? RGB(229, 146, 85) : kAccent) : (selected || down) ? kHero : kPanel;
+  Box(item.hDC, item.rcItem, fill, !disabled && (selected || primary) ? kAccent : kBorder);
   if (active_page) {
     auto bar = item.rcItem;
     bar.right = bar.left + Px(3);
@@ -734,18 +743,27 @@ void PaintButton(const DRAWITEMSTRUCT& item) {
   wchar_t text[128]{};
   GetWindowTextW(item.hwndItem, text, static_cast<int>(std::size(text)));
   auto bounds = item.rcItem;
-  bounds.left += Px(rail ? 42 : 8);
+  bounds.left += Px(rail ? 45 : 8);
   bounds.right -= Px(8);
+  if (navigation) bounds.bottom -= Px(16);
   DrawTextW(item.hDC, text, -1, &bounds, (rail ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
   if (rail) {
     auto glyph = item.rcItem;
     glyph.left += Px(10);
-    glyph.right = glyph.left + Px(23);
+    glyph.right = glyph.left + Px(26);
+    glyph.top += Px(navigation ? 15 : 7);
+    glyph.bottom = glyph.top + Px(25);
+    Box(item.hDC, glyph, active_page ? kAccent : kField, active_page ? kAccent : kBorder);
     SelectObject(item.hDC, g_small);
-    SetTextColor(item.hDC, Theme(active_page ? kAccent : kMuted));
-    const auto prefix = id == kIdOverview ? L"01" : id == kIdSetupPage ? L"02" : id == kIdUpdatesPage ? L"03" :
-                        id == kIdLogsPage ? L"04" : L"↗";
-    DrawTextW(item.hDC, prefix, -1, &glyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SetTextColor(item.hDC, Theme(active_page ? kDark : kMuted));
+    DrawTextW(item.hDC, navigation ? nav->number : L"↗", -1, &glyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (navigation) {
+      auto subtitle = bounds;
+      subtitle.top = item.rcItem.top + Px(31);
+      subtitle.bottom = item.rcItem.bottom - Px(4);
+      SetTextColor(item.hDC, Theme(active_page ? kAccent : kMuted));
+      DrawTextW(item.hDC, nav->subtitle, -1, &subtitle, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    }
   }
   SelectObject(item.hDC, old_font);
   if ((item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT)) {

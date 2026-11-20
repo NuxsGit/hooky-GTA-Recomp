@@ -7,9 +7,11 @@
 #include "capture.h"
 #include "frame.h"
 #include "input.h"
+#include "input_pacing.h"
 #include "menu.h"
 #include "paths.h"
 #include "shader_compiler.h"
+#include "settings_runtime.h"
 #ifdef GTAV_DESKTOP_WORKSHOP
 #include "../sandbox/CreativeRuntime.h"
 #include "../sandbox/desktop.h"
@@ -56,6 +58,9 @@ REXCVAR_DEFINE_BOOL(gtav_native_vsync, true, "GTAV", "Native renderer: wait for 
 REXCVAR_DEFINE_INT32(gtav_native_output, 720, "GTAV",
                      "Windows output height at startup: 720 | 1080 | 1440 | 2160 | 0 (borderless desktop)");
 REXCVAR_DEFINE_BOOL(gtav_native_fsr1, false, "GTAV", "Windows: AMD FSR 1 spatial upscaling of the SDR front buffer");
+REXCVAR_DEFINE_BOOL(gtav_native_fsr1_sharpen, true, "GTAV", "Windows: sharpen FSR 1 output with RCAS (can be disabled live)");
+REXCVAR_DEFINE_BOOL(gtav_native_short_queue, false, "GTAV", "Windows: queue one guest frame instead of two (restart)");
+REXCVAR_DEFINE_BOOL(gtav_native_amd_anti_lag, false, "GTAV", "Windows: experimental VK_AMD_anti_lag input pacing (restart)");
 #endif
 REXCVAR_DEFINE_BOOL(gtav_native_exact_barriers, true, "GTAV",
                     "Native renderer: no TOP_OF_PIPE / BOTTOM_OF_PIPE next to other barrier stages (MoltenVK waits less)");
@@ -94,6 +99,10 @@ namespace plume {
 std::unique_ptr<RenderInterface> CreateVulkanInterface();  // SDL3 build: window comes later
 void SetVulkanPipelineCacheData(std::vector<uint8_t> data);  // plume-gtav.patch
 std::vector<uint8_t> GetVulkanPipelineCacheData(RenderDevice* device);
+#ifdef _WIN32
+std::unique_ptr<RenderDevice> CreateVulkanDevice(RenderInterface* interface, const std::string& preferred, bool request_anti_lag);
+bool VulkanAntiLagBeforeInput(RenderDevice* device);
+#endif
 extern uint32_t g_statRenderPasses, g_statBarriers;  // plume-gtav.patch
 extern bool g_exactBarrierStages;
 extern bool g_clearLoadOps;
@@ -154,6 +163,14 @@ const bool g_plume_input_attachments = (plume::g_colorInputAttachments = [] {
 // frame is ever dropped: the game renders some textures once (static shadow-map caches, ...) and
 // reuses them for many frames, so a dropped frame lost them for good.
 constexpr size_t kMaxQueuedFrames = 2;
+size_t QueueLimit() {
+#ifdef _WIN32
+  static const size_t limit = REXCVAR_GET(gtav_native_short_queue) ? 1 : kMaxQueuedFrames;
+  return limit;
+#else
+  return kMaxQueuedFrames;
+#endif
+}
 // Two frames in flight + one being presented. Android lets an app hold only
 // (images - minImageCount + 1) images before presenting (minImageCount is 3 on Adreno), so it needs
 // more images or vkAcquireNextImageKHR blocks forever with frames still in flight.
@@ -236,7 +253,7 @@ class Renderer {
     if (!started_.exchange(true)) thread_ = std::thread([this] { ThreadMain(); });
     {
       std::unique_lock lock(mutex_);
-      space_cv_.wait(lock, [this] { return queue_.size() < kMaxQueuedFrames || failed_; });
+      space_cv_.wait(lock, [this] { return queue_.size() < QueueLimit() || failed_; });
       if (failed_) {  // no renderer: nothing will drain the queue
         dropped_++;
         Recycle(std::move(packet));
@@ -246,6 +263,22 @@ class Renderer {
     }
     cv_.notify_one();
   }
+
+#ifdef _WIN32
+  void PaceGuestInput(uint32_t user_index) {
+    if (user_index != 0 || !input_pacing_.Ready()) return;
+    input_pacing_.TryPace(GuestFrame(), [this] {
+      return input::GameplayActive() && GetForegroundWindow() == window_ &&
+             IsWindowVisible(window_) && !IsIconic(window_);
+    }, [this] {
+      if (plume::VulkanAntiLagBeforeInput(device_.get())) anti_lag_called_.store(true, std::memory_order_relaxed);
+    });
+  }
+
+  void StopGuestInputPacing() { input_pacing_.Stop(); }
+
+  ~Renderer() { StopGuestInputPacing(); }
+#endif
 
   FramePacket TakeSpare() {
     std::lock_guard lock(mutex_);
@@ -378,7 +411,7 @@ class Renderer {
       wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW
       wc.lpszClassName = L"GtavNative";
       RegisterClassExW(&wc);
-      const OutputMode mode = ParseOutputMode(REXCVAR_GET(gtav_native_output));
+      const OutputMode mode = window_mode_;
       MONITORINFO monitor{sizeof(monitor)};
       const bool have_monitor = GetMonitorInfoW(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY),
                                                 &monitor);
@@ -466,13 +499,13 @@ class Renderer {
 #endif
 
   bool Init() {
-    menu::LoadSettings();  // including startup-only settings, before selecting the window dimensions
 #ifdef __ANDROID__
     // Plume reports its Vulkan failures on stderr, which Android discards.
     std::freopen((ExeDir() / "logs" / "stderr.txt").string().c_str(), "w", stderr);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
 #endif
 #ifdef _WIN32
+    window_mode_ = ParseOutputMode(REXCVAR_GET(gtav_native_output));
     if (!CreateNativeWindow()) return false;
 #else
     SDL_RunOnMainThread(
@@ -592,7 +625,14 @@ class Renderer {
         preferred = name;
     }
     LoadPipelineCache();
+#ifdef _WIN32
+    anti_lag_requested_ = REXCVAR_GET(gtav_native_amd_anti_lag);
+    const bool use_anti_lag = anti_lag_requested_ && REXCVAR_GET(gtav_native) == "on" &&
+                              !REXCVAR_GET(gtav_native_hidden) && !REXCVAR_GET(gtav_native_trace_only);
+    device_ = plume::CreateVulkanDevice(interface_.get(), preferred, use_anti_lag);
+#else
     device_ = interface_->createDevice(preferred);
+#endif
     if (!device_) {
       REXLOG_ERROR("[native] Plume device creation failed");
       return false;
@@ -633,6 +673,13 @@ class Renderer {
     backend_ok_ = backend_.Init(device_.get());
     REXLOG_INFO("[native] init: done");
     if (!backend_ok_) REXLOG_ERROR("[native] backend init failed; showing clear color only");
+#ifdef _WIN32
+    const auto& caps = device_->getCapabilities();
+    REXLOG_INFO("[graphics] Vulkan VSync requested={}, active={}; guest queue={}; AMD Anti-Lag requested={}, feature={}, enabled={}",
+                vsync_, swapchain_->isVsyncEnabled(), QueueLimit(), anti_lag_requested_, caps.amdAntiLagSupported,
+                caps.amdAntiLagEnabled);
+    if (backend_ok_ && caps.amdAntiLagEnabled) input_pacing_.Enable();
+#endif
     return true;
   }
 
@@ -1079,7 +1126,7 @@ class Renderer {
         std::getline(in, line);
         in.close();
         std::filesystem::remove(set, ec);
-        if (auto eq = line.find('='); eq != std::string::npos) menu::TestSet(line.substr(0, eq), line.substr(eq + 1));
+        if (auto eq = line.find('='); eq != std::string::npos) settings::TestSet(std::string_view(line).substr(0, eq), std::string_view(line).substr(eq + 1));
       }
       // logs/diag_mode (a mode number): sets the F11 tree diagnostic, then is removed.
       auto diag = std::filesystem::path(LogPath("diag_mode"));
@@ -1226,7 +1273,7 @@ class Renderer {
     if (front) {
 #ifdef _WIN32
       presentation = backend_.PresentGame(list_, front, framebuffers_[image].get(), {w, h}, kSwapchainFormat,
-                                           REXCVAR_GET(gtav_native_fsr1));
+                                           REXCVAR_GET(gtav_native_fsr1), REXCVAR_GET(gtav_native_fsr1_sharpen));
 #else
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
       // Phone screens are wider than 16:9: keep the game's aspect ratio with black bars.
@@ -1257,6 +1304,16 @@ class Renderer {
     if (backend_ok_ && REXCVAR_GET(gtav_native_fps))
       backend_.DrawCounter(list_, fps_value_, 8, 8, std::max(1u, h / 720), kSwapchainFormat);
     if (backend_ok_) {
+      presentation.vsync = swapchain_->isVsyncEnabled();
+      presentation.adapter = device_->getDescription().name;
+      presentation.scene_scale = backend_.RenderScale();
+#ifdef _WIN32
+      presentation.boot_output = window_mode_;
+      presentation.queue_limit = uint32_t(QueueLimit());
+      const auto& caps = device_->getCapabilities();
+      presentation.anti_lag = DriverPacing(caps.amdAntiLagSupported, anti_lag_requested_, caps.amdAntiLagEnabled,
+                                          anti_lag_called_.load(std::memory_order_relaxed));
+#endif
       double frame_ms = fps_value_ ? 1000.0 / fps_value_ : 0.0;
       if (ImDrawData* menu_data = menu::Frame(w, h, fps_value_, frame_ms, presentation))
         backend_.DrawMenu(list_, menu_data, kSwapchainFormat);
@@ -1512,6 +1569,12 @@ class Renderer {
       auto eq = spec.find('='), bar = spec.find('|');
       if (eq != std::string::npos && bar != std::string::npos && bar > eq) {
         ab_name_ = spec.substr(0, eq);
+        if (const auto key = settings::FindKey(ab_name_); key && settings::Spec(*key).restart) {
+          REXLOG_WARN("[native] A/B {}: restart-required setting; compare separate runs instead", ab_name_);
+          ab_name_.clear();
+          ab_phase_ = -1;
+          return;
+        }
         ab_values_[0] = spec.substr(eq + 1, bar - eq - 1);
         ab_values_[1] = spec.substr(bar + 1);
         REXLOG_INFO("[native] A/B {}: {} | {}", ab_name_, ab_values_[0], ab_values_[1]);
@@ -1586,6 +1649,10 @@ class Renderer {
 
 #ifdef _WIN32
   HWND window_ = nullptr;
+  OutputMode window_mode_ = OutputMode::k720p;
+  bool anti_lag_requested_ = false;  // renderer startup only
+  std::atomic<bool> anti_lag_called_{false};
+  InputPacingGate input_pacing_;
   std::thread window_thread_;
 #else
   SDL_Window* window_ = nullptr;
@@ -1661,6 +1728,11 @@ void Submit(FramePacket&& frame) { g_renderer.Submit(std::move(frame)); }
 void NoteGuestSwap(uint64_t frame_index) { g_renderer.NoteGuestSwap(frame_index); }
 
 FramePacket TakeSpare() { return g_renderer.TakeSpare(); }
+
+#ifdef _WIN32
+void PaceGuestInput(uint32_t user_index) { g_renderer.PaceGuestInput(user_index); }
+void StopGuestInputPacing() { g_renderer.StopGuestInputPacing(); }
+#endif
 
 }  // namespace gtav::native
 

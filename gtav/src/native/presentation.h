@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string_view>
 
 namespace gtav::native {
 
@@ -68,12 +69,38 @@ constexpr Extent Fsr1Extent(Extent input, Extent output) {
   return size.width > input.width && size.height > input.height ? size : Extent{};
 }
 
+// EASU uses SV_Position in target pixels. It can write straight to the swap-chain
+// image only when the game viewport begins at (0,0) and needs no further resize.
+enum class Fsr1Route { Bypass, DirectEasu, EasuThenLinear, DirectRcas, RcasThenLinear };
+
+constexpr Fsr1Route PlanFsr1(Extent fsr_size, const OutputRect& rect, bool sharpen) {
+  if (fsr_size.Empty()) return Fsr1Route::Bypass;
+  if (sharpen) return fsr_size == rect.size ? Fsr1Route::DirectRcas : Fsr1Route::RcasThenLinear;
+  if (!rect.x && !rect.y && fsr_size == rect.size) return Fsr1Route::DirectEasu;
+  return Fsr1Route::EasuThenLinear;
+}
+
 enum class UpscaleStatus { kLinear, kFsr1, kNoUpscale, kUnavailable };
+enum class AntiLagStatus { Unsupported, Off, Fallback, Ready, Pacing };
+
+constexpr AntiLagStatus DriverPacing(bool supported, bool requested, bool enabled, bool called) {
+  if (!supported) return AntiLagStatus::Unsupported;
+  if (!requested) return AntiLagStatus::Off;
+  if (!enabled) return AntiLagStatus::Fallback;
+  return called ? AntiLagStatus::Pacing : AntiLagStatus::Ready;
+}
 
 struct PresentationInfo {
   Extent input;          // Actual front buffer including the game's HUD, not the monitor size.
   Extent fsr_output;     // Empty when EASU/RCAS weren't run.
   UpscaleStatus status = UpscaleStatus::kLinear;
+  bool fsr_sharpened = false;
+  bool vsync = true;     // Created Vulkan swap-chain mode, not the requested cvar.
+  std::string_view adapter;
+  OutputMode boot_output = OutputMode::k720p;
+  float scene_scale = 1.0f;
+  uint32_t queue_limit = 2;
+  AntiLagStatus anti_lag = AntiLagStatus::Unsupported;
 };
 
 }  // namespace gtav::native

@@ -4,6 +4,7 @@
 #include "courses.h"
 #include "../frontend/play_hub.h"
 #include "../native/menu.h"
+#include "../native/settings_runtime.h"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -198,7 +199,7 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
   const bool workshop_enabled = rex::cvar::GetFlagByName("gtav_native") == "on";
   Mode chosen = Mode::Campaign;
   if (requested == "menu") {
-    const auto selected = frontend::ChooseMode(workshop_enabled);
+    const auto selected = frontend::ChooseMode(workshop_enabled, native::settings::Player());
     if (!selected) return false;
     chosen = *selected;
   } else if (requested == "solo") chosen = Mode::Solo;

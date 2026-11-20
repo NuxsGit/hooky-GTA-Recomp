@@ -62,6 +62,9 @@ set(GTAV_SOURCES
     src/native/shaders.cpp
     src/native/input.cpp
     src/native/menu.cpp
+    src/native/graphics_preferences.cpp
+    src/native/graphics_menu_ui.cpp
+    src/native/settings_runtime.cpp
     src/native/backend.cpp
     src/native/deferred_list.cpp
     src/native/textures.cpp
@@ -119,7 +122,7 @@ if(NOT ANDROID AND NOT GTAV_IOS)
     target_sources(gtav PRIVATE ${_hub_dir}/play_hub.cpp ${_hub_assets})
     target_include_directories(gtav PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
     if(MSVC)
-        set_source_files_properties(${_hub_dir}/play_hub.cpp PROPERTIES COMPILE_OPTIONS /utf-8)
+        set_source_files_properties(${_hub_dir}/play_hub.cpp src/native/graphics_menu_ui.cpp PROPERTIES COMPILE_OPTIONS /utf-8)
     endif()
     target_link_libraries(gtav PRIVATE Threads::Threads)
     target_compile_definitions(gtav PRIVATE GTAV_DESKTOP_WORKSHOP=1)

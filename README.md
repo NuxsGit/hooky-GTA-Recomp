@@ -201,8 +201,12 @@ AZERTY. The mouse steers the right stick, not the PC version's native camera.
 **Native settings overlay.** **F1** opens or closes it and frees the mouse when open. **Esc** closes
 it when open; otherwise Esc pauses the game. On an SDL gamepad press **RB + Back** together;
 use the D-pad and A to navigate and B to close. Touch controls keep their Menu button.
-On Windows, **Display** offers 1080p, 1440p, 4K and borderless desktop output, a separate internal
-render scale, and optional AMD FSR 1. See [Windows graphics settings](docs/WINDOWS_GRAPHICS.md).
+On desktop, the illustrated mode selector also has **Graphismes / Graphics** for choosing settings
+before launching. Both screens save in `data/config/graphics.ini` when launched from the installer.
+On Windows, **Display** shows actual output, VSync, scene scale and optional spatial AMD FSR 1 with
+or without sharpening. **Latency & support** shows a short render queue option and experimental
+AMD Anti-Lag on supported Vulkan drivers. DLSS, XeSS, temporal FSR and frame generation are not
+integrated. See [Windows graphics settings](docs/WINDOWS_GRAPHICS.md).
 
 **Desktop debug overlay (native renderer).** Press **F2** (**Fn + F2** if required by your keyboard)
 for live logs and the experimental **Story tools** tab. In Campaign free roam, explicitly enable the

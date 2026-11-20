@@ -1,6 +1,20 @@
 # Windows native renderer: output, FSR 1 and occlusion
 
-Press **F1** in the game. Under **Display**, select **Output (restart)**:
+Open **Graphismes** in the desktop mode selector (click the tab, press **F1**, or press **Y** on
+an Xbox pad). Values set here are used when you press **Jouer**. In the running game press **F1**:
+**Display** shows actual output, game buffer, upscaling and VSync; **Performance** has presets and
+CPU/GPU trade-offs; **Latency & support** shows the selected Vulkan device's available features.
+
+| Applies live in F1 | Applies next time the game starts |
+| --- | --- |
+| FSR 1 and RCAS, VSync (subject to the swap chain), frame limit, FPS counter, texture checks, per-pixel sun shadows, background pipeline compilation, guest GPU delay | Output mode, scene scale, guest frame queue depth, request for Vulkan AMD Anti-Lag |
+
+Restart-required edits are staged without changing the active renderer. F1 reports both the
+requested and active output/scale and marks changes waiting for restart. Quit the game, not just
+F1, and choose Play again. A VSync request can be refused by the display/driver: the swap-chain
+readout still shows the actual mode.
+
+### Output and upscaling
 
 | Preset | Output pixels |
 | --- | --- |
@@ -19,15 +33,54 @@ monitor. Start at **100%** for the best source detail. Try **87.5%** or **75%** 
 output and FPS limit constant when comparing. Changing this scale doesn't speed up the CPU part of
 replay or streaming. 4K output is **not** native 4K rendering or a high-resolution texture pack.
 
-**Upscaling** switches between Linear (default) and **AMD FSR 1** immediately. FSR 1 runs AMD's
-EASU and RCAS passes on the SDR front buffer, including GTA's HUD. The host overlays remain at
-output resolution. It bypasses the extra passes at 1:1 or when downscaling. The intermediate is
-capped at 2× per axis; for a 720p source on a 4K panel, FSR processes 1440p and the last blit scales
-that to 4K. If the driver refuses the optional pipelines or scratch resources, it falls back to
-Linear. FSR 1 itself costs GPU time; any FPS gain comes from reducing internal rendering work.
+**Upscaling** switches between Linear (default) and **AMD FSR 1** immediately. FSR runs EASU
+spatial upscaling on the SDR game buffer including its HUD; the host overlays are drawn separately
+at output resolution. Optional **FSR 1 sharpening (RCAS)** can be disabled live. EASU alone can
+write directly to a matching 16:9 output without an intermediate pass. Both modes bypass FSR at
+1:1 or when downscaling. The intermediate is capped at 2× per axis; with a 720p source on a 4K panel,
+FSR processes 1440p and the last blit scales it to 4K. If the optional pipelines/scratch allocations
+fail, the output falls back to Linear. FSR 1 itself costs GPU time; not every scene will get faster.
 
-F1 saves the settings to `gtav_settings.ini` next to the game executable. For a one-off test in
-PowerShell (saved F1 values ordinarily take precedence):
+On **Performance**, Best image selects 100% and Linear. Balanced selects 87.5% and FSR 1;
+Performance selects 75% and FSR 1. The last two compile new pipelines in the background (reduced
+first-use hitches, but some effects can be missing briefly). All keep accurate sun shadows, and
+none changes your FPS cap, queue, VSync or driver pacing. Compare the same scene at the same cap
+and output resolution after restarting. In CPU-bound scenes, lowering scene scale often helps less
+than changing texture checks or reusing the pipeline cache.
+
+### Latency and compatibility
+
+- **Guest frame queue / Short:** at most one captured guest frame waits to be replayed instead of
+  two. No snapshots are discarded; this can reduce buffering but may lower throughput. It does
+  not change swap-chain image count or interpolate frames.
+- **AMD Anti-Lag (experimental, off by default):** the game checks its *selected* Vulkan physical
+  device for `VK_AMD_anti_lag` and the `antiLag` feature, enables them only on request, and retries
+  normal device creation if the optional request fails. It calls `vkAntiLagUpdateAMD` before the
+  first gameplay state poll per guest frame, not in the hub, an open host overlay, shadow mode or
+  a hidden process. This is standard driver input pacing (no paired INPUT/PRESENT markers and no
+  additional driver FPS limiter). F1 shows unsupported, disabled, fallback, waiting for input or
+  pacing. The status is not an input-to-display latency measurement. If several GPUs are present,
+  verify the adapter name in F1; `--gtav_native_device=AMD` can prefer an AMD-named adapter if listed.
+- **Guest GPU delay** is a separate emulation compatibility setting, not Anti-Lag. Use the
+  conservative 6 ms if speed-focused 4 ms reveals streaming artefacts.
+- **Temporal FSR, DLSS, XeSS, and frame generation ×2–×8:** not integrated. No such feature can
+  be enabled by selecting FSR 1 or by duplicating presentations.
+
+### Where the settings live
+
+For a launcher installation the hub and F1 both write `<game home>/data/config/graphics.ini`,
+shared by Campaign and Workshop without touching either profile. When that file is absent, the
+legacy `gtav_settings.ini` next to the host is read; the first successful edit writes the new file
+and leaves the legacy one alone. Developers launching the host directly without
+`--gtav_settings_path` still use the legacy location. Save uses a checked atomic replacement; a
+write failure is reported and can be retried. An unreadable file is not silently overwritten.
+
+On desktop the order is **explicit command line → `REX_*` environment → saved graphics settings
+→ `gtav.toml` → defaults**. The launcher no longer passes its FPS, native VSync or guest-lag defaults
+as explicit overrides. Forced fields are marked and an unrelated edit will not save those forced
+values. Developer runs via `play.sh` or `play.ps1` still pass their explicit FPS limit and, in
+native-on mode, VSync and guest GPU delay. Use the installer launch to test persisted values.
+For one-off A/B, use `GTAV_IGNORE_SETTINGS=1` to bypass both reading and writing the file:
 
 ```powershell
 $env:GTAV_IGNORE_SETTINGS='1'
@@ -81,9 +134,8 @@ Use text-only capture for sharing by default. Diagnostics are not a performance 
 
 ## Scope and validation
 
-FSR 1 is spatial. DLSS and frame generation are not integrated. Extra presentations of the same
-image are not frame generation. The front buffer already contains GTA's HUD; use the text-only
-F9 trace to look for separate inputs rather than feeding the final image to a temporal SDK.
+The front buffer already contains GTA's HUD. Use the text-only F9 trace to look for separate
+inputs rather than feeding the final image to a temporal SDK.
 
 For input discovery, use `--gtav_native_trace_only=true --gtav_native_dump_frames=3` (one F9
 captures three consecutive guest frames). Capture the **same** scene stationary, with camera-only
@@ -104,13 +156,18 @@ No DLSS/FG multiplier is claimed by the current build.
 The optional `--gtav_native_replay=true` buffer still dumps with **F8** in Campaign. In
 Workshop use **Shift+F8**; F8 on its own is reserved for Build.
 
-Run the asset-free presentation and resolve replay tests with:
+Run the asset-free presentation, resolve replay and graphics preference tests with:
 
 ```sh
 cmake -S gtav/tests -B build/graphics-tests
 cmake --build build/graphics-tests --config Release
 ctest --test-dir build/graphics-tests -C Release --output-on-failure
 ```
+
+Adding `-DGTAV_IMGUI_SOURCE=<patched SDK>/thirdparty/imgui` tests the real F1 widgets. With
+`-DGTAV_TEST_PLAY_HUB=ON -DSDL3_DIR=<SDL3 package dir>`, a dummy video test also exercises the SDL
+hub. The exact Windows ZIP smoke saves and reloads settings in an accented install path, checks
+a CLI override and keeps Campaign/Workshop paths separate. The headless checks don't launch GTA.
 
 On a Windows Vulkan machine with the installed game, check each output preset at matching desktop
 resolutions, an ultrawide or resizable window, and at non-100% Windows DPI. Toggle FSR while

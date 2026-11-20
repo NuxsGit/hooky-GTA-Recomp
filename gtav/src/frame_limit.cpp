@@ -113,7 +113,8 @@ bool InFailureEffect() {
 REX_EXTERN(__imp__sub_827B5878);
 REX_HOOK_RAW(sub_827B5878) {
   ApplyPowerThrottling();
-  const int32_t selected = REXCVAR_GET(gtav_fps_limit);
+  // F1 edits this from the render thread. The registry query takes the same lock as the setter.
+  const int32_t selected = REXCVAR_QUERY(int32_t, gtav_fps_limit);
   const bool compatibility = REXCVAR_GET(gtav_fail_stock_pacing) && gtav::InFailureEffect();
   const int32_t limit = compatibility ? 30 : selected;
   // This is the title's main frame limiter. Guest state is only accessed here, never from

@@ -78,7 +78,8 @@ launchers closed. Keep your original until you have checked both profiles in the
 Campaign and Workshop keep their own profiles inside `data/user/`; Workshop uses
 `data/user/sandbox/profile/` and stores layouts in `data/user/sandbox/courses/`. `data/user/` also
 contains the large, read-only Disc 1 install partitions under `0000000000000000/545408A7/00000002`.
-Neither update nor Recompile replaces the player profiles or settings. This is local persistence,
+The mode selector and F1 share `data/config/graphics.ini`, outside both save profiles. Neither
+update nor Recompile replaces the player profiles or settings. This is local persistence,
 not cloud synchronization or a backup against manual deletion, local drive failure, or a bad save.
 `data/build/` can be removed with the game and setup closed if you need space; the next compile
 will be slower, but it does not remove saves. Never distribute your game data or build outputs.
@@ -89,6 +90,8 @@ will be slower, but it does not remove saves. Never distribute your game data or
 with arrows, Tab or D-pad. **Enter / A / Play** confirms; **Esc / B** closes without loading a save.
 On Windows `gtav_launcher.exe --play` and on Linux/macOS normal launch of a ready install go directly
 to this screen, bypassing setup. The hub uses original artwork, and follows French/English locale.
+Open **Graphismes / Graphics** (F1 or Y) to set graphics before loading a profile. Esc or B leaves
+that tab without exiting the hub. See [options and driver support](WINDOWS_GRAPHICS.md).
 
 | Card | What it does |
 | --- | --- |

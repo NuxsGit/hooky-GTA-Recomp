@@ -13,13 +13,16 @@ $set = "$root\build\logs\menu_set"
 if (Get-Process gtav_fast -ErrorAction SilentlyContinue) { "game already running: not starting"; exit 1 }
 $go = "$root\logs\boot\${Name}_input.txt"
 Remove-Item -Force -ErrorAction SilentlyContinue $L, $set, $go
-# menu_set saves Esc-menu settings to gtav_settings.ini, which overrides the command line on the
-# next play: keep the owner's file and put it back afterwards (a lag_ms=2 A/B once leaked into play).
-$ini = "$root\build\gtav_settings.ini"
-$iniSaved = if (Test-Path $ini) { Get-Content -Raw $ini } else { $null }
 $flags = @("--gtav_native_stats=true", "--gtav_native_hidden=true", "--audio_mute=true", "--input_script=$go")
 if ($Extra) { $flags += $Extra }
-& "$root\play.ps1" -Log $Name -Fps 0 -Mode on -Counter -Extra $flags | Out-Null
+# The child can still change flags live via menu_set, but never reads/writes player choices.
+$previousIgnore = [Environment]::GetEnvironmentVariable("GTAV_IGNORE_SETTINGS", "Process")
+try {
+  $env:GTAV_IGNORE_SETTINGS = "1"
+  & "$root\play.ps1" -Log $Name -Fps 0 -Mode on -Counter -Extra $flags | Out-Null
+} finally {
+  [Environment]::SetEnvironmentVariable("GTAV_IGNORE_SETTINGS", $previousIgnore, "Process")
+}
 Start-Sleep 2
 $p = Get-Process gtav_fast -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $p) { "game did not start"; exit 3 }
@@ -43,7 +46,6 @@ for ($i = 0; $i -lt $Rounds; $i++) {
 $marks += [pscustomobject]@{ T = Get-Date; V = "end" }
 Stop-Process -Id $p.Id -Force
 $p.WaitForExit(60000) | Out-Null
-if ($null -ne $iniSaved) { Set-Content -Path $ini -Value $iniSaved -NoNewline -Encoding ascii } else { Remove-Item -Force -ErrorAction SilentlyContinue $ini }
 # Average fps and draws per value, skipping 2 s after each flip.
 $acc = @{}
 foreach ($m in Select-String -Path $L -Pattern '^\[(\S+ \S+)\].*\[native\] fps=([0-9.]+).*drawidx=([0-9]+)') {

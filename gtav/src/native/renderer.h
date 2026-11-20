@@ -16,7 +16,7 @@ bool Active();
 
 struct FramePacket;
 
-// Hands a finished guest frame to the render thread (never blocks; drops frames when behind).
+// Hands a finished guest frame to the render thread (backpressure, never drops for speed).
 void Submit(FramePacket&& frame);
 // Guest Swap of frame_index (before its PM4 swap packet is written): the command processor's
 // matching swap waits until the renderer recorded that frame (--gtav_native=on).
@@ -25,5 +25,12 @@ void NoteGuestSwap(uint64_t frame_index);
 // An emptied packet whose buffers kept their capacity (a fresh one when none was returned yet):
 // the capture side reuses packets instead of regrowing a multi-MB arena every frame.
 FramePacket TakeSpare();
+
+#ifdef _WIN32
+// Called by the SDK immediately before polling guest controller state. No-op unless opted in
+// and the AMD Vulkan driver advertised and enabled its pacing feature.
+void PaceGuestInput(uint32_t user_index);
+void StopGuestInputPacing();
+#endif
 
 }  // namespace gtav::native
