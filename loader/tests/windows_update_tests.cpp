@@ -2,6 +2,7 @@
 #include "win_process.h"
 #include "sources.h"
 
+#include <algorithm>
 #include <array>
 #include <stdexcept>
 #include <cstdlib>
@@ -68,10 +69,12 @@ struct WindowQuery {
   DWORD pid;
   fs::path exe;
   HWND result = nullptr;
+  bool visible = false;
 };
 
 BOOL CALLBACK MatchWindow(HWND hwnd, LPARAM context) {
   auto& q = *reinterpret_cast<WindowQuery*>(context);
+  if (q.visible && !IsWindowVisible(hwnd)) return TRUE;
   wchar_t text[256];
   if (q.caption && (!GetWindowTextW(hwnd, text, 256) || std::wstring_view(text) != q.caption)) return TRUE;
   if (q.class_name && (!GetClassNameW(hwnd, text, 256) || std::wstring_view(text) != q.class_name)) return TRUE;
@@ -214,6 +217,7 @@ void VerifyPackage(const fs::path& root, const fs::path& archive, const wchar_t*
 }
 
 void VerifyHostSelector(const fs::path& root) {
+  SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   std::wstring error;
   const auto host = root / "gtav_fast.exe";
   // The fixture DLL satisfies the imports, and traps any attempt to run a guest function. A missing
@@ -237,7 +241,7 @@ void VerifyHostSelector(const fs::path& root) {
     CHECK(win::Spawn(host, command, root, 0, &process.handle));
     const auto pid = GetProcessId(process.handle.Get());
     CHECK(pid);
-    auto modes = WaitWindow({L"GTA V Recomp | Play", nullptr, pid, {}}, process.handle.Get());
+    auto modes = WaitWindow({L"GTA V Recomp | Play", nullptr, pid, {}, nullptr, true}, process.handle.Get());
     if (!modes) error = Widen(Text(log));
     CHECK(modes);
     wchar_t class_name[64]{};
@@ -246,22 +250,31 @@ void VerifyHostSelector(const fs::path& root) {
       CHECK(PostMessageW(modes, WM_KEYDOWN, vk, 0));  // virtual-key input, no hardware required
       CHECK(PostMessageW(modes, WM_KEYUP, vk, 0));
     };
-    CHECK(PostMessageW(modes, WM_SETFOCUS, 0, 0));
+    auto click = [&](int x, int y) {
+      // Click the software hub's 1440x900 coordinate space. Unlike a posted F1 key, this
+      // does not need the CI runner to grant the new process real keyboard focus.
+      RECT rect{};
+      CHECK(GetClientRect(modes, &rect) && rect.right > 0 && rect.bottom > 0);
+      const float scale = std::min(rect.right / 1440.0f, rect.bottom / 900.0f);
+      const auto point = MAKELPARAM((rect.right - int(1440 * scale)) / 2 + int(x * scale),
+                                   (rect.bottom - int(900 * scale)) / 2 + int(y * scale));
+      CHECK(PostMessageW(modes, WM_MOUSEMOVE, 0, point));
+      CHECK(PostMessageW(modes, WM_LBUTTONDOWN, MK_LBUTTON, point));
+      CHECK(PostMessageW(modes, WM_LBUTTONUP, 0, point));
+    };
     if (test == Case::SaveGraphics || test == Case::CliOverride) {
-      key(VK_F1);
-      key(VK_RIGHT);  // 720p -> 1080p on the first launch, ignored on the explicit override launch.
-      key(VK_DOWN);
+      click(1265, 193);  // Graphismes tab.
+      click(916, 310);   // 720p -> 1080p, or ignored when output is forced.
       if (test == Case::SaveGraphics) {
-        key(VK_RIGHT);  // scene scale 100 -> 87.5%
-        key(VK_DOWN);
-        key(VK_RIGHT);  // linear -> FSR 1
+        click(916, 374);  // Scene scale 100 -> 87.5%.
+        click(916, 434);  // Linear -> FSR 1.
       } else {
-        key(VK_LEFT);   // change another value while output is forced
+        click(588, 374);  // Change another value while output is forced.
       }
-      key(VK_ESCAPE);   // closes Graphics, not the startup window
     }
     if (!enter) CHECK(PostMessageW(modes, WM_CLOSE, 0, 0));
     if (enter) {
+      CHECK(PostMessageW(modes, WM_SETFOCUS, 0, 0));
       key(VK_LEFT);
       key(VK_DOWN);
       key(VK_RETURN);  // campaign co-op is locked, Enter must not leave the hub
@@ -280,13 +293,16 @@ void VerifyHostSelector(const fs::path& root) {
     WaitExit(process.handle.Get(), 10'000, have_partitions ? 1 : 0);
     CHECK(Text(legacy) == legacy_values);
     const auto saved = Text(settings);
+    const auto lines = Text(log);
+    const auto graphics = lines.find("[graphics] preferences:");
+    error = L"Pass " + std::to_wstring(int(test)) + L", file: " + Widen(saved.empty() ? "<empty or missing>" : saved);
+    if (graphics != lines.npos) error += L"\n" + Widen(lines.substr(graphics, 1200));
     CHECK(saved.find("gtav_native_output=1080\n") != std::string::npos && saved.find("gtav_fps_limit=60\n") != std::string::npos);
     CHECK(saved.find("gtav_native_fsr1=true\n") != std::string::npos);
     CHECK(saved.find(test == Case::SaveGraphics || test == Case::ReloadGraphics ?
         "gtav_native_render_scale=0.875\n" : "gtav_native_render_scale=1\n") != std::string::npos);
     for (const auto& entry : fs::directory_iterator(settings.parent_path()))
       CHECK(!entry.path().filename().wstring().starts_with(L"graphics.ini.new-"));
-    const auto lines = Text(log);
     const auto* output = test == Case::SaveGraphics ? "=720" : test == Case::CliOverride ? "=1440 (launch override)" : "=1080";
     CHECK(lines.find(std::string("[graphics] startup gtav_native_output") + output) != std::string::npos);
     if (test != Case::SaveGraphics) CHECK(lines.find("[graphics] startup gtav_native_fsr1=true") != std::string::npos);
