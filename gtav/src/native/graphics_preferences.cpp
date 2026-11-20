@@ -119,7 +119,7 @@ std::string CanonicalValue(Key key, std::string_view value) {
     }
     case Key::SceneScale: {
       // Locale independent; also works on libc++ versions without floating-point from_chars.
-      // Allow Extra Potato down to 0.333 (GTA IV faces on ultra-low hardware); Potato stays at 0.5.
+      // Allow N100 Ultra down to 0.25 (Cyberpunk-low on N100 / 8GB); Extra Potato 0.333, Potato 0.5.
       std::istringstream in{std::string(value)};
       in.imbue(std::locale::classic());
       double scale;

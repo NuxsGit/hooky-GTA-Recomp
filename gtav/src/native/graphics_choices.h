@@ -25,6 +25,7 @@ inline constexpr Choice kScaleChoices[]{
     {"1.5", {"150%", "150%"}}, {"1", {"100%", "100%"}}, {"0.875", {"87.5%", "87,5%"}}, {"0.75", {"75%", "75%"}},
     {"0.666667", {"66.7%", "66,7%"}}, {"0.5", {"50%", "50%"}},
     {"0.333333", {"33.3% (Extra Potato)", "33,3% (Extra Potato)"}},
+    {"0.25", {"25% (N100 Ultra)", "25% (N100 Ultra)"}},
 };
 inline constexpr Choice kUpscalingChoices[]{
     {"false", {"Linear", "Linéaire"}}, {"true", {"AMD FSR 1", "AMD FSR 1"}},
@@ -100,6 +101,7 @@ struct Preset {
   const char* scale;
   bool filtering, lean, fsr1;
   bool extra_potato = false;
+  bool ultra_potato = false;
 };
 inline constexpr Preset kPresets[]{
     {{"Standard", "Standard"}, {"Native scene detail and normal caches.", "Détail natif et caches normaux."},
@@ -112,7 +114,11 @@ inline constexpr Preset kPresets[]{
       "0.5", false, true, false},
     {{"Extra Potato", "Extra Potato"}, {"33% scene, ultra-lean caches, aggressive LOD (GTA IV faces). Runs on 3x rien; Vulkan still required.",
                              "Scène à 33 %, caches ultra-réduits, LOD agressif (visages GTA IV). Tourne sur 3x rien ; Vulkan requis."},
-      "0.333333", false, true, false, true},
+      "0.333333", false, true, false, true, false},
+    // N100 Ultra - Cyberpunk-style ultra-low: 25% scene, ultra-lean + FSR1, 1x aniso, no contact, fog off - for Intel N100 8GB
+    {{"N100 Ultra", "N100 Ultra"}, {"25% scene, 64 MiB/16 MiB, FSR1, 1x aniso, no contact rays. Cyberpunk-low for N100 8GB. Vulkan still required.",
+                             "Scène à 25 %, 64/16 MiB, FSR1, 1× aniso, sans rayons. Ultra-low type Cyberpunk pour N100 8 Go. Vulkan requis."},
+      "0.25", false, true, true, true, true},
     {{"Balanced", "Équilibré"}, {"87.5% scene, with FSR 1 on Windows.", "Scène à 87,5 %, avec FSR 1 sous Windows."},
       "0.875", false, false, true},
     {{"Performance", "Performance"}, {"75% scene, with FSR 1 on Windows.", "Scène à 75 %, avec FSR 1 sous Windows."},
@@ -120,20 +126,43 @@ inline constexpr Preset kPresets[]{
 };
 
 struct PresetEdit { Key key; const char* value; };
-constexpr auto PresetEdits(const Preset& preset) {
-  if (preset.extra_potato) {
-    return std::array{PresetEdit{Key::SceneScale, preset.scale},
+// Max edits per preset (ultra adds N100 Cyberpunk tweaks)
+inline constexpr size_t kMaxPresetEdits = 9;
+using PresetEditsArray = std::array<PresetEdit, kMaxPresetEdits>;
+constexpr PresetEditsArray PresetEdits(const Preset& preset) {
+  if (preset.ultra_potato) {
+    // N100 Ultra Cyberpunk: 25% scene + ultra-lean + FSR1 + 1x aniso + no contact + fog stripped - full Cyberpunk low
+    return PresetEditsArray{PresetEdit{Key::SceneScale, preset.scale},
         PresetEdit{Key::MaterialFiltering, preset.filtering ? "true" : "false"},
         PresetEdit{Key::LowMemory, preset.lean ? "true" : "false"},
         PresetEdit{Key::Fsr1, preset.fsr1 ? "true" : "false"},
-        PresetEdit{Key::ExtraPotato, preset.extra_potato ? "true" : "false"}};
+        PresetEdit{Key::ExtraPotato, "true"},
+        PresetEdit{Key::UltraPotato, "true"},
+        PresetEdit{Key::MaterialAnisotropy, "1"},
+        PresetEdit{Key::ContactRays, "0"},
+        PresetEdit{Key::ReduceFog, "true"}};
   }
-  // Standard presets also clear Extra Potato when switching away.
-  return std::array{PresetEdit{Key::SceneScale, preset.scale},
+  if (preset.extra_potato) {
+    return PresetEditsArray{PresetEdit{Key::SceneScale, preset.scale},
+        PresetEdit{Key::MaterialFiltering, preset.filtering ? "true" : "false"},
+        PresetEdit{Key::LowMemory, preset.lean ? "true" : "false"},
+        PresetEdit{Key::Fsr1, preset.fsr1 ? "true" : "false"},
+        PresetEdit{Key::ExtraPotato, "true"},
+        PresetEdit{Key::UltraPotato, "false"},
+        PresetEdit{Key::Count, ""},
+        PresetEdit{Key::Count, ""},
+        PresetEdit{Key::Count, ""}};
+  }
+  // Standard presets also clear Extra/Ultra Potato when switching away.
+  return PresetEditsArray{PresetEdit{Key::SceneScale, preset.scale},
       PresetEdit{Key::MaterialFiltering, preset.filtering ? "true" : "false"},
       PresetEdit{Key::LowMemory, preset.lean ? "true" : "false"},
       PresetEdit{Key::Fsr1, preset.fsr1 ? "true" : "false"},
-      PresetEdit{Key::ExtraPotato, "false"}};
+      PresetEdit{Key::ExtraPotato, "false"},
+      PresetEdit{Key::UltraPotato, "false"},
+      PresetEdit{Key::Count, ""},
+      PresetEdit{Key::Count, ""},
+      PresetEdit{Key::Count, ""}};
 }
 
 inline size_t PresetIndex(const Preferences& prefs) {
@@ -141,6 +170,7 @@ inline size_t PresetIndex(const Preferences& prefs) {
   for (const auto& preset : kPresets) {
     bool match = true;
     for (auto [key, value] : PresetEdits(preset)) {
+      if (key == Key::Count) continue;
       if (prefs.Available(key) && CanonicalValue(key, prefs.Value(key)) != value) { match = false; break; }
     }
     if (match) return i;
@@ -151,7 +181,7 @@ inline size_t PresetIndex(const Preferences& prefs) {
 
 inline bool CanApplyPreset(const Preferences& prefs) {
   return prefs.CanEdit(Key::SceneScale) || prefs.CanEdit(Key::MaterialFiltering) || prefs.CanEdit(Key::LowMemory) ||
-         prefs.CanEdit(Key::ExtraPotato);
+         prefs.CanEdit(Key::ExtraPotato) || prefs.CanEdit(Key::UltraPotato);
 }
 
 struct PresetResult { bool edited = false; const char* rejected = nullptr; };
@@ -159,6 +189,7 @@ inline PresetResult ApplyPreset(Preferences& prefs, const Preset& preset) {
   PresetResult result;
   if (!CanApplyPreset(prefs)) return result;
   for (auto [key, value] : PresetEdits(preset)) {
+    if (key == Key::Count) continue;
     if (!prefs.CanEdit(key)) continue;
     if (prefs.Edit(key, value)) result.edited = true;
     else result.rejected = Spec(key).name.data();
