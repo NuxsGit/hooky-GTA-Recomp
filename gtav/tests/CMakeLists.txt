@@ -51,7 +51,7 @@ if(GTAV_IMGUI_SOURCE)
     add_test(NAME graphics_menu COMMAND gtav_graphics_menu_tests)
 endif()
 
-option(GTAV_TEST_PLAY_HUB "Test the real SDL hub with the dummy video driver (requires GTAV_IMGUI_SOURCE)" OFF)
+option(GTAV_TEST_PLAY_HUB "Test the real SDL hub with injected SDL events (requires GTAV_IMGUI_SOURCE)" OFF)
 if(GTAV_TEST_PLAY_HUB)
     if(NOT GTAV_IMGUI_SOURCE)
         message(FATAL_ERROR "Set GTAV_IMGUI_SOURCE to the SDK's ImGui directory for imstb_truetype.h")

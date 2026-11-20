@@ -165,8 +165,8 @@ ctest --test-dir build/graphics-tests -C Release --output-on-failure
 ```
 
 Adding `-DGTAV_IMGUI_SOURCE=<patched SDK>/thirdparty/imgui` tests the real F1 widgets. With
-`-DGTAV_TEST_PLAY_HUB=ON -DSDL3_DIR=<SDL3 package dir>`, a dummy video test also exercises the SDL
-hub, including saving and reloading on Windows CI without requiring an interactive desktop.
+`-DGTAV_TEST_PLAY_HUB=ON -DSDL3_DIR=<SDL3 package dir>`, the real SDL hub is tested with injected
+SDL events. This checks editing and reloading on Windows CI without physical input devices.
 The extracted Windows ZIP smoke also reads legacy and current preferences in an accented install
 path, checks a CLI override and keeps Campaign/Workshop paths separate. None of these checks
 launches retail GTA.

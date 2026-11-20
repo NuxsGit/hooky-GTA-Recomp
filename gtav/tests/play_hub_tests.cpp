@@ -30,8 +30,18 @@ struct Keys {
 };
 
 int main(int argc, char** argv) {
-  SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
-  CHECK(SDL_Init(SDL_INIT_VIDEO));
+  // Release SDKs intentionally omit the dummy driver. In that case use their regular
+  // window driver; queued SDL events below still need neither a focused OS window nor a GPU.
+  for (int i = 0; i < SDL_GetNumVideoDrivers(); ++i) {
+    if (std::string_view(SDL_GetVideoDriver(i)) == "dummy") {
+      SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
+      break;
+    }
+  }
+  if (!SDL_Init(SDL_INIT_VIDEO)) {
+    std::fprintf(stderr, "SDL initialization error: %s\n", SDL_GetError());
+    return 1;
+  }
   Temp dir;
   Flags flags;
   const auto file = dir.root / "data/config/graphics.ini";
