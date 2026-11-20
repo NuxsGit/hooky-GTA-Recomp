@@ -302,6 +302,10 @@ Modes Campaign/Sandbox/Private, mode Private = session TCP multi-joueur (`sessio
 | `pipeline_cache_io` | `pipeline_cache_tests.cpp` | Cache pipelines `vk_pipelines.bin` |
 | `resolve_replay_policy` | `resolve_tests.cpp` | Politique resolve (rect, MSAA, mip) |
 | `graphics_preferences` | `graphics_preferences_tests.cpp` | Persistance / changement live des préférences |
+| `pipeline_completion` | `pipeline_completion_tests.cpp` | Concurrence Wait/Signal/budget (**nouveau**) |
+| `byteswap_simd` | `byteswap_simd_tests.cpp` | Swap16Bytes unit=2/4 (**nouveau**) |
+| `frame_data_hash` | `frame_hash_tests.cpp` | DrawDataHash + ByteArena (**nouveau**) |
+| `safe_read` | `safe_read_tests.cpp` | SafeReadMemory (**nouveau**, non-Windows) |
 | `guest_texture_layout` | `guest_texture_tests.cpp` | Décodeur textures guest (SDK + Plume) |
 | `frame_trace` | `frame_trace_tests.cpp` | Trace frame |
 | `workshop_overlay` | `workshop_overlay_tests.cpp` | F8 Build overlay / Admin OS imgui |

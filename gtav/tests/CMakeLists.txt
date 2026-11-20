@@ -45,6 +45,29 @@ target_include_directories(gtav_resolve_tests PRIVATE ../src/native)
 target_compile_features(gtav_resolve_tests PRIVATE cxx_std_20)
 add_test(NAME resolve_replay_policy COMMAND gtav_resolve_tests)
 
+add_executable(gtav_pipeline_completion_tests pipeline_completion_tests.cpp)
+target_include_directories(gtav_pipeline_completion_tests PRIVATE ../src/native)
+target_compile_features(gtav_pipeline_completion_tests PRIVATE cxx_std_20)
+add_test(NAME pipeline_completion COMMAND gtav_pipeline_completion_tests)
+set_tests_properties(pipeline_completion PROPERTIES TIMEOUT 10)
+
+add_executable(gtav_byteswap_simd_tests byteswap_simd_tests.cpp)
+target_include_directories(gtav_byteswap_simd_tests PRIVATE ../src/native)
+target_compile_features(gtav_byteswap_simd_tests PRIVATE cxx_std_20)
+add_test(NAME byteswap_simd COMMAND gtav_byteswap_simd_tests)
+
+add_executable(gtav_frame_hash_tests frame_hash_tests.cpp)
+target_include_directories(gtav_frame_hash_tests PRIVATE ../src/native)
+target_compile_features(gtav_frame_hash_tests PRIVATE cxx_std_20)
+add_test(NAME frame_data_hash COMMAND gtav_frame_hash_tests)
+
+if(NOT WIN32)
+add_executable(gtav_safe_read_tests safe_read_tests.cpp)
+target_include_directories(gtav_safe_read_tests PRIVATE ../src/native)
+target_compile_features(gtav_safe_read_tests PRIVATE cxx_std_20)
+add_test(NAME safe_read COMMAND gtav_safe_read_tests)
+endif()
+
 # Exercise the real decoder with synthetic physical memory and the pinned SDK's layout helpers.
 set(GTAV_TEXTURE_SDK_SOURCE "" CACHE PATH "ReXGlue source tree (optional guest texture tests)")
 set(GTAV_TEXTURE_PLUME_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../thirdparty/plume" CACHE PATH "Plume source for texture format declarations")
