@@ -357,14 +357,20 @@ std::optional<VehicleRequest> TakeVehicleRequest() {
 
 void DrawWorkshop() {
   if (!Active()) return;
+  // GTA Workshop header — green/yellow accents, dark tabs
+  ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.12f,0.12f,0.13f,1.f));
+  ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.18f,0.85f,0.45f,0.22f));
+  ImGui::PushStyleColor(ImGuiCol_TabActive, ImVec4(0.18f,0.85f,0.45f,0.45f));
+  ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.18f,0.85f,0.45f,0.18f));
   const auto view = Party().View();
   const auto* local = Myself(view.world);
   if (CurrentMode() == Mode::CampaignCoop) {
-    ImGui::TextUnformatted("CAMPAIGN CO-OP  /  3 protagonists");
+    ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "CAMPAIGN CO-OP  //  3 PROTAGONISTS");
   } else {
-    ImGui::TextUnformatted(CurrentMode() == Mode::Solo ? "SANDBOX SOLO" : "PRIVATE MULTIPLAYER");
+    ImGui::TextColored(ImVec4(1.f,0.85f,0.08f,1.f), "%s", CurrentMode() == Mode::Solo ? "SANDBOX SOLO  //  LOS SANTOS" : "PRIVATE MULTIPLAYER  //  ONLINE");
   }
-  ImGui::TextWrapped("%s", GuestLabel());
+  ImGui::TextColored(ImVec4(0.60f,0.62f,0.65f,1.f), "%s", GuestLabel());
+  ImGui::Separator();
   if (!SceneEnabled() || !scene_available.load()) ImGui::TextDisabled("Local props and ghost actors are disabled; map markers still work.");
   if (!ImGui::BeginTabBar("workshop-tabs")) return;
   if ((CurrentMode() == Mode::Multiplayer || CurrentMode() == Mode::CampaignCoop) && ImGui::BeginTabItem("Session")) {
@@ -426,6 +432,7 @@ void DrawWorkshop() {
     ImGui::EndTabItem();
   }
   ImGui::EndTabBar();
+  ImGui::PopStyleColor(4);
 }
 
 void DrawHud() {
@@ -435,7 +442,10 @@ void DrawHud() {
   if (!local) return;
   const auto& world = view.world;
   ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_Always);
-  ImGui::SetNextWindowBgAlpha(.7f);
+  ImGui::SetNextWindowBgAlpha(.82f);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f,0.06f,0.07f,0.88f));
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f,0.95f,0.96f,1.f));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.f);
   constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
       ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing;
   if (ImGui::Begin("##workshop-hud", nullptr, flags)) {
@@ -464,10 +474,12 @@ void DrawHud() {
     if (world.race == Race::Running && local->pose) {
       if (auto next = NextCheckpoint(world.course, *local)) {
         const auto distance = std::sqrt(double(DistanceSquared(world.course.points[*next], local->pose->position))) / 100;
-        ImGui::Text("%s | Checkpoint %zu: %.0f m (yellow marker)", kGameNames[unsigned(world.course.game)], *next + 1, distance);
+        ImGui::TextColored(ImVec4(1.f,0.85f,0.08f,1.f), "%s | Checkpoint %zu: %.0f m", kGameNames[unsigned(world.course.game)], *next + 1, distance);
       }
     }
   }
   ImGui::End();
+  ImGui::PopStyleColor(2);
+  ImGui::PopStyleVar();
 }
 }  // namespace gtav::sandbox
