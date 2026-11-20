@@ -100,7 +100,7 @@ std::unique_ptr<RenderInterface> CreateVulkanInterface();  // SDL3 build: window
 void SetVulkanPipelineCacheData(std::vector<uint8_t> data);  // plume-gtav.patch
 std::vector<uint8_t> GetVulkanPipelineCacheData(RenderDevice* device);
 #ifdef _WIN32
-std::unique_ptr<RenderDevice> CreateVulkanDevice(RenderInterface* interface, const std::string& preferred, bool request_anti_lag);
+std::unique_ptr<RenderDevice> CreateVulkanDevice(RenderInterface* render_interface, const std::string& preferred, bool request_anti_lag);
 bool VulkanAntiLagBeforeInput(RenderDevice* device);
 #endif
 extern uint32_t g_statRenderPasses, g_statBarriers;  // plume-gtav.patch

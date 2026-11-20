@@ -220,7 +220,7 @@ index ad63e0e..51981fc 100644
          uint64_t maxTextureSize = 0;
  
 diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
-index 4fdc4bf..c4e0613 100644
+index 4fdc4bf..8b8ca33 100644
 --- a/plume_vulkan.cpp
 +++ b/plume_vulkan.cpp
 @@ -11,7 +11,16 @@
@@ -1074,9 +1074,9 @@ index 4fdc4bf..c4e0613 100644
          return createdDevice->isValid() ? std::move(createdDevice) : nullptr;
      }
  
-+    std::unique_ptr<RenderDevice> CreateVulkanDevice(RenderInterface *interface, const std::string &preferredDeviceName,
++    std::unique_ptr<RenderDevice> CreateVulkanDevice(RenderInterface * renderInterface, const std::string &preferredDeviceName,
 +                                                     bool requestAntiLag) {
-+        std::unique_ptr<VulkanDevice> device = std::make_unique<VulkanDevice>(static_cast<VulkanInterface *>(interface),
++        std::unique_ptr<VulkanDevice> device = std::make_unique<VulkanDevice>(static_cast<VulkanInterface *>(renderInterface),
 +                                                                           preferredDeviceName, requestAntiLag);
 +        return device->isValid() ? std::move(device) : nullptr;
 +    }
@@ -1128,7 +1128,7 @@ index 4fdc4bf..c4e0613 100644
  
  #if defined(PLUME_SDL2_VULKAN_ENABLED)
 diff --git a/plume_vulkan.h b/plume_vulkan.h
-index 1d36b12..1470f62 100644
+index 1d36b12..e28f4f1 100644
 --- a/plume_vulkan.h
 +++ b/plume_vulkan.h
 @@ -279,14 +279,25 @@ namespace plume {
@@ -1232,7 +1232,7 @@ index 1d36b12..1470f62 100644
 +    // device's cache (to persist between runs). Cache creation failures fall back to no cache.
 +    void SetVulkanPipelineCacheData(std::vector<uint8_t> data);
 +    std::vector<uint8_t> GetVulkanPipelineCacheData(RenderDevice *device);
-+    std::unique_ptr<RenderDevice> CreateVulkanDevice(RenderInterface *interface, const std::string &preferredDeviceName,
++    std::unique_ptr<RenderDevice> CreateVulkanDevice(RenderInterface * renderInterface, const std::string &preferredDeviceName,
 +                                                     bool requestAntiLag);
 +    bool VulkanAntiLagBeforeInput(RenderDevice *device);
  };
