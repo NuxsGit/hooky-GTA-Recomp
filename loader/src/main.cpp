@@ -625,15 +625,16 @@ void CreateControls() {
 
   // Campaign co-op server host (launcher-editable IP/port). This reuses the same TCP transport
   // as private sessions but isolates saves under data/user/campaign_coop and locks characters.
-  g_campaign_label = Label(Overview, L"03  /  CAMPAGNE CO-OP  ·  3 JOUEURS (M / F / T)", 256, 518, 420, 18, &g_small, kMint);
-  Label(Overview, L"IP d’écoute (vide = auto)", 256, 536, 190, 18, &g_small, kMuted);
-  Label(Overview, L"Port TCP", 505, 536, 90, 18, &g_small, kMuted);
-  g_campaign_ip = Make(Overview, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 254, 554, 230, 26, kIdCampaignIp, &g_mono);
-  g_campaign_port = Make(Overview, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 500, 554, 90, 26, kIdCampaignPort, &g_mono);
+  // Y compacté pour laisser de l'air avant "ÉTAT DE L'INSTALLATION" (fix chevauchement texte)
+  g_campaign_label = Label(Overview, L"03  /  CAMPAGNE CO-OP  ·  3 JOUEURS (M / F / T)", 256, 512, 420, 18, &g_small, kMint);
+  Label(Overview, L"IP d’écoute (vide = auto)", 256, 530, 190, 18, &g_small, kMuted);
+  Label(Overview, L"Port TCP", 505, 530, 90, 18, &g_small, kMuted);
+  g_campaign_ip = Make(Overview, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 254, 548, 230, 26, kIdCampaignIp, &g_mono);
+  g_campaign_port = Make(Overview, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 500, 548, 90, 26, kIdCampaignPort, &g_mono);
   SendMessageW(g_campaign_ip, EM_SETLIMITTEXT, 15, 0);
   SendMessageW(g_campaign_port, EM_SETLIMITTEXT, 5, 0);
-  g_campaign_save = Button(Overview, L"Enregistrer", 605, 553, 110, 28, kIdCampaignSave);
-  Label(Overview, L"Mickaël / Franklin / Trevor verrouillés dès le début · sauvegarde isolée campaign_coop", 256, 582, 520, 16, &g_small, kMuted);
+  g_campaign_save = Button(Overview, L"Enregistrer", 605, 547, 110, 28, kIdCampaignSave);
+  Label(Overview, L"Mickaël / Franklin / Trevor verrouillés dès le début · sauvegarde isolée campaign_coop", 256, 575, 520, 16, &g_small, kMuted);
 
   for (int i = 0; i < 3; ++i) {
     const int y = 145 + i * 84;
@@ -671,11 +672,11 @@ void CreateControls() {
   Button(Logs, L"Ouvrir le dossier des journaux", 254, 471, 257, 38, kIdOpenLogs);
   SendMessageW(g_log, EM_SETLIMITTEXT, 128 * 1024, 0);
 
-  Label(Always, L"ÉTAT DE L’INSTALLATION", 255, 556, 518, 18, &g_small, kMuted);
-  g_stage = Label(Always, L"", 254, 578, 572, 25, &g_font, kText, SS_ENDELLIPSIS);
-  g_progress = Make(Always, PROGRESS_CLASSW, L"", PBS_SMOOTH, 254, 611, 575, 8, kIdProgress);
+  Label(Always, L"ÉTAT DE L’INSTALLATION", 255, 592, 518, 18, &g_small, kMuted);
+  g_stage = Label(Always, L"", 254, 610, 572, 25, &g_font, kText, SS_ENDELLIPSIS);
+  g_progress = Make(Always, PROGRESS_CLASSW, L"", PBS_SMOOTH, 254, 632, 575, 8, kIdProgress);
   SendMessageW(g_progress, PBM_SETRANGE32, 0, 1000);
-  g_cancel = Button(Always, L"Annuler", 845, 569, 131, 42, kIdCancel);
+  g_cancel = Button(Always, L"Annuler", 845, 595, 131, 42, kIdCancel);
   Layout();
   LoadInputs();
   LoadCampaignInputs();
