@@ -52,6 +52,7 @@ FS = REPO / "gtav" / "fs"
 
 LICENSES = [
     (REPO / "LICENSE", "gtav-recomp-GPL-3.0.txt"),
+    (REPO / "gtav/src/frontend/assets/OFL-Barlow.txt", "third_party/Barlow-OFL.txt"),
     (REPO / "LICENSE", "third_party/GPL-3.0.txt"),  # binutils' PowerPC disassembler (SDK)
     (SDK / "LICENSE", "ReXGlue-SDK.txt"),
     (XR / "LICENSE.md", "XenosRecomp.txt"),

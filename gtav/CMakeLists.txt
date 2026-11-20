@@ -51,6 +51,7 @@ set(GTAV_SOURCES
     src/crash_handler.cpp
     src/cutscene_audio_fix.cpp
     src/frame_limit.cpp
+    src/debug_tools.cpp
     src/wait_profile.cpp
     src/gpu_fence_wait.cpp
     src/native/stats.cpp
@@ -61,6 +62,9 @@ set(GTAV_SOURCES
     src/native/shaders.cpp
     src/native/input.cpp
     src/native/menu.cpp
+    src/native/graphics_preferences.cpp
+    src/native/graphics_menu_ui.cpp
+    src/native/settings_runtime.cpp
     src/native/backend.cpp
     src/native/deferred_list.cpp
     src/native/textures.cpp
@@ -70,7 +74,7 @@ set(GTAV_SOURCES
 )
 
 if(WIN32)
-    add_executable(gtav WIN32 ${GTAV_SOURCES})
+    add_executable(gtav WIN32 ${GTAV_SOURCES} src/desktop.manifest)
 elseif(ANDROID)
     # Android: the game is libmain.so, which SDL's SDLActivity loads and whose SDL_main it calls
     # (tools/android). A shared library exports the rex_skip_rendering_* hooks by default.
@@ -102,6 +106,34 @@ else()
                             -Wl,--export-dynamic-symbol=rex_skip_rendering_fence
                             -Wl,--export-dynamic-symbol=rex_skip_rendering_idle
                             -Wl,--export-dynamic-symbol=rex_skip_rendering_gpu_waiters)
+    endif()
+endif()
+
+if(NOT ANDROID AND NOT GTAV_IOS)
+    find_package(Threads REQUIRED)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(_hub_dir ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend)
+    set(_hub_assets ${CMAKE_CURRENT_BINARY_DIR}/play_hub_assets.inc)
+    file(GLOB _hub_inputs CONFIGURE_DEPENDS ${_hub_dir}/assets/*.png ${_hub_dir}/assets/*.ttf)
+    add_custom_command(OUTPUT ${_hub_assets}
+        COMMAND ${Python3_EXECUTABLE} ${_hub_dir}/embed_assets.py ${_hub_assets}
+        DEPENDS ${_hub_dir}/embed_assets.py ${_hub_inputs}
+        VERBATIM)
+    target_sources(gtav PRIVATE ${_hub_dir}/play_hub.cpp ${_hub_assets})
+    target_include_directories(gtav PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    if(MSVC)
+        set_source_files_properties(${_hub_dir}/play_hub.cpp src/native/graphics_menu_ui.cpp PROPERTIES COMPILE_OPTIONS /utf-8)
+    endif()
+    target_link_libraries(gtav PRIVATE Threads::Threads)
+    target_compile_definitions(gtav PRIVATE GTAV_DESKTOP_WORKSHOP=1)
+    target_sources(gtav PRIVATE src/sandbox/desktop.cpp src/sandbox/world.cpp
+        src/sandbox/protocol.cpp src/sandbox/session.cpp src/sandbox/courses.cpp src/sandbox/paths.cpp src/sandbox/scene.cpp src/sandbox/campaign.cpp)
+    include(WorkshopCore.cmake)
+    target_sources(gtav PRIVATE ${GTAV_WORKSHOP_CORE}
+        src/sandbox/CreativeRuntime.cpp src/sandbox/Tu27Workshop.cpp src/sandbox/BuildMenuUI.cpp
+        src/phone/PhoneShellUI.cpp src/phone/AdminCheatApp.cpp)
+    if(WIN32)
+        target_link_libraries(gtav PRIVATE ws2_32 bcrypt iphlpapi)
     endif()
 endif()
 
@@ -370,6 +402,37 @@ endif()
 add_dependencies(gtav gtav_native_shaders)
 endif()
 target_include_directories(gtav PRIVATE ${GTAV_NATIVE_SHADER_DIR})
+
+if(NOT ANDROID AND NOT GTAV_IOS)
+    if(NOT GTAV_PREBUILT_NATIVE_SHADERS)
+        include(cmake/native_contact_rays.cmake)
+        gtav_generate_contact_rays("${GTAV_NATIVE_SHADER_DIR}" ${GTAV_DXC})
+        add_custom_target(gtav_contact_rays_shader DEPENDS "${GTAV_NATIVE_SHADER_DIR}/native_contact_rays_ps.h")
+        add_dependencies(gtav gtav_contact_rays_shader)
+        target_compile_definitions(gtav PRIVATE GTAV_CONTACT_RAYS_SHADER=1)
+    elseif(EXISTS "${GTAV_PREBUILT_NATIVE_SHADERS}/native_contact_rays_ps.h")
+        target_compile_definitions(gtav PRIVATE GTAV_CONTACT_RAYS_SHADER=1)
+    else()
+        message(STATUS "Contact rays unavailable: prebuilt shader set has no native_contact_rays_ps.h")
+    endif()
+endif()
+
+if(WIN32)
+    set(GTAV_FSR_HEADERS native_fsr_easu_ps.h native_fsr_rcas_ps.h)
+    if(GTAV_PREBUILT_NATIVE_SHADERS)
+        foreach(header IN LISTS GTAV_FSR_HEADERS)
+            if(NOT EXISTS "${GTAV_PREBUILT_NATIVE_SHADERS}/${header}")
+                message(FATAL_ERROR "Update GTAV_PREBUILT_NATIVE_SHADERS: missing ${header}, or clear it to rebuild the shaders")
+            endif()
+        endforeach()
+    else()
+        include(cmake/native_fsr1.cmake)
+        gtav_generate_fsr1("${GTAV_NATIVE_SHADER_DIR}" ${GTAV_DXC})
+        list(TRANSFORM GTAV_FSR_HEADERS PREPEND "${GTAV_NATIVE_SHADER_DIR}/")
+        add_custom_target(gtav_fsr1_shaders DEPENDS ${GTAV_FSR_HEADERS})
+        add_dependencies(gtav gtav_fsr1_shaders)
+    endif()
+endif()
 
 # Background shader compiler tools (shader_compiler.cpp; build.cmd copies them on Windows):
 # <exe>/tools/XenosRecomp, dxc (a wrapper that sets the library path) and shader_common.h.

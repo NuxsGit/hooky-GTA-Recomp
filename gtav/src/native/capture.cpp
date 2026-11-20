@@ -14,6 +14,7 @@
 #include "shaders.h"
 #include "xenos_regs.h"
 
+#include <array>
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
@@ -108,6 +109,9 @@ REXCVAR_DEFINE_BOOL(gtav_native_pm4_scan, false, "GTAV",
 REXCVAR_DEFINE_INT32(gtav_native_layout_probe, 0, "GTAV",
                      "Log objects and register shadow for the first draws of this guest frame");
 
+
+REXCVAR_DECLARE(bool, gtav_native_trace_only);
+REXCVAR_DECLARE(bool, gtav_native_resolve_depth_clear);
 
 namespace gtav::native {
 namespace {
@@ -980,16 +984,17 @@ void OnClear(uint32_t device, uint32_t flags, uint32_t color, float z, uint32_t 
   g_packet.clears.push_back(c);
 }
 
-void OnResolve(uint32_t device, uint32_t flags, uint32_t rect, uint32_t dest_texture, uint32_t dest_point,
-               uint32_t clear_color, float clear_z, uint32_t level, uint32_t face) {
+ResolveCapture OnResolve(uint32_t device, uint32_t flags, uint32_t rect, uint32_t dest_texture, uint32_t dest_point,
+                         uint32_t clear_color, float clear_z, uint32_t level, uint32_t face) {
   FlushIndexedVertices();
-  if (!Active()) return;
+  if (!Active()) return {};
+  const uint8_t* dev = Guest(device);
   ResolveCommand r;
   r.flags = flags;
   r.dest_texture = dest_texture;
   r.dest_level = level;
   r.dest_face = face;
-  r.regs = g_packet.Push(Guest(device) + kRegShadowBegin, kRegShadowSize);
+  r.regs = g_packet.Push(dev + kRegShadowBegin, kRegShadowSize);
   if (rect) {
     const uint8_t* p = Guest(rect);
     for (int i = 0; i < 4; i++) r.source_rect[i] = be32(p + 4 * i);
@@ -1019,8 +1024,44 @@ void OnResolve(uint32_t device, uint32_t flags, uint32_t rect, uint32_t dest_tex
     uint32_t physical = REX_KERNEL_MEMORY()->GetPhysicalAddress(dword1 & 0xFFFFF000);
     if (physical != UINT32_MAX) dword1 = (dword1 & 0xFFF) | (physical & 0xFFFFF000);
   }
-  g_packet.commands.push_back({CommandKind::kResolve, uint32_t(g_packet.resolves.size()), WritePointer(device)});
+  const uint32_t index = uint32_t(g_packet.resolves.size());
+  g_packet.commands.push_back({CommandKind::kResolve, index, WritePointer(device)});
   g_packet.resolves.push_back(r);
+  if (!REXCVAR_GET(gtav_native_trace_only) &&
+      (!(flags & kResolveClearDepthStencil) || !REXCVAR_GET(gtav_native_resolve_depth_clear)))
+    return {};
+  return {index, be32(dev + d3d::kDevCmdWrite), be32(dev + d3d::kDevCmdLimit), be32(dev + d3d::kDevDepthStencil)};
+}
+
+void OnResolveEnd(uint32_t device, ResolveCapture capture) {
+  if (capture.index >= g_packet.resolves.size()) return;
+  auto& probe = g_packet.resolves[capture.index].probe;
+  const uint8_t* dev = Guest(device);
+  const uint8_t* shadow = dev + kRegShadowBegin;
+  probe.surface_after = xenos_regs::Read(shadow, xenos_regs::RB_SURFACE_INFO);
+  probe.depth_after = xenos_regs::Read(shadow, xenos_regs::RB_DEPTH_INFO);
+  probe.same_depth_surface = capture.depth_surface != 0 && capture.depth_surface == be32(dev + d3d::kDevDepthStencil);
+  probe.packets.scan = ResolveScan::kUnavailable;
+
+  // Only a short, contiguous slice written by this call. Do not guess what ran on a ring wrap,
+  // a Kick/submission to another buffer, or indirect/conditional execution.
+  constexpr uint32_t kMaxBytes = 4096;
+  const uint32_t end = be32(dev + d3d::kDevCmdWrite);
+  if (!capture.write || ((capture.write | end) & 3) || end < capture.write || end > capture.limit ||
+      capture.limit != be32(dev + d3d::kDevCmdLimit) || end - capture.write > kMaxBytes)
+    return;
+  const uint32_t bytes = end - capture.write;
+  if (!bytes) {
+    probe.packets.scan = ResolveScan::kNoCopy;
+    return;
+  }
+  std::array<uint8_t, kMaxBytes> packets;
+#ifdef _WIN32
+  if (!ReadProcessMemory(GetCurrentProcess(), Guest(capture.write), packets.data(), bytes, nullptr)) return;
+#else
+  if (!SafeReadMemory(packets.data(), Guest(capture.write), bytes)) return;
+#endif
+  probe.packets = ScanResolvePackets(std::span(packets.data(), bytes));
 }
 
 // D3D occlusion queries. With --gtav_native=on the command processor only fakes them (every query

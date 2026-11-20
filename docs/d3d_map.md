@@ -56,6 +56,14 @@ The D3D device is at **0x4004D500**: r3 of every device method.
 
 From the call sites of 83818300 in 83803228. Each block is a dense run of dwords, one per register, so register `reg` in a block lives at `dev + offset + 4 * (reg - base)`.
 
+Resolve diagnostics compare the API flags to **direct PM4 writes** in the call's command span,
+not to a potentially stale copy-control value in the D3D shadow. See ReXGlue's `RB_COPY_CONTROL`
+(`0x2318`, source in bits 0–2, independent color/depth clear bits 8/9) and `RB_DEPTH_CLEAR`
+(`0x231D`, depth in the high 24 bits and stencil in the low 8). A D3D Resolve can defer/indirect
+its commands or flush attachments at the call. The opt-in trial only uses corroborated direct
+copies; it does not infer a clear-stencil stack argument or substitute the post-call shadow for
+all resolves. See [the capture procedure](WINDOWS_GRAPHICS.md#compare-the-same-scene-with-a-text-only-f9-capture).
+
 ## Baseline (M0, emulated renderer, logs/stats0.log and probe0.log)
 - 30.0 fps steady: the game's own cap. Guest time blocked in Swap is about 0.01-0.03 ms per frame, so the emulated GPU keeps up with the cap.
 - Spikes: worst frames of 120-220 ms during boot and scene changes (pipeline creation). This matches the user's "small pauses at cutscenes".

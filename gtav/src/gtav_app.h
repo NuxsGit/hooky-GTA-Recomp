@@ -7,10 +7,17 @@
 #include <rex/input/input_system.h>
 #include <rex/rex_app.h>
 
+#include "debug_tools.h"
 #include "native/input.h"
+#include "native/menu.h"
 #include "native/renderer.h"
+#include "native/settings_runtime.h"
 #include "native/touch_controls.h"
+#include "sandbox/desktop.h"
 #include <rex/system/kernel_state.h>
+#ifdef GTAV_DESKTOP_WORKSHOP
+#include <rex/system/xam/content_manager.h>
+#endif
 #include <rex/ui/presenter.h>
 #include <rex/runtime.h>
 #include <rex/ui/windowed_app_context.h>
@@ -42,7 +49,14 @@ class GtavApp : public rex::ReXApp {
   }
 
   // Override virtual hooks for customization:
-  // void OnPostInitLogging() override {}
+  void OnPostInitLogging() override {
+    gtav::debug::InstallLogCapture();
+    gtav::native::settings::Initialize();
+  }
+  void OnPreLaunchModule() override {
+    gtav::native::settings::Player().BeginRun();
+    gtav::native::PrefetchPipelineCache();
+  }
   void OnPreSetup(rex::RuntimeConfig& config) override {
     gtav::native::input::Configure();
     config.input_factory = [](bool tool_mode) -> std::unique_ptr<rex::system::IInputSystem> {
@@ -59,6 +73,10 @@ class GtavApp : public rex::ReXApp {
   // GTAV_DUMP_IMAGE=<path>: write the loaded (title-update patched) guest image and exit.
   // Used to rescan the patched code for entry points the analyzer misses.
   void OnPostLoadXexImage() override {
+#ifdef GTAV_DESKTOP_WORKSHOP
+    if (!installed_content_root_.empty())
+      runtime()->kernel_state()->content_manager()->SetReadOnlyInstalledContentRoot(installed_content_root_);
+#endif
     const char* path = std::getenv("GTAV_DUMP_IMAGE");
     if (!path) return;
     auto* image = REX_KERNEL_MEMORY()->TranslateVirtual(0x82000000);
@@ -73,8 +91,12 @@ class GtavApp : public rex::ReXApp {
   void OnPostSetup() override {
     // Don't pass gameplay input through the native settings overlay, or replace the SDK's own gate.
     if (gtav::native::Active()) {
-      if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system()))
+      if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
         input->AddActiveCallback(gtav::native::input::GameplayActive);
+#ifdef _WIN32
+        input->SetBeforeStateCallback(gtav::native::PaceGuestInput);
+#endif
+      }
     }
     const char* dir = std::getenv("GTAV_SHOT_DIR");
     if (!dir) return;
@@ -105,9 +127,24 @@ class GtavApp : public rex::ReXApp {
   }
   void OnShutdown() override {
     shutting_down_ = true;
+    gtav::native::menu::FlushPendingSave(true);
+#ifdef _WIN32
+    gtav::native::StopGuestInputPacing();  // Drain a driver call before guest/input teardown.
+#endif
     gtav::native::input::Shutdown();
+#ifdef GTAV_DESKTOP_WORKSHOP
+    gtav::sandbox::Shutdown();
+#endif
   }
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if defined(GTAV_DESKTOP_WORKSHOP)
+  std::optional<rex::PathConfig> OnFinalizePaths(const rex::PathConfig& defaults,
+                                                std::function<void(rex::PathConfig)>) override {
+    auto paths = defaults;
+    if (gtav::sandbox::Configure(paths, installed_content_root_)) return paths;
+    app_context().QuitFromUIThread();
+    return std::nullopt;
+  }
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
   // iPhone release: the game data is installed on the phone by the setup screen (ios_setup.h) into
   // Documents/data, the Mac install's layout. A dev build passes its own roots in args.txt.
   std::optional<rex::PathConfig> OnFinalizePaths(const rex::PathConfig& defaults,
@@ -133,5 +170,8 @@ class GtavApp : public rex::ReXApp {
   // void OnConfigurePaths(rex::PathConfig& paths) override {}
 
  private:
+#ifdef GTAV_DESKTOP_WORKSHOP
+  std::filesystem::path installed_content_root_;
+#endif
   std::atomic<bool> shutting_down_{false};
 };

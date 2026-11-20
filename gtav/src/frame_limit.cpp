@@ -2,15 +2,21 @@
 //
 // The game paces itself in sub_827B5878: while less than N/60 s (N = the int at 0x8391D9D4,
 // 2 on the 360) passed since the last frame (timebase), it sleeps. N <= 0 skips the wait.
-// --gtav_fps_limit=30 (default) leaves the game's limiter alone; any other value sets N = 0
+// --gtav_fps_limit=30 (default) uses the game's limiter; any other value sets N = 0
 // and, unless 0 (uncapped), paces frames here to that rate instead. The game itself is not
 // the only limit: with the emulated GPU's vblank at 60 Hz (--vsync=true) other waits still
 // tie it to the display, so uncapped play also wants --vsync=false.
 
+#include "frame_pacing.h"
+
 #include <rex/cvar.h>
 #include <rex/hook.h>
+#include <rex/logging.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <mutex>
 #include <cstdint>
 #include <thread>
 
@@ -28,7 +34,24 @@ REXCVAR_DEFINE_BOOL(gtav_no_power_throttling, true, "GTAV",
                     "Windows: opt out of power throttling (EcoQoS / efficiency cores, ignored timer "
                     "resolution) while the window is hidden, minimized or in the background");
 
+REXCVAR_DEFINE_BOOL(gtav_fail_stock_pacing, true, "GTAV",
+                    "Use the stock guest limiter during the TU27 death/failure camera effect");
+
 namespace {
+
+using Clock = std::chrono::steady_clock;
+std::mutex failure_mutex;
+gtav::FailurePacing failure;
+std::atomic<int64_t> failure_until_ms{0};
+
+int64_t NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+}
+
+uint32_t Load32(const uint8_t* base, uint32_t addr) {
+  const uint8_t* p = base + addr;
+  return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
+}
 
 constexpr uint32_t kFrameIntervalVblanks = 0x8391D9D4;  // N: frame time in 1/60 s units
 // The audio update (sub_831D8A68, run by the thread in sub_82488170 that the main loop waits on
@@ -70,22 +93,54 @@ void ApplyPowerThrottling() {}
 
 }  // namespace
 
+namespace gtav {
+
+void NoteFailureEffect(int state) {
+  std::lock_guard lock(failure_mutex);
+  if (failure.Notify(state, NowMs())) {
+    failure_until_ms.store(failure.until_ms, std::memory_order_relaxed);
+    REXLOG_INFO("[mission] death/failure camera state {}", state);
+  }
+}
+
+bool InFailureEffect() {
+  const auto until = failure_until_ms.load(std::memory_order_relaxed);
+  return until != 0 && NowMs() < until;
+}
+
+}  // namespace gtav
+
 REX_EXTERN(__imp__sub_827B5878);
 REX_HOOK_RAW(sub_827B5878) {
   ApplyPowerThrottling();
-  int32_t limit = REXCVAR_GET(gtav_fps_limit);
-  if (limit == 30) {
-    __imp__sub_827B5878(ctx, base);
-    return;
+  // F1 edits this from the render thread. The registry query takes the same lock as the setter.
+  const int32_t selected = REXCVAR_QUERY(int32_t, gtav_fps_limit);
+  const bool compatibility = REXCVAR_GET(gtav_fail_stock_pacing) && gtav::InFailureEffect();
+  const int32_t limit = compatibility ? 30 : selected;
+  // This is the title's main frame limiter. Guest state is only accessed here, never from
+  // the render/UI thread. In particular, switching from uncapped to 30 must undo the writes.
+  static gtav::GuestPacing pacing;
+  const gtav::PacingValues live{int32_t(Load32(base, kFrameIntervalVblanks)), base[kAudioSyncTimedOut]};
+  const auto next_values = pacing.Update(live, limit == 30, REXCVAR_GET(gtav_audio_unsync));
+  if (next_values.interval != live.interval) Store32(base, kFrameIntervalVblanks, next_values.interval);
+  if (next_values.audio_timeout != live.audio_timeout) base[kAudioSyncTimedOut] = next_values.audio_timeout;
+  static bool was_compatibility = false;
+  if (compatibility != was_compatibility) {
+    REXLOG_INFO("[mission] {} (limit={}, guest interval={}, audio fallback={})",
+                compatibility ? "stock pacing during failure effect" : "failure pacing window ended",
+                limit, next_values.interval, next_values.audio_timeout);
+    was_compatibility = compatibility;
   }
-  Store32(base, kFrameIntervalVblanks, 0);
-  if (REXCVAR_GET(gtav_audio_unsync)) base[kAudioSyncTimedOut] = 1;
   __imp__sub_827B5878(ctx, base);
-  if (limit <= 0) return;
-  using clock = std::chrono::steady_clock;
-  static clock::time_point next = clock::now();
-  auto period = std::chrono::nanoseconds(1000000000 / limit);
-  auto now = clock::now();
+  static auto next = Clock::now();
+  static int32_t previous_limit = limit;
+  auto now = Clock::now();
+  if (limit != previous_limit) {
+    next = now;
+    previous_limit = limit;
+  }
+  if (limit <= 0 || limit == 30) return;
+  const auto period = std::chrono::nanoseconds(1'000'000'000 / limit);
   if (next > now) std::this_thread::sleep_until(next);
-  next = std::max(next + period, now);  // no catch-up after a long frame
+  next = std::max(next + period, now + period);  // don't catch up after a long frame
 }

@@ -23,34 +23,62 @@ What you need
   with disc002\default.xexp and disc002\update.rpf.
 - Windows 10/11 x64, a CPU with AVX2 (Intel Haswell / AMD Zen or newer), a GPU with current Vulkan drivers.
 - A keyboard and mouse, or a gamepad recognized by SDL.
-- About 25 GB free on this drive during setup (about 17 GB once installed), 8 GB RAM or more.
+- About 25 GB free on this drive during setup (about 17 GB once installed), 8 GB RAM or more recommended.
 
 First run
 ---------
-1. Unzip this folder somewhere with enough space and run gtav_launcher.exe.
-2. Pick Disc 1, Disc 2 and the title update, then press Install & build.
+1. Unzip the package and run gtav_launcher.exe. New installs open the installed launcher in
+   %USERPROFILE%\Games\GTAV Recomp. An existing portable install keeps using its own folder.
+2. Open Installation, pick Disc 1, Disc 2 and the title update, then press Installer et compiler.
 3. The launcher checks every file against known-good hashes, copies them into data\, generates
-   C++ from your game executable, compiles it into gtav_game.dll and removes the build files.
+   C++ from your game executable, compiles it into gtav_game.dll, and keeps a local compilation cache in data\build.
    This takes 15-30 minutes depending on your CPU.
-4. Press Play. The first minutes of play translate shaders in the background; some objects
+4. Press Choisir le mode. The first minutes of play translate shaders in the background; some objects
    can be missing until their shader is ready. They are kept in data\spirv for later runs.
 
-Later runs start the game directly. Hold Shift while starting the launcher (or pass --setup) to
-open setup and updates. The build log is data\logs\install.log.
+Later runs open Accueil. Use the sidebar for Installation, Mises à jour or Journaux.
+Open GTA V Recomp from the Start menu, or use --play in your own shortcut, to open the mode hub.
+You can remove the extracted download after installation. Choose --home with an absolute path to
+install elsewhere, or --portable to keep the release separate.
+
+Desktop Workshop (experimental)
+--------------------------------
+The illustrated play hub opens before the game starts: Campaign solo, Sandbox solo (default) and
+Private session (Sandbox multiplayer). Campaign co-op is visible but unavailable (no story sync).
+Arrow keys or D-pad select, Enter/A plays and Esc/B closes. Sandbox uses a separate profile: data\user\sandbox\profile. On the first sandbox
+run, complete the original game’s first-run screens and prologue before using free-roam tools.
+Press F6 in free roam: build and save layouts with props, set up checkpoint races or hunts,
+and spawn a test vehicle. In Private multiplayer, open F6 > Session > Host here (TCP port 30127
+by default). Select a reachable LAN/VPN address and use Copy invitation. Friends with a compatible
+Workshop build paste the invitation in Server and press Join friend. Keep the host game open.
+Nearby friends appear as ghost pedestrians or test vehicles. Use a trusted LAN/VPN. No encryption,
+automatic port forwarding, GTA Online, terrain editing or synced world physics. Details: docs/SANDBOX.md.
+Skip the selector for story mode with: gtav_launcher.exe --play -- --gtav_mode=campaign
 
 Recompile and update
 --------------------
-Choose Recompile (or run the launcher with --rebuild) to check the existing game data and build
-the game library without recopying the discs. Use Install & build when the data is missing or
+Choose Recompiler (or run the launcher with --rebuild) to check the existing game data and build
+the game library without recopying the discs. Use Installer et compiler when the data is missing or
 damaged. Recompile leaves your game data, saves and settings in place.
 
-Choose Check for updates (or --check-updates) to look for a newer stable release of this fork.
-When offered, open the GitHub release and download the named archive. No update is applied by
-the launcher. https://github.com/NuxsGit/hooky-GTA-Recomp/releases
-Quit the game and launcher. Unpack the new archive in a new folder and keep the old folder
-as a backup. Copy data/, gtav_game.dll, gtav.toml, gamecontrollerdb.txt and args.txt if present.
-Use the new folder's launcher and tools; don't copy the old runtime or tools over them.
-Recompile if the new launcher asks; compatible runtime-only updates can play immediately.
+In Mises à jour, Stable is recommended. Nightly contains experimental builds and requires
+confirmation to select from Stable. Automatique checks the chosen GitHub feed and downloads and
+installs a verified ZIP while this launcher is open and the game is closed. Turn it off to check and
+install on demand (Rechercher, Installer maintenant). ZIP local verifies a downloaded ZIP against
+the chosen feed. Run with --no-auto-update to pause automatic behavior for one launch.
+The launcher checks the asset size and SHA-256, updates package files only and restarts.
+A compatible runtime update requires no recompilation; otherwise existing verified objects are
+reused and only affected C++ files are compiled. The first rebuild from an older launcher may
+have no cache to reuse. Logs: data\logs\install.log and data\logs\update.log.
+https://github.com/NuxsGit/hooky-GTA-Recomp/releases
+
+For offline or draft packages: quit the game and launcher, then copy only the trusted package's
+contents into the existing folder. Do not delete data/ or the locally built game, caches and settings.
+If moving a portable install to Games, close everything and move the whole old folder to the empty
+Games/GTAV Recomp path before updating. Or run the newly unpacked launcher with --migrate-from
+"D:\path to old game" before creating the destination. That makes a one-time copy of your data
+and settings, leaves the original intact, and refuses to overwrite a non-empty folder.
+More: https://github.com/NuxsGit/hooky-GTA-Recomp/blob/main/docs/DESKTOP_INSTALL.md
 
 Controls
 --------
@@ -64,6 +92,23 @@ Default bindings (physical positions):
 - 1 or Mouse4 = LB; 3 or Mouse5 = RB; arrows = D-pad; Tab = Back; Esc = Start.
 F1 opens/closes the native settings overlay. Esc closes it when open. On an SDL gamepad use
 RB + Back to toggle it, D-pad and A to navigate, and B to close.
+Before playing: Graphismes > Préréglage graphique. Ultra improves scene and water sampling;
+Potato lowers scene resolution and memory use. Standard restores native detail. In game:
+F1 > Performance; quit and restart after choosing a preset there. Potato with Auto output opens
+at 540p. It still requires a compatible Vulkan driver (integrated GPUs can qualify); 4 GB RAM /
+1 GB shared graphics is an experimental target. F1 > Memory shows tracked caches and upload
+buffers, not total RAM/VRAM. F1 > Display also offers manual output sizes. Restart after changing
+Output or Scene scale. Output size is not native scene rendering size.
+AMD FSR 1 spatial upscaling can be toggled live, or left on Linear for less GPU work.
+F1 > Realism: adjustable material filtering up to 16x (restart) and experimental screen-space
+contact rays (quality and strength, live). Contact rays are off by default. When the renderer
+cannot identify matching scene depth and shadow inputs the original shadows are kept.
+This is not hardware ray tracing and does not replace textures or models.
+To report a rendering problem without dumping textures, start from PowerShell with:
+  .\gtav_launcher.exe --play -- --gtav_native_trace_only=true
+Press F9 when the problem appears; share logs\native_trace\frame_*.txt and the scene/settings.
+F2 (Fn + F2 on some keyboards) opens Debug: live logs and experimental offline story tools.
+Use a spare save. Closing it releases the camera and stops fly mode.
 If a pad isn't mapped, try the community gamecontrollerdb.txt from
 https://github.com/mdqinc/SDL_GameControllerDB next to the game executable. Customize keybind_*
 options and mnk_sensitivity in gtav.toml in the same folder. Set mnk_mode = false to opt out.
@@ -78,7 +123,7 @@ Play GTA V on an iPhone 12 or newer (iOS 17+). The phone cannot build the game i
 PC does it once (about 15 minutes); the phone then installs the game files from your discs.
 1. Set up and play the game here for a while first (the phone gets the shaders the PC has seen:
    drive around, go indoors).
-2. Hold Shift while starting gtav_launcher.exe and press "Build for iPhone". When it is done,
+2. In Installation, press "Construire pour iPhone". When it is done,
    Explorer shows iphone\GTAV.ipa.
 3. Drag GTAV.ipa into Sideloadly (sideloadly.io) with the iPhone plugged in, and sign in with
    your Apple ID. (A free Apple ID has to re-sign every 7 days.)
@@ -94,7 +139,7 @@ Play GTA V on an Android phone with a recent Snapdragon (tested: Galaxy S23 FE, 
 and about 40 GB free during setup. The app has no game in it: this PC builds your game code for
 the phone once (about 15-30 minutes), and the phone installs the game files from your discs.
 1. Set up and play the game here for a while first (the phone gets the shaders the PC has seen).
-2. Hold Shift while starting gtav_launcher.exe and press "Build for Android". When it is done,
+2. In Installation, press "Construire pour Android". When it is done,
    Explorer shows android\gtav-android-pack.zip (android\GTAV.apk is next to it).
 3. Copy GTAV.apk, gtav-android-pack.zip, your Disc 1 ISO, Disc 2 ISO and the TU file to the
    phone (for example its Download folder).

@@ -7,9 +7,16 @@
 #include "capture.h"
 #include "frame.h"
 #include "input.h"
+#include "input_pacing.h"
 #include "menu.h"
 #include "paths.h"
+#include "pipeline_cache_io.h"
 #include "shader_compiler.h"
+#include "settings_runtime.h"
+#ifdef GTAV_DESKTOP_WORKSHOP
+#include "../sandbox/CreativeRuntime.h"
+#include "../sandbox/desktop.h"
+#endif
 
 #include <plume_render_interface.h>
 
@@ -34,6 +41,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <set>
 #include <unordered_map>
 #include <memory>
@@ -48,6 +56,16 @@
 
 REXCVAR_DEFINE_STRING(gtav_native, "off", "GTAV", "Native renderer: off | shadow | on");
 REXCVAR_DEFINE_BOOL(gtav_native_vsync, true, "GTAV", "Native renderer: wait for vertical sync when presenting");
+REXCVAR_DEFINE_BOOL(gtav_native_low_memory, false, "GTAV",
+                    "Desktop native renderer: smaller caches and upload chunks, one GPU frame in flight, load shaders on demand (restart)");
+#ifdef _WIN32
+REXCVAR_DEFINE_INT32(gtav_native_output, -1, "GTAV",
+                     "Windows output height: -1 (Auto) | 540 | 720 | 1080 | 1440 | 2160 | 0 (borderless desktop)");
+REXCVAR_DEFINE_BOOL(gtav_native_fsr1, false, "GTAV", "Windows: AMD FSR 1 spatial upscaling of the SDR front buffer");
+REXCVAR_DEFINE_BOOL(gtav_native_fsr1_sharpen, true, "GTAV", "Windows: sharpen FSR 1 output with RCAS (can be disabled live)");
+REXCVAR_DEFINE_BOOL(gtav_native_short_queue, false, "GTAV", "Windows: queue one guest frame instead of two (restart)");
+REXCVAR_DEFINE_BOOL(gtav_native_amd_anti_lag, false, "GTAV", "Windows: experimental VK_AMD_anti_lag input pacing (restart)");
+#endif
 REXCVAR_DEFINE_BOOL(gtav_native_exact_barriers, true, "GTAV",
                     "Native renderer: no TOP_OF_PIPE / BOTTOM_OF_PIPE next to other barrier stages (MoltenVK waits less)");
 #ifdef __ANDROID__
@@ -70,7 +88,7 @@ REXCVAR_DEFINE_INT32(gtav_native_flicker_min_blocks, 6, "GTAV",
                      "Native renderer: --gtav_native_flicker_catch saves (up to 40) only glitches covering at "
                      "least this many 32-px blocks; smaller ones (often thin poles while driving) are only logged");
 REXCVAR_DEFINE_BOOL(gtav_native_replay, false, "GTAV",
-                    "Native renderer: keep the last 90 presented frames; F8 writes them to logs/replay");
+                    "Native renderer: keep the last 90 presented frames; F8 (Shift+F8 in Workshop) writes them to logs/replay");
 REXCVAR_DEFINE_BOOL(gtav_native_fps, false, "GTAV", "Native renderer: on-screen frames-per-second counter");
 REXCVAR_DEFINE_BOOL(gtav_native_hidden, false, "GTAV",
                     "Native renderer: keep every game window hidden (unattended test runs)");
@@ -79,10 +97,16 @@ REXCVAR_DEFINE_STRING(gtav_native_device, "NVIDIA", "GTAV",
 REXCVAR_DEFINE_STRING(gtav_native_spirv_dir, "", "GTAV",
                       "Directory of precompiled shaders (<vs|ps>_<hash>.spv); default derive/native/census1/spirv");
 
+REXCVAR_DECLARE(bool, gtav_native_trace_only);
+
 namespace plume {
 std::unique_ptr<RenderInterface> CreateVulkanInterface();  // SDL3 build: window comes later
 void SetVulkanPipelineCacheData(std::vector<uint8_t> data);  // plume-gtav.patch
 std::vector<uint8_t> GetVulkanPipelineCacheData(RenderDevice* device);
+#ifdef _WIN32
+std::unique_ptr<RenderDevice> CreateVulkanDevice(RenderInterface* render_interface, const std::string& preferred, bool request_anti_lag);
+bool VulkanAntiLagBeforeInput(RenderDevice* device);
+#endif
 extern uint32_t g_statRenderPasses, g_statBarriers;  // plume-gtav.patch
 extern bool g_exactBarrierStages;
 extern bool g_clearLoadOps;
@@ -143,6 +167,14 @@ const bool g_plume_input_attachments = (plume::g_colorInputAttachments = [] {
 // frame is ever dropped: the game renders some textures once (static shadow-map caches, ...) and
 // reuses them for many frames, so a dropped frame lost them for good.
 constexpr size_t kMaxQueuedFrames = 2;
+size_t QueueLimit() {
+#ifdef _WIN32
+  static const size_t limit = REXCVAR_GET(gtav_native_short_queue) ? 1 : kMaxQueuedFrames;
+  return limit;
+#else
+  return kMaxQueuedFrames;
+#endif
+}
 // Two frames in flight + one being presented. Android lets an app hold only
 // (images - minImageCount + 1) images before presenting (minImageCount is 3 on Adreno), so it needs
 // more images or vkAcquireNextImageKHR blocks forever with frames still in flight.
@@ -221,11 +253,20 @@ class Renderer {
     }
   }
 
+  void PrefetchPipelineCache() {
+    if (REXCVAR_GET(gtav_native_low_memory) || pipeline_cache_seed_.valid()) return;
+    try {
+      pipeline_cache_seed_ = std::async(std::launch::async, ReadDriverCache);
+    } catch (const std::system_error&) {
+      // Thread unavailable: fall back to the regular read at device creation.
+    }
+  }
+
   void Submit(FramePacket&& packet) {
     if (!started_.exchange(true)) thread_ = std::thread([this] { ThreadMain(); });
     {
       std::unique_lock lock(mutex_);
-      space_cv_.wait(lock, [this] { return queue_.size() < kMaxQueuedFrames || failed_; });
+      space_cv_.wait(lock, [this] { return queue_.size() < QueueLimit() || failed_; });
       if (failed_) {  // no renderer: nothing will drain the queue
         dropped_++;
         Recycle(std::move(packet));
@@ -235,6 +276,22 @@ class Renderer {
     }
     cv_.notify_one();
   }
+
+#ifdef _WIN32
+  void PaceGuestInput(uint32_t user_index) {
+    if (user_index != 0 || !input_pacing_.Ready()) return;
+    input_pacing_.TryPace(GuestFrame(), [this] {
+      return input::GameplayActive() && GetForegroundWindow() == window_ &&
+             IsWindowVisible(window_) && !IsIconic(window_);
+    }, [this] {
+      if (plume::VulkanAntiLagBeforeInput(device_.get())) anti_lag_called_.store(true, std::memory_order_relaxed);
+    });
+  }
+
+  void StopGuestInputPacing() { input_pacing_.Stop(); }
+
+  ~Renderer() { StopGuestInputPacing(); }
+#endif
 
   FramePacket TakeSpare() {
     std::lock_guard lock(mutex_);
@@ -255,18 +312,56 @@ class Renderer {
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // F9 (dump the next frame to logs/native_dump) and F10 (screenshot to logs/shots) are polled
     // by the window thread's timer, so they work from the SDK's window too (shadow mode).
-    // F1 toggles the settings overlay; Esc closes it or pauses the game.
+    // F1 settings, F2 debug. Esc closes the active overlay or pauses the game.
     switch (msg) {
       case WM_MOUSEMOVE: menu::OnMouseMove(float(short(LOWORD(lp))), float(short(HIWORD(lp)))); break;
       case WM_LBUTTONDOWN: case WM_LBUTTONUP: menu::OnMouseButton(0, msg == WM_LBUTTONDOWN); break;
       case WM_RBUTTONDOWN: case WM_RBUTTONUP: menu::OnMouseButton(1, msg == WM_RBUTTONDOWN); break;
       case WM_MOUSEWHEEL: menu::OnMouseWheel(float(GET_WHEEL_DELTA_WPARAM(wp)) / WHEEL_DELTA); break;
+#ifdef GTAV_DESKTOP_WORKSHOP
+      case WM_CHAR:
+        if (menu::TextPanel()) { menu::OnText16(uint32_t(wp)); return 0; }
+        break;
+#endif
       case WM_KEYDOWN:
       case WM_KEYUP: {
         bool down = msg == WM_KEYDOWN;
-        if (wp == VK_F1 || (wp == VK_ESCAPE && menu::IsOpen())) {
+#ifdef GTAV_DESKTOP_WORKSHOP
+        if (wp == VK_F6 && down && !(lp & (1L << 30)) && menu::ToggleWorkshop()) {
+          input::UpdateMouseCapture(hwnd);
+          return 0;
+        }
+        const bool pressed = down && !(lp & (1L << 30));
+        if (pressed && wp == VK_F8 && !(GetKeyState(VK_SHIFT) & 0x8000) && menu::ToggleBuild()) {
+          input::UpdateMouseCapture(hwnd);
+          return 0;
+        }
+        if (pressed && (wp == 'P' || wp == VK_UP) && menu::OpenPhone()) {
+          input::UpdateMouseCapture(hwnd);
+          return 0;
+        }
+        if (menu::TextPanel()) {
+          using K = menu::Key;
+          switch (wp) {
+            case VK_BACK: menu::OnKey(K::kBackspace, down); break;
+            case VK_DELETE: menu::OnKey(K::kDelete, down); break;
+            case VK_HOME: menu::OnKey(K::kHome, down); break;
+            case VK_END: menu::OnKey(K::kEnd, down); break;
+            case VK_CONTROL: menu::OnKey(K::kCtrl, down); break;
+            case VK_SHIFT: menu::OnKey(K::kShift, down); break;
+            case 'A': menu::OnKey(K::kA, down); break;
+            case 'C': menu::OnKey(K::kC, down); break;
+            case 'V': menu::OnKey(K::kV, down); break;
+            case 'X': menu::OnKey(K::kX, down); break;
+            case 'Y': menu::OnKey(K::kY, down); break;
+            case 'Z': menu::OnKey(K::kZ, down); break;
+          }
+        }
+#endif
+        if (wp == VK_F1 || wp == VK_F2 || (wp == VK_ESCAPE && menu::IsOpen())) {
           if (down && !(lp & (1L << 30))) {
             if (wp == VK_F1) menu::Toggle();
+            else if (wp == VK_F2) menu::ToggleDebug();
             else menu::Close();
             input::UpdateMouseCapture(hwnd);
           }
@@ -284,6 +379,9 @@ class Renderer {
     }
     if (input::HandleMessage(hwnd, msg, wp, lp)) return TRUE;
     if (msg == WM_CLOSE) {  // the native window is the game window: closing it quits
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (sandbox::Active()) workshop::Stop();  // flush pending JSON before the Win32 direct exit
+#endif
       REXLOG_INFO("[native] window closed, exiting");
       ExitProcess(0);
     }
@@ -318,17 +416,50 @@ class Renderer {
     bool done = false;
     window_thread_ = std::thread([&, this] {
       const bool on = REXCVAR_GET(gtav_native) == "on";
+      // The requested dimensions are physical client pixels, not scaled desktop units.
+      SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
       WNDCLASSEXW wc{sizeof(wc)};
       wc.lpfnWndProc = WndProc;
       wc.hInstance = GetModuleHandleW(nullptr);
       wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW
       wc.lpszClassName = L"GtavNative";
       RegisterClassExW(&wc);
-      RECT rc{0, 0, 1280, 720};
-      AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
-      HWND hwnd = CreateWindowExW(0, wc.lpszClassName, on ? L"GTA V" : L"GTA V - native renderer (shadow)",
-                                  WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left,
+      const OutputMode mode = window_mode_;
+      MONITORINFO monitor{sizeof(monitor)};
+      const bool have_monitor = GetMonitorInfoW(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY),
+                                                &monitor);
+      auto extent = [](RECT r) -> Extent { return {uint32_t(r.right - r.left), uint32_t(r.bottom - r.top)}; };
+      const bool borderless = have_monitor && UseBorderless(mode, extent(monitor.rcMonitor));
+      const DWORD style = borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
+      const Extent initial = mode == OutputMode::k540p ? OutputPreset(mode) : Extent{1280, 720};
+      RECT rc{0, 0, LONG(initial.width), LONG(initial.height)};
+      AdjustWindowRect(&rc, style, FALSE);
+      HWND hwnd = CreateWindowExW(0, wc.lpszClassName, on ? L"GTA V" : L"GTA V - native renderer (shadow)", style,
+                                  have_monitor ? monitor.rcMonitor.left : CW_USEDEFAULT,
+                                  have_monitor ? monitor.rcMonitor.top : CW_USEDEFAULT, rc.right - rc.left,
                                   rc.bottom - rc.top, nullptr, nullptr, wc.hInstance, nullptr);
+      if (hwnd && have_monitor) {
+        const RECT area = borderless ? monitor.rcMonitor : monitor.rcWork;
+        int width = area.right - area.left, height = area.bottom - area.top;
+        int x = area.left, y = area.top;
+        if (!borderless) {
+          RECT chrome{0, 0, 0, 0};
+          if (!AdjustWindowRectExForDpi(&chrome, style, FALSE, 0, GetDpiForWindow(hwnd)))
+            AdjustWindowRect(&chrome, style, FALSE);
+          const int dx = chrome.right - chrome.left, dy = chrome.bottom - chrome.top;
+          const Extent client = WindowedClient(mode, {uint32_t(std::max(1, width - dx)),
+                                                      uint32_t(std::max(1, height - dy))});
+          x += (width - int(client.width) - dx) / 2;
+          y += (height - int(client.height) - dy) / 2;
+          width = int(client.width) + dx;
+          height = int(client.height) + dy;
+        }
+        SetWindowPos(hwnd, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+        RECT actual{};
+        if (GetClientRect(hwnd, &actual))
+          REXLOG_INFO("[native] Windows output: requested {}, client {}x{} ({})", int32_t(mode),
+                      actual.right, actual.bottom, borderless ? "borderless" : "windowed");
+      }
       {
         std::lock_guard lock(m);
         window_ = hwnd;
@@ -357,7 +488,11 @@ class Renderer {
             bool ours = pid == GetCurrentProcessId();
             bool f9 = ours && (GetAsyncKeyState(VK_F9) & 0x8000), f10 = ours && (GetAsyncKeyState(VK_F10) & 0x8000);
             bool f11 = ours && (GetAsyncKeyState(VK_F11) & 0x8000), f8 = ours && (GetAsyncKeyState(VK_F8) & 0x8000);
-            if (f8 && !f8_down) key_replay_ = true;
+            if (f8 && !f8_down
+#ifdef GTAV_DESKTOP_WORKSHOP
+                && (!sandbox::Active() || (GetAsyncKeyState(VK_SHIFT) & 0x8000))
+#endif
+            ) key_replay_ = true;
             if (f9 && !f9_down) key_dump_ = true;
             if (f10 && !f10_down) key_shot_ = true;
             if (f11 && !f11_down) CycleDiagMode();
@@ -378,12 +513,23 @@ class Renderer {
 #endif
 
   bool Init() {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    constexpr uint64_t kDefaultChunk = 32 * kMiB;
+#else
+    constexpr uint64_t kDefaultChunk = 64 * kMiB;
+#endif
+#ifdef GTAV_DESKTOP_WORKSHOP
+    memory_ = MakeGraphicsMemoryPolicy(REXCVAR_GET(gtav_native_low_memory), kDefaultChunk);
+#else
+    memory_ = MakeGraphicsMemoryPolicy(false, kDefaultChunk);
+#endif
 #ifdef __ANDROID__
     // Plume reports its Vulkan failures on stderr, which Android discards.
     std::freopen((ExeDir() / "logs" / "stderr.txt").string().c_str(), "w", stderr);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
 #endif
 #ifdef _WIN32
+    window_mode_ = ParseOutputMode(REXCVAR_GET(gtav_native_output), memory_.lean);
     if (!CreateNativeWindow()) return false;
 #else
     SDL_RunOnMainThread(
@@ -430,7 +576,8 @@ class Renderer {
             }
           }
 #else
-          r->window_ = SDL_CreateWindow(on ? "GTA V" : "GTA V - native renderer (shadow)", 1280, 720,
+          const auto size = OutputPreset(ParseOutputMode(-1, r->memory_.lean));
+          r->window_ = SDL_CreateWindow(on ? "GTA V" : "GTA V - native renderer (shadow)", int(size.width), int(size.height),
                                         SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE |
                                             (REXCVAR_GET(gtav_native_hidden) ? SDL_WINDOW_HIDDEN : 0));
 #endif
@@ -472,7 +619,11 @@ class Renderer {
           SDL_AddEventWatch(
               [](void*, SDL_Event* e) {
                 if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {
-                  if (e->key.scancode == SDL_SCANCODE_F8) key_replay_ = true;
+                  if (e->key.scancode == SDL_SCANCODE_F8
+#ifdef GTAV_DESKTOP_WORKSHOP
+                      && (!sandbox::Active() || (e->key.mod & SDL_KMOD_SHIFT))
+#endif
+                  ) key_replay_ = true;
                   if (e->key.scancode == SDL_SCANCODE_F9) key_dump_ = true;
                   if (e->key.scancode == SDL_SCANCODE_F10) key_shot_ = true;
                   if (e->key.scancode == SDL_SCANCODE_F11) CycleDiagMode();
@@ -489,7 +640,8 @@ class Renderer {
 #endif
     interface_ = plume::CreateVulkanInterface();
     if (!interface_) {
-      REXLOG_ERROR("[native] Plume Vulkan interface creation failed");
+      REXLOG_ERROR("[native] Could not start Vulkan. Install a compatible Vulkan 1.2 driver/loader. "
+                   "Potato reduces memory use; it does not provide a software renderer.");
       return false;
     }
     std::string preferred;
@@ -498,19 +650,35 @@ class Renderer {
       if (preferred.empty() && name.find(REXCVAR_GET(gtav_native_device)) != std::string::npos)
         preferred = name;
     }
-    LoadPipelineCache();
+    LoadPipelineCache();  // even on Potato: avoids driver compiles of already used pipelines
+#ifdef _WIN32
+    anti_lag_requested_ = REXCVAR_GET(gtav_native_amd_anti_lag);
+    const bool use_anti_lag = anti_lag_requested_ && REXCVAR_GET(gtav_native) == "on" &&
+                              !REXCVAR_GET(gtav_native_hidden) && !REXCVAR_GET(gtav_native_trace_only);
+    device_ = plume::CreateVulkanDevice(interface_.get(), preferred, use_anti_lag);
+#else
     device_ = interface_->createDevice(preferred);
+#endif
     if (!device_) {
-      REXLOG_ERROR("[native] Plume device creation failed");
+      REXLOG_ERROR("[native] Could not create a Vulkan device. Check the listed adapters and update the GPU driver. "
+                   "A compatible integrated GPU can work; no dedicated card is required by the presets.");
       return false;
     }
     REXLOG_INFO("[native] using {}", device_->getDescription().name);
     {
       const auto& caps = device_->getCapabilities();
-      REXLOG_INFO("[native] device caps: geometry shader {}, descriptor indexing {}, scalar layout {}, "
-                  "buffer device address {}, present wait {}",
-                  caps.geometryShader, caps.descriptorIndexing, caps.scalarBlockLayout,
-                  caps.bufferDeviceAddress, caps.presentWait);
+      REXLOG_INFO("[native] device caps: geometry shader {}, descriptor indexing {}, sampled-image update-after-bind {}, "
+                  "scalar layout {}, buffer device address {}, max anisotropy {}, present wait {}",
+                  caps.geometryShader, caps.descriptorIndexing, caps.sampledImageUpdateAfterBind, caps.scalarBlockLayout,
+                  caps.bufferDeviceAddress, caps.maxSamplerAnisotropy, caps.presentWait);
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (!caps.descriptorIndexing || !caps.sampledImageUpdateAfterBind || !caps.bufferDeviceAddress) {
+        REXLOG_ERROR("[native] '{}' lacks required Vulkan features (descriptor indexing with sampled-image update-after-bind, "
+                     "or buffer device address). Potato uses the same renderer; try a compatible adapter/driver.",
+                     device_->getDescription().name);
+        return false;
+      }
+#endif
     }
     queue_cmd_ = device_->createCommandQueue(plume::RenderCommandListType::DIRECT);
     // Init steps are logged: a cold first boot after a rebuild sometimes never got past here.
@@ -523,13 +691,12 @@ class Renderer {
             window_,
 #endif
             kSwapchainFormat, kSwapchainBuffers));
-    menu::LoadSettings();
     vsync_ = REXCVAR_GET(gtav_native_vsync);
     swapchain_->setVsyncEnabled(vsync_);
     REXLOG_INFO("[native] init: swap chain created, resizing");
     swapchain_->resize();
     REXLOG_INFO("[native] init: swap chain {}x{}", swapchain_->getWidth(), swapchain_->getHeight());
-    for (uint32_t i = 0; i < Backend::kFramesInFlight; i++) {
+    for (uint32_t i = 0; i < memory_.frame_slots; i++) {
       lists_[i] = queue_cmd_->createCommandList();
       present_lists_[i] = queue_cmd_->createCommandList();
       fences_[i] = device_->createCommandFence();
@@ -538,9 +705,17 @@ class Renderer {
     }
     CreateFramebuffers();
     REXLOG_INFO("[native] init: framebuffers created, backend init");
-    backend_ok_ = backend_.Init(device_.get());
+    backend_ok_ = backend_.Init(device_.get(), memory_);
     REXLOG_INFO("[native] init: done");
-    if (!backend_ok_) REXLOG_ERROR("[native] backend init failed; showing clear color only");
+    if (!backend_ok_) REXLOG_ERROR("[native] Backend initialization failed (check Vulkan feature/descriptor limits and "
+                                  "available memory); showing clear color only");
+#ifdef _WIN32
+    const auto& caps = device_->getCapabilities();
+    REXLOG_INFO("[graphics] Vulkan VSync requested={}, active={}; guest queue={}; AMD Anti-Lag requested={}, feature={}, enabled={}",
+                vsync_, swapchain_->isVsyncEnabled(), QueueLimit(), anti_lag_requested_, caps.amdAntiLagSupported,
+                caps.amdAntiLagEnabled);
+    if (backend_ok_ && caps.amdAntiLagEnabled) input_pacing_.Enable();
+#endif
     return true;
   }
 
@@ -613,34 +788,42 @@ class Renderer {
 
   // Vulkan pipeline cache, persisted next to the exe so pipelines compiled once load in about a
   // millisecond on later runs. Saved periodically (the game exits without unwinding).
-  std::filesystem::path PipelineCachePath() { return ExeDir() / "shader_cache" / "vk_pipelines.bin"; }
+  static std::filesystem::path PipelineCachePath() { return ExeDir() / "shader_cache" / "vk_pipelines.bin"; }
+
+  static std::vector<uint8_t> ReadDriverCache() {
+    if (auto bytes = ReadCacheBytes(PipelineCachePath(), kDriverCacheLimit)) return std::move(*bytes);
+    REXLOG_WARN("[native] Vulkan pipeline cache unreadable or oversized; starting with a cold driver cache");
+    return {};
+  }
 
   void LoadPipelineCache() {
-    std::vector<uint8_t> data;
-    if (FILE* f = std::fopen(PipelineCachePath().string().c_str(), "rb")) {
-      std::fseek(f, 0, SEEK_END);
-      data.resize(size_t(std::max(0L, std::ftell(f))));
-      std::fseek(f, 0, SEEK_SET);
-      if (std::fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
-      std::fclose(f);
-    }
-    REXLOG_INFO("[native] pipeline cache: {} KB loaded", data.size() / 1024);
+    const bool prefetched = pipeline_cache_seed_.valid();
+    const auto start = std::chrono::steady_clock::now();
+    auto data = prefetched ? pipeline_cache_seed_.get() : ReadDriverCache();
+    const double wait_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    REXLOG_INFO("[native] pipeline cache: {} KB loaded ({}; {:.2f} ms on render thread)",
+                data.size() / 1024, prefetched ? "prefetch" : "direct read", wait_ms);
     plume::SetVulkanPipelineCacheData(std::move(data));
   }
+
+  std::future<std::vector<uint8_t>> pipeline_cache_seed_;
 
   void MaybeSavePipelineCache(uint32_t new_pipelines) {
     pipelines_since_save_ += new_pipelines;
     auto now = std::chrono::steady_clock::now();
-    if (!pipelines_since_save_ || now - last_cache_save_ < std::chrono::seconds(20)) return;
+    if (!pipelines_since_save_ || now - last_cache_save_ < std::chrono::seconds(20) ||
+        cache_writing_.exchange(true)) return;  // don't take a driver snapshot while a write is in progress
     last_cache_save_ = now;
     pipelines_since_save_ = 0;
     auto get_start = std::chrono::steady_clock::now();
     std::vector<uint8_t> data = plume::GetVulkanPipelineCacheData(device_.get());
     double get_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - get_start).count();
-    if (data.empty()) return;
+    if (data.empty() || data.size() > kDriverCacheLimit) {
+      cache_writing_ = false;
+      return;
+    }
     // The file is written by a background thread: ~33 MB on the busy E: disk took ~2 s, a freeze
     // every 20 s while the renderer (and so the guest, through the swap wait) waited for it.
-    if (cache_writing_.exchange(true)) return;  // the previous save is still being written
     std::thread([this, data = std::move(data), get_ms] {
       auto start = std::chrono::steady_clock::now();
       std::error_code ec;
@@ -811,15 +994,15 @@ class Renderer {
     flick_hist_notes_[flick_hist_n_ - 1] = std::move(flick_notes_[slot]);
   }
 
-  // F8 (--gtav_native_replay): the last kReplayFrames presented frames, written on a worker
+  // Replay dump (Campaign F8 / Workshop Shift+F8): the last kReplayFrames, written on a worker
   // thread to logs/replay/<frame>/ as PPM with each frame's counters in frames.txt.
   void WriteReplay(uint64_t now) {
     if (!REXCVAR_GET(gtav_native_replay)) {
-      REXLOG_INFO("[native] F8: replay is off (--gtav_native_replay=true)");
+      REXLOG_INFO("[native] replay is off (--gtav_native_replay=true)");
       return;
     }
     std::string dir = fmt::format("{}/{:06}", LogPath("replay"), now);
-    REXLOG_INFO("[native] F8: writing the last {} frames to {}", replay_.size(), dir);
+    REXLOG_INFO("[native] replay: writing the last {} frames to {}", replay_.size(), dir);
     std::thread([frames = std::move(replay_), dir] {
       std::error_code ec;
       std::filesystem::create_directories(dir, ec);
@@ -892,11 +1075,12 @@ class Renderer {
 
   void RetireAll() {
     submitter_.Drain();
-    for (uint32_t i = 0; i < Backend::kFramesInFlight; i++) Retire((slot_ + i) % Backend::kFramesInFlight);
+    uint32_t slot = slot_;
+    for (uint32_t i = 0; i < memory_.frame_slots; i++, slot = NextFrameSlot(slot, memory_)) Retire(slot);
   }
 
-  // Two frames in flight: frame N+1 is recorded while the GPU runs frame N, so a frame costs
-  // max(record, GPU) instead of record + GPU. Shot and dump frames are waited for at once.
+  // Normally two frames in flight, so recording and GPU work overlap. The lean path waits for
+  // the same slot to retire before reuse. Shot and dump frames are waited for at once.
   void Present(const FramePacket& frame) {
 #ifndef _WIN32
     input::UpdateMouseCapture();
@@ -987,7 +1171,7 @@ class Renderer {
         std::getline(in, line);
         in.close();
         std::filesystem::remove(set, ec);
-        if (auto eq = line.find('='); eq != std::string::npos) menu::TestSet(line.substr(0, eq), line.substr(eq + 1));
+        if (auto eq = line.find('='); eq != std::string::npos) settings::TestSet(std::string_view(line).substr(0, eq), std::string_view(line).substr(eq + 1));
       }
       // logs/diag_mode (a mode number): sets the F11 tree diagnostic, then is removed.
       auto diag = std::filesystem::path(LogPath("diag_mode"));
@@ -1001,7 +1185,7 @@ class Renderer {
       }
     }
     if (backend_ok_ && key_dump_.exchange(false)) {
-      if (REXCVAR_GET(gtav_native) == "shadow") {
+      if (!REXCVAR_GET(gtav_native_trace_only) && REXCVAR_GET(gtav_native) == "shadow") {
         // The emulated renderer dumps a window of frames from now on (logs/emu_dump, SDK patch;
         // its resolves are only readable with readback on, switched on around the dump). The native
         // dump is taken a few frames later so that it falls inside that window: the tools then find
@@ -1026,7 +1210,6 @@ class Renderer {
       rex::cvar::SetFlagByName("readback_resolve", readback_restore_);
       readback_restore_.clear();
     }
-    uint32_t front_descriptor = 0;
     auto record_start = std::chrono::steady_clock::now();
     // GTAV_NATIVE_NO_BACKEND=1: present only a clear (bisects GPU hangs between the game's frame
     // and the swap chain path).
@@ -1038,8 +1221,8 @@ class Renderer {
       deferred_->Begin(list_);
       record_list = deferred_.get();
     }
-    plume::RenderTexture* front =
-        backend_ok_ && !no_backend ? backend_.Execute(frame, record_list, &front_descriptor) : nullptr;
+    const FrontBuffer front = backend_ok_ && !no_backend ? backend_.Execute(frame, record_list) : FrontBuffer{};
+    const uint32_t front_descriptor = front.descriptor;
     if (deferred) timing_.replay_wait_sum += deferred_->Finish();
     // The frame's rendering goes to the GPU now, in a command buffer of its own; only the copy
     // into the window waits for a drawable. As one submission, the whole frame waited for the
@@ -1076,7 +1259,7 @@ class Renderer {
         queue_cmd_->executeCommandLists(&l, 1, nullptr, 0, nullptr, 0, fence);
       });
       in_flight_[slot] = true;
-      slot_ = (slot + 1) % Backend::kFramesInFlight;
+      slot_ = NextFrameSlot(slot, memory_);
       return;
     }
     auto acquire_end = std::chrono::steady_clock::now();
@@ -1131,7 +1314,12 @@ class Renderer {
       FlickerCapture(slot, frame.index, front_descriptor, w, h);
     }
     if (key_replay_.exchange(false)) WriteReplay(frame.index);
+    PresentationInfo presentation{front.size};
     if (front) {
+#ifdef _WIN32
+      presentation = backend_.PresentGame(list_, front, framebuffers_[image].get(), {w, h}, kSwapchainFormat,
+                                           REXCVAR_GET(gtav_native_fsr1), REXCVAR_GET(gtav_native_fsr1_sharpen));
+#else
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
       // Phone screens are wider than 16:9: keep the game's aspect ratio with black bars.
       {
@@ -1144,6 +1332,7 @@ class Renderer {
       backend_.Blit(list_, front_descriptor, kSwapchainFormat);
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
       list_->setViewports(plume::RenderViewport(0, 0, float(w), float(h)));
+#endif
 #endif
     } else {
       list_->clearColor(0, plume::RenderColor(0.12f, 0.0f, 0.12f, 1.0f));
@@ -1160,8 +1349,25 @@ class Renderer {
     if (backend_ok_ && REXCVAR_GET(gtav_native_fps))
       backend_.DrawCounter(list_, fps_value_, 8, 8, std::max(1u, h / 720), kSwapchainFormat);
     if (backend_ok_) {
+      presentation.vsync = swapchain_->isVsyncEnabled();
+      presentation.adapter = device_->getDescription().name;
+      presentation.scene_scale = backend_.RenderScale();
+      presentation.gpu_slots = memory_.frame_slots;
+      presentation.lean_memory = memory_.lean;
+      if (menu::IsOpen()) {
+        presentation.memory = backend_.MemoryStats();
+        presentation.realism = backend_.Realism();
+        presentation.pipelines = backend_.PipelineStatus();
+      }
+#ifdef _WIN32
+      presentation.boot_output = window_mode_;
+      presentation.queue_limit = uint32_t(QueueLimit());
+      const auto& caps = device_->getCapabilities();
+      presentation.anti_lag = DriverPacing(caps.amdAntiLagSupported, anti_lag_requested_, caps.amdAntiLagEnabled,
+                                          anti_lag_called_.load(std::memory_order_relaxed));
+#endif
       double frame_ms = fps_value_ ? 1000.0 / fps_value_ : 0.0;
-      if (ImDrawData* menu_data = menu::Frame(w, h, fps_value_, frame_ms))
+      if (ImDrawData* menu_data = menu::Frame(w, h, fps_value_, frame_ms, presentation))
         backend_.DrawMenu(list_, menu_data, kSwapchainFormat);
     }
     list_->barriers(plume::RenderBarrierStage::NONE,
@@ -1183,7 +1389,7 @@ class Renderer {
     auto submit_end = std::chrono::steady_clock::now();
     auto present_end = submit_end;
     in_flight_[slot] = true;
-    slot_ = (slot + 1) % Backend::kFramesInFlight;
+    slot_ = NextFrameSlot(slot, memory_);
     auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
     timing_.Add(ms(record_end - record_start), ms(wait_end - wait_start));
     last_record_ms_ = ms(record_end - record_start);
@@ -1202,10 +1408,11 @@ class Renderer {
     if (interval > kHitchMs && backend_ok_) {
       auto st = backend_.LastStats();
       REXLOG_INFO("[native] hitch {:.1f} ms at guest frame {}: record {:.1f} ms, wait {:.1f} ms, {} new pipelines, "
-                  "{} textures, {} draws (misses: shaders {:.1f} pipelines {:.1f} textures {:.1f} ms; resolves {:.1f} ms)",
+                  "{} textures, {} draws (misses: shaders {:.1f} pipelines {:.1f} textures {:.1f} ms; resolves {:.1f} ms; "
+                  "background pipeline wait {:.1f} ms)",
                   interval, frame.index, ms(record_end - record_start), ms(wait_end - wait_start),
                   st.pipelines_created, st.textures, st.draws, st.shader_ms, st.pipeline_ms, st.texture_ms,
-                  st.resolve_ms);
+                  st.resolve_ms, st.pipeline_wait_ms);
     }
     timing_.acquire_sum += ms(acquire_end - main_submit_end);
     timing_.submit_sum += ms(submit_end - record_end);
@@ -1415,6 +1622,12 @@ class Renderer {
       auto eq = spec.find('='), bar = spec.find('|');
       if (eq != std::string::npos && bar != std::string::npos && bar > eq) {
         ab_name_ = spec.substr(0, eq);
+        if (const auto key = settings::FindKey(ab_name_); key && settings::Spec(*key).restart) {
+          REXLOG_WARN("[native] A/B {}: restart-required setting; compare separate runs instead", ab_name_);
+          ab_name_.clear();
+          ab_phase_ = -1;
+          return;
+        }
         ab_values_[0] = spec.substr(eq + 1, bar - eq - 1);
         ab_values_[1] = spec.substr(bar + 1);
         REXLOG_INFO("[native] A/B {}: {} | {}", ab_name_, ab_values_[0], ab_values_[1]);
@@ -1448,7 +1661,7 @@ class Renderer {
   }
 
   static inline std::atomic<bool> key_dump_{false}, key_shot_{false};  // F9 / F10 (window thread)
-  static inline std::atomic<bool> key_replay_{false};                   // F8
+  static inline std::atomic<bool> key_replay_{false};                   // F8 / Shift+F8
   std::string readback_restore_;  // readback_resolve to restore after a shadow-mode F9 dump
   uint64_t readback_restore_at_ = 0;
   uint64_t native_dump_at_ = 0;  // guest frame to dump (F9; delayed in shadow mode)
@@ -1489,6 +1702,10 @@ class Renderer {
 
 #ifdef _WIN32
   HWND window_ = nullptr;
+  OutputMode window_mode_ = OutputMode::k720p;
+  bool anti_lag_requested_ = false;  // renderer startup only
+  std::atomic<bool> anti_lag_called_{false};
+  InputPacingGate input_pacing_;
   std::thread window_thread_;
 #else
   SDL_Window* window_ = nullptr;
@@ -1500,6 +1717,7 @@ class Renderer {
   plume::RenderWindow render_window_ = nullptr;  // ANativeWindow* of SDLActivity's surface
 #endif
 #endif
+  GraphicsMemoryPolicy memory_;  // sampled at renderer Init; never resized live
   std::unique_ptr<plume::RenderInterface> interface_;
   std::unique_ptr<plume::RenderDevice> device_;
   std::unique_ptr<plume::RenderCommandQueue> queue_cmd_;
@@ -1559,11 +1777,18 @@ Renderer g_renderer;
 
 bool Active() { return REXCVAR_GET(gtav_native) != "off"; }
 
+void PrefetchPipelineCache() { if (Active()) g_renderer.PrefetchPipelineCache(); }
+
 void Submit(FramePacket&& frame) { g_renderer.Submit(std::move(frame)); }
 
 void NoteGuestSwap(uint64_t frame_index) { g_renderer.NoteGuestSwap(frame_index); }
 
 FramePacket TakeSpare() { return g_renderer.TakeSpare(); }
+
+#ifdef _WIN32
+void PaceGuestInput(uint32_t user_index) { g_renderer.PaceGuestInput(user_index); }
+void StopGuestInputPacing() { g_renderer.StopGuestInputPacing(); }
+#endif
 
 }  // namespace gtav::native
 

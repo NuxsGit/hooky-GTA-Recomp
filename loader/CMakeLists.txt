@@ -12,6 +12,27 @@ if(NOT GTAV_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*
 endif()
 project(gtav_launcher VERSION ${GTAV_VERSION} LANGUAGES CXX)
 
+set(GTAV_STABLE_REPO "NuxsGit/hooky-GTA-Recomp" CACHE STRING "Trusted GitHub stable release repository (owner/name)")
+set(GTAV_NIGHTLY_REPO "${GTAV_STABLE_REPO}" CACHE STRING "Trusted GitHub nightly release repository (owner/name)")
+foreach(var IN ITEMS GTAV_STABLE_REPO GTAV_NIGHTLY_REPO)
+    if(NOT "${${var}}" MATCHES "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+        message(FATAL_ERROR "${var} must be a GitHub owner/repository, not a URL")
+    endif()
+endforeach()
+set(GTAV_NIGHTLY_BUILD "" CACHE STRING "Windows nightly build serial; empty for stable")
+set(GTAV_BUILD_VERSION "${PROJECT_VERSION}")
+if(NOT GTAV_NIGHTLY_BUILD STREQUAL "")
+    string(LENGTH "${GTAV_NIGHTLY_BUILD}" _nightly_length)
+    if(NOT WIN32 OR NOT GTAV_NIGHTLY_BUILD MATCHES "^[1-9][0-9]*$" OR _nightly_length GREATER 18)
+        message(FATAL_ERROR "GTAV_NIGHTLY_BUILD requires Windows and a positive build serial (max 18 digits)")
+    endif()
+    string(APPEND GTAV_BUILD_VERSION "-nightly.${GTAV_NIGHTLY_BUILD}")
+endif()
+function(gtav_update_definitions target)
+    target_compile_definitions(${target} PRIVATE GTAV_LAUNCHER_VERSION="${GTAV_BUILD_VERSION}"
+        GTAV_STABLE_REPO="${GTAV_STABLE_REPO}" GTAV_NIGHTLY_REPO="${GTAV_NIGHTLY_REPO}")
+endfunction()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -19,11 +40,15 @@ if(WIN32)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     add_executable(gtav_launcher WIN32
         src/main.cpp
+        src/windows_update.cpp
         src/install.cpp
         src/sources.cpp
         src/launcher.manifest)  # visual styles, DPI awareness, long paths
     target_compile_definitions(gtav_launcher PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(gtav_launcher PRIVATE comctl32 ole32 shell32 bcrypt winhttp)
+    target_link_libraries(gtav_launcher PRIVATE comctl32 gdi32 ole32 shell32 uuid bcrypt winhttp dwmapi)
+    if(MSVC)
+        target_compile_options(gtav_launcher PRIVATE /utf-8)
+    endif()
 elseif(APPLE)
     # GTAV.app: the launcher is the bundle's executable; the package (gtav_fast, dylibs, rexglue,
     # tools/) goes to Contents/Resources/gtav (tools/release/make_release_macos.py).
@@ -64,11 +89,12 @@ else()
     endif()
 endif()
 
-target_sources(gtav_launcher PRIVATE src/update.cpp src/update_http.cpp)
-target_compile_definitions(gtav_launcher PRIVATE GTAV_LAUNCHER_VERSION="${PROJECT_VERSION}")
+target_sources(gtav_launcher PRIVATE src/update.cpp src/update_http.cpp src/desktop_home.cpp src/campaign_config.cpp)
+gtav_update_definitions(gtav_launcher)
 # Release staging checks this sidecar to catch packaging a launcher built for another version.
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/launcher-build-version.in" CONTENT "${GTAV_BUILD_VERSION}\n" @ONLY)
 add_custom_command(TARGET gtav_launcher POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/VERSION"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/launcher-build-version.in"
             "${CMAKE_CURRENT_BINARY_DIR}/launcher-version.txt"
     VERBATIM)
 
@@ -97,8 +123,71 @@ if(GTAV_LAUNCHER_TESTS)
     enable_testing()
     add_executable(gtav_update_tests tests/update_tests.cpp src/update.cpp)
     target_include_directories(gtav_update_tests PRIVATE src)
-    target_compile_definitions(gtav_update_tests PRIVATE GTAV_LAUNCHER_VERSION="${PROJECT_VERSION}")
+    gtav_update_definitions(gtav_update_tests)
     add_test(NAME update_policy COMMAND gtav_update_tests)
+    add_executable(gtav_runtime_policy_tests tests/runtime_policy_tests.cpp)
+    target_include_directories(gtav_runtime_policy_tests PRIVATE ../gtav/src)
+    add_test(NAME runtime_policy COMMAND gtav_runtime_policy_tests)
+    add_executable(gtav_desktop_home_tests tests/desktop_home_tests.cpp src/desktop_home.cpp src/sources.cpp)
+    target_include_directories(gtav_desktop_home_tests PRIVATE src ../gtav/src)
+    if(WIN32)
+        target_compile_definitions(gtav_desktop_home_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_link_libraries(gtav_desktop_home_tests PRIVATE shell32)
+        if(MSVC)
+            target_compile_options(gtav_desktop_home_tests PRIVATE /utf-8)
+        endif()
+    endif()
+    add_test(NAME desktop_home COMMAND gtav_desktop_home_tests)
+    find_package(Threads REQUIRED)
+    set(_workshop ../gtav/src/sandbox)
+    add_executable(gtav_sandbox_tests tests/sandbox_tests.cpp
+        ${_workshop}/world.cpp ${_workshop}/protocol.cpp ${_workshop}/session.cpp
+        ${_workshop}/courses.cpp ${_workshop}/paths.cpp ${_workshop}/scene.cpp)
+    target_include_directories(gtav_sandbox_tests PRIVATE ${_workshop} ../gtav/src)
+    target_compile_definitions(gtav_sandbox_tests PRIVATE GTAV_DESKTOP_WORKSHOP=1)
+    target_link_libraries(gtav_sandbox_tests PRIVATE Threads::Threads)
+    if(WIN32)
+        target_compile_definitions(gtav_sandbox_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_link_libraries(gtav_sandbox_tests PRIVATE ws2_32 bcrypt iphlpapi)
+    endif()
+    add_test(NAME sandbox_loopback COMMAND gtav_sandbox_tests)
+    set_tests_properties(sandbox_loopback PROPERTIES TIMEOUT 25)
+    include(../gtav/WorkshopCore.cmake)
+    add_library(gtav_workshop_fixture_core STATIC ${GTAV_WORKSHOP_CORE})
+    target_include_directories(gtav_workshop_fixture_core PUBLIC ../gtav/src)
+    if(WIN32)
+        target_compile_definitions(gtav_workshop_fixture_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
+    add_executable(gtav_workshop_core_tests tests/workshop_core_tests.cpp)
+    target_link_libraries(gtav_workshop_core_tests PRIVATE gtav_workshop_fixture_core)
+    add_test(NAME workshop_core COMMAND gtav_workshop_core_tests)
+    add_executable(gtav_workshop_runtime_tests tests/workshop_runtime_tests.cpp ${_workshop}/CreativeRuntime.cpp)
+    target_compile_definitions(gtav_workshop_runtime_tests PRIVATE GTAV_DESKTOP_WORKSHOP=1)
+    target_link_libraries(gtav_workshop_runtime_tests PRIVATE gtav_workshop_fixture_core Threads::Threads)
+    add_test(NAME workshop_runtime COMMAND gtav_workshop_runtime_tests)
+    set_tests_properties(workshop_runtime PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        add_executable(gtav_windows_update_tests tests/windows_update_tests.cpp src/windows_update.cpp
+            src/update.cpp src/update_http.cpp src/install.cpp src/sources.cpp ../gtav/src/native/adreno_shader_fix.cpp)
+        target_include_directories(gtav_windows_update_tests PRIVATE src)
+        target_compile_definitions(gtav_windows_update_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+        gtav_update_definitions(gtav_windows_update_tests)
+        target_link_libraries(gtav_windows_update_tests PRIVATE user32 bcrypt winhttp)
+        add_test(NAME windows_update_transaction COMMAND gtav_windows_update_tests)
+
+        # An older launcher for the exact-package test. Only the HTTP transport is replaced;
+        # the dashboard timer, policy, installer, lock and restart helper are production code.
+        add_executable(gtav_launcher_update_fixture WIN32 src/main.cpp src/windows_update.cpp
+            src/update.cpp tests/update_transport_stub.cpp src/install.cpp src/sources.cpp src/desktop_home.cpp src/campaign_config.cpp
+            src/launcher.manifest ../gtav/src/native/adreno_shader_fix.cpp)
+        target_include_directories(gtav_launcher_update_fixture PRIVATE src)
+        target_compile_definitions(gtav_launcher_update_fixture PRIVATE
+            UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN GTAV_LAUNCHER_VERSION="0.0.0")
+        target_link_libraries(gtav_launcher_update_fixture PRIVATE comctl32 gdi32 ole32 shell32 uuid bcrypt dwmapi)
+        if(MSVC)
+            target_compile_options(gtav_launcher_update_fixture PRIVATE /utf-8)
+        endif()
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
         add_library(gtav_test_vulkan SHARED tests/vulkan_stub.cpp)

@@ -25,6 +25,7 @@ from release_metadata import launcher_version, prepare_output, write_metadata
 REPO = Path(__file__).resolve().parents[2]
 BUILD = REPO / "build-dll"
 XR = REPO / "thirdparty" / "XenosRecomp"
+PLUME = REPO / "thirdparty" / "plume"
 SDL_DLL = "SDL3rd.dll"
 
 # (source, destination below OUT_DIR)
@@ -51,7 +52,14 @@ FILES = [
 
 LICENSES = [
     (REPO / "LICENSE", "gtav-recomp-GPL-3.0.txt"),
+    (REPO / "gtav/src/frontend/assets/OFL-Barlow.txt", "third_party/Barlow-OFL.txt"),
+    (REPO / "gtav/src/native/shaders/fsr1/LICENSE.txt", "third_party/AMD-FidelityFX-FSR1.txt"),
     (XR / "LICENSE.md", "XenosRecomp.txt"),
+    (PLUME / "LICENSE", "Plume.txt"),
+    (PLUME / "contrib/Vulkan-Headers/LICENSE.md", "third_party/plume-Vulkan-Headers.txt"),
+    (PLUME / "contrib/VulkanMemoryAllocator/LICENSE.txt", "third_party/plume-VulkanMemoryAllocator.txt"),
+    (PLUME / "contrib/volk/LICENSE.md", "third_party/plume-volk.txt"),
+    (PLUME / "contrib/D3D12MemoryAllocator/LICENSE.txt", "third_party/plume-D3D12MemoryAllocator.txt"),
 ]
 # Third-party code linked into the SDK runtime / codegen and XenosRecomp.
 SDK_THIRDPARTY = ["FFmpeg", "aes_128", "cli11", "crypto/des", "disasm", "disruptorplus", "dxbc", "fmt",
@@ -148,11 +156,12 @@ def main():
     ap.add_argument("--expected", required=True)
     ap.add_argument("--licenses", required=True)
     ap.add_argument("--zip", action="store_true")
+    ap.add_argument("--nightly-build", default="", help="the serial used to build the Windows launcher")
     ap.add_argument("--vcruntime", help="folder with the x64 Visual C++ runtime DLLs (default: "
                     "%%VCToolsRedistDir%%\\x64\\Microsoft.VC14x.CRT from a VS developer prompt)")
     a = ap.parse_args()
 
-    version = launcher_version(REPO / "build-launcher")
+    version = launcher_version(REPO / "build-launcher", a.nightly_build)
     sdk = a.sdk or REPO / "rexglue-sdk"
     sdk_bin = sdk / "out" / "install" / "win-amd64" / "bin"
     llvm = Path(a.llvm).resolve()

@@ -1,0 +1,56 @@
+name: Linux and macOS launcher checks
+
+on:
+  push:
+    branches: ['main', 'arena/**']
+    paths:
+      - 'loader/**'
+      - 'gtav/src/frontend/modes.h'
+      - 'gtav/src/core/**'
+      - 'gtav/src/sandbox/**'
+      - 'gtav/src/utils/ConfigStorage.*'
+      - 'gtav/WorkshopCore.cmake'
+      - 'gtav/src/native/graphics_preferences.*'
+      - 'gtav/src/native/presentation.h'
+      - 'gtav/src/native/input_pacing.h'
+      - 'gtav/tests/**'
+      - '.github/workflows/desktop-launcher.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  launcher:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Build the launcher and local fixtures
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/desktop-launcher-build.log"
+          if ! { cmake -S loader -B build/desktop-launcher -DCMAKE_BUILD_TYPE=Release -DGTAV_LAUNCHER_TESTS=ON &&
+                 cmake --build build/desktop-launcher --parallel 4; } 2>&1 | tee "$log"; then
+            details=$(grep -E 'CMake Error|error:|FAILED:|Undefined symbols|^ld:' "$log" | head -12 || true)
+            if [[ -z "$details" ]]; then details=$(tail -8 "$log"); fi
+            details=${details:0:4500}
+            details=${details//%/%25}
+            details=${details//$'\n'/%0A}
+            details=${details//$'\r'/%0D}
+            printf '::error title=Desktop launcher build::%s\n' "$details"
+            exit 1
+          fi
+      - name: Run storage, update policy and Workshop checks without retail data
+        run: ctest --test-dir build/desktop-launcher --output-on-failure
+      - name: Check graphics preference migration and restart policy
+        run: |
+          cmake -S gtav/tests -B build/graphics-policy -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/graphics-policy --parallel 4
+          ctest --test-dir build/graphics-policy --output-on-failure

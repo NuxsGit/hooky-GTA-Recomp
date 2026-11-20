@@ -1,4 +1,4 @@
-"""Asset-free checks for the Windows packager's SDL dependency gate."""
+"""Asset-free checks for the Windows packager's dependencies and build identity."""
 import subprocess
 import tempfile
 import unittest
@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from make_release import FILES, REPO, SDL_DLL, check_shared_sdl
+from release_metadata import build_version, launcher_version
 
 
 class WindowsReleaseTests(unittest.TestCase):
@@ -65,6 +66,24 @@ class WindowsReleaseTests(unittest.TestCase):
         seed = dict((dest, src) for src, dest in FILES)["tools/game_dll/codegen.partition.json"]
         self.assertEqual(seed, REPO / "tools" / "game_dll" / "codegen.partition.json")
         self.assertTrue(seed.is_file())
+
+
+class BuildIdentityTests(unittest.TestCase):
+    def test_nightly_requires_canonical_serial(self):
+        self.assertEqual(build_version("123001"), f"{build_version()}-nightly.123001")
+        for serial in ("0", "01", "-1", "x", "1/2", "1" * 19):
+            with self.subTest(serial=serial), self.assertRaises(SystemExit):
+                build_version(serial)
+
+    def test_zip_must_match_launcher_stamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            stamp = folder / "launcher-version.txt"
+            for serial in ("", "4"):
+                stamp.write_text(f"{build_version(serial)}\n", encoding="ascii")
+                self.assertEqual(launcher_version(folder, serial), build_version(serial))
+                with self.assertRaisesRegex(SystemExit, "rebuild the launcher"):
+                    launcher_version(folder, "5")
 
 
 if __name__ == "__main__":

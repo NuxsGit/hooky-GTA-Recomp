@@ -12,9 +12,12 @@
 *.toml text eol=lf
 *.json text eol=lf
 *.manifest text eol=lf
-*.patch text eol=lf
+# Blank unified-diff context lines have a required space prefix.
+*.patch text eol=lf whitespace=-blank-at-eol
 .gitignore text eol=lf
 .gitattributes text eol=lf
 LICENSE text eol=lf
 *.cmd text eol=crlf
 *.bat text eol=crlf
+# Keep AMD's pinned source headers byte-for-byte, including upstream whitespace.
+gtav/src/native/shaders/fsr1/ffx_*.h -text -whitespace

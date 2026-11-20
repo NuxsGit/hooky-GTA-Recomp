@@ -37,6 +37,8 @@
 #include <gtk/gtk.h>
 #endif
 
+#include "campaign_config.h"
+#include "desktop_home.h"
 #include "install.h"
 #include "sources.h"
 #include "update.h"
@@ -55,6 +57,12 @@ fs::path g_root;
 volatile std::sig_atomic_t g_cancelled = 0;
 
 fs::path SettingsPath() { return g_root / "data" / "launcher.ini"; }
+
+void AppendCampaignArgs(std::vector<std::wstring>& args) {
+  auto cfg = LoadCampaignHostConfig(g_root);
+  if (!cfg.address.empty()) args.push_back(L"--gtav_campaign_host=" + Widen(cfg.address));
+  if (cfg.port != 30127) args.push_back(L"--gtav_campaign_port=" + std::to_wstring(cfg.port));
+}
 
 std::vector<std::string> LoadInputs() {
   std::vector<std::string> v(3);
@@ -259,9 +267,13 @@ int Setup(std::vector<std::string> given, const std::vector<std::wstring>& game_
   fflush(stdout);
   std::string answer;
   if (std::getline(std::cin, answer) && (Trim(answer) == "n" || Trim(answer) == "N")) return 0;
-  if (!LaunchGame(g_root, &error, game_args)) {
-    fprintf(stderr, "%s\n", Narrow(error).c_str());
-    return 1;
+  {
+    auto args = game_args;
+    AppendCampaignArgs(args);
+    if (!LaunchGame(g_root, &error, args)) {
+      fprintf(stderr, "%s\n", Narrow(error).c_str());
+      return 1;
+    }
   }
   return 0;
 }
@@ -692,7 +704,9 @@ class SetupWindow : public InstallUi {
     g.gtk_widget_hide(window_);
     while (g.gtk_events_pending()) g.gtk_main_iteration();
     std::wstring error;
-    if (LaunchGame(g_root, &error, game_args_)) return;
+    auto args = game_args_;
+    AppendCampaignArgs(args);
+    if (LaunchGame(g_root, &error, args)) return;
     g.gtk_widget_show_all(window_);
     ErrorBox(Narrow(error));
   }
@@ -754,15 +768,33 @@ int main(int argc, char** argv) {
 
   bool setup = false, unattended = false, cli = false, iphone = false, android = false;
   bool rebuild = false, update = false;
-  std::vector<std::string> paths;
+  DesktopPaths folders;
+  std::vector<std::string> forwarded{argv[0]}, paths;
   std::vector<std::wstring> game_args;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
+    if (a == "--portable") { folders.portable = true; continue; }
+    if (a == "--home" || a == "--migrate-from") {
+      if (++i == argc || !fs::path(argv[i]).is_absolute()) {
+        fprintf(stderr, "%s requires an absolute path.\n", a.c_str());
+        return 2;
+      }
+      auto& path = a == "--home" ? folders.home : folders.migrate_from;
+      path = fs::path(argv[i]).lexically_normal();
+      if (path.filename().empty() && path.has_relative_path()) path = path.parent_path();
+      continue;
+    }
+    forwarded.push_back(a);
     if (a == "--") {
-      for (++i; i < argc; ++i) game_args.push_back(Widen(argv[i]));
+      for (++i; i < argc; ++i) {
+        game_args.push_back(Widen(argv[i]));
+        forwarded.emplace_back(argv[i]);
+      }
       break;
     }
-    if (a == "--setup") {
+    if (a == "--play") {
+      // Normal desktop start already launches directly when installed.
+    } else if (a == "--setup") {
       setup = true;
     } else if (a == "--unattended") {
       unattended = true;
@@ -780,7 +812,7 @@ int main(int argc, char** argv) {
       puts(kLauncherVersion);
       return 0;
     } else if (a == "--help" || a == "-h") {
-      printf("usage: %s [--setup [DISC1 DISC2 TU]] [--cli] [--unattended] [--rebuild] [--check-updates] [--version] [--iphone] [--android] [-- GAME_ARGS...]\n", argv[0]);
+      printf("usage: %s [--setup [DISC1 DISC2 TU]] [--cli] [--unattended] [--rebuild] [--check-updates] [--version] [--iphone] [--android]\n       [--portable | --home DIR [--migrate-from OLD_DIR]] [-- GAME_ARGS...]\n", argv[0]);
       return 0;
     } else if (a.rfind("--", 0) == 0) {
       fprintf(stderr, "unknown option %s (game options go after --)\n", a.c_str());
@@ -790,6 +822,26 @@ int main(int argc, char** argv) {
     }
   }
   if (update) return CheckUpdates();
+  fs::path home;
+  std::wstring folder_error;
+  if (!OpenDesktopHome(g_root, folders, &home, &folder_error, [] { return g_cancelled != 0; })) {
+    if (cli || unattended || rebuild || iphone || android) fprintf(stderr, "%s\n", Narrow(folder_error).c_str());
+    else ShowError(Narrow(folder_error));
+    return 1;
+  }
+  if (!SameFolder(g_root, home)) {
+    if (cli || !HaveDisplay()) printf("Game folder: %s\n", home.c_str());
+    fflush(stdout);
+    forwarded.front() = (home / kDesktopLauncher).string();
+    forwarded.insert(forwarded.begin() + 1, "--portable");
+    std::vector<char*> child_args;
+    for (auto& arg : forwarded) child_args.push_back(arg.data());
+    child_args.push_back(nullptr);
+    // Keep the original cwd so --setup relative disc paths continue to work.
+    execv(child_args.front(), child_args.data());
+    ShowError("Could not open the installed launcher at " + forwarded.front());
+    return 1;
+  }
   if (rebuild) return Rebuild();
   if (unattended) return Unattended();
   if (iphone) {
@@ -823,7 +875,12 @@ int main(int argc, char** argv) {
 
   std::wstring error;
   if (!setup && GetInstallStatus(g_root, g_root) == InstallStatus::Ready) {
-    if (LaunchGame(g_root, &error, game_args)) return 0;
+    if (SameFolder(g_root, DefaultGameHome())) AddDesktopEntry(nullptr);
+    {
+      auto args = game_args;
+      AppendCampaignArgs(args);
+      if (LaunchGame(g_root, &error, args)) return 0;
+    }
     if (!window) {
       fprintf(stderr, "%s\n", Narrow(error).c_str());
       return 1;

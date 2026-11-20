@@ -34,7 +34,7 @@ bool IsDataInstalled(const std::filesystem::path& home);
 // iPhone, on any desktop system: from the installed game, <home>/iphone/GTAV.ipa (the package's iOS
 // shell with gtav_game.dylib built for iOS and the shaders translated for it; no game files: the
 // phone installs those from the player's discs). macOS: root is the package, home the game folder;
-// Windows / Linux: both the launcher's folder.
+// Windows / Linux: both the installed launcher folder.
 bool RunIphoneBuild(const std::filesystem::path& root, const std::filesystem::path& home, InstallUi& ui,
                     std::wstring* error);
 // The Android build, from any desktop system: libgtav_game.so (aarch64 Android, against the APK's
@@ -44,7 +44,7 @@ bool RunAndroidBuild(const std::filesystem::path& root, const std::filesystem::p
                      std::wstring* error);
 
 // root is the release's runtime and tools; home is the player's data/ and game library.
-// On Windows/Linux they are the same folder. GetInstallStatus just checks the file inventory and
+// On Windows/Linux they are both the installed folder (not the extracted download). GetInstallStatus just checks the file inventory and
 // the local build stamp. RunRebuild checks the data again and builds from it without the discs.
 enum class InstallStatus { NeedsSources, NeedsRebuild, Ready };
 InstallStatus GetInstallStatus(const std::filesystem::path& root, const std::filesystem::path& home);
@@ -54,23 +54,29 @@ bool RunRebuild(const std::filesystem::path& root, const std::filesystem::path& 
 bool RunInstall(const std::filesystem::path& root, const InstallInputs& in, InstallUi& ui,
                 std::wstring* error);
 // macOS: root is the read-only package inside the app, home the game folder everything made goes
-// to (gtav_game.dylib, data/). LaunchGame then takes home.
+// to (gtav_game.dylib, data/).
 bool RunInstall(const std::filesystem::path& root, const std::filesystem::path& home,
                 const InstallInputs& in, InstallUi& ui, std::wstring* error);
-// extra: more game arguments (Linux: everything after "--" on the launcher's command line). On
-// Linux the launcher process becomes the game, so this returns only on an error. macOS starts the
-// game as a separate process (root = the game folder) and returns.
+// extra: more game arguments after "--". On Linux the launcher becomes the game.
+#ifdef __APPLE__
+// Copy bundled runtime files only when changed, then launch with the same held game lock.
+bool LaunchMacGame(const std::filesystem::path& package, const std::filesystem::path& home,
+                   std::wstring* error, const std::vector<std::wstring>& extra = {});
+#else
 bool LaunchGame(const std::filesystem::path& root, std::wstring* error,
                 const std::vector<std::wstring>& extra = {});
+#endif
+#ifdef _WIN32
+namespace win { class Handle; }
+// The dashboard can track the host while the existing inherited install lock protects its files.
+bool LaunchWindowsGame(const std::filesystem::path& root, std::wstring* error,
+                       const std::vector<std::wstring>& extra, win::Handle* process);
+#endif
 // Checks that can fail before anything is touched (CPU, runtime DLLs, bundled tools).
 bool Preflight(const std::filesystem::path& root, std::wstring* error);
 #ifdef __APPLE__
 // The game folder can be created and is on a case-insensitive volume.
 bool CheckGameFolder(const std::filesystem::path& home, std::wstring* error);
-// Copies gtav_fast, the dylibs, vulkan/ and the shader tools (tools/shaders/* -> tools/*) from the
-// package into the game folder when they changed. Run before every launch.
-bool SyncRuntime(const std::filesystem::path& root, const std::filesystem::path& home,
-                 std::wstring* error);
 #endif
 
 }  // namespace loader

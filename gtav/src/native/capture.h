@@ -34,8 +34,12 @@ void ProbeDrawBefore(uint32_t device);  // diagnostic: registers the D3D draw ca
 void ProbeDrawAfter(uint32_t device);  // before the D3D call (inline vertices still pending)
 void OnClear(uint32_t device, uint32_t flags, uint32_t color, float z, uint32_t stencil, uint32_t rect_count,
              uint32_t rects);
-void OnResolve(uint32_t device, uint32_t flags, uint32_t rect, uint32_t dest_texture, uint32_t dest_point,
-               uint32_t clear_color, float clear_z, uint32_t level, uint32_t face);
+struct ResolveCapture {
+  uint32_t index = UINT32_MAX, write = 0, limit = 0, depth_surface = 0;
+};
+ResolveCapture OnResolve(uint32_t device, uint32_t flags, uint32_t rect, uint32_t dest_texture, uint32_t dest_point,
+                         uint32_t clear_color, float clear_z, uint32_t level, uint32_t face);
+void OnResolveEnd(uint32_t device, ResolveCapture capture);
 
 // 838087C8 (runs D3D command buffers): the device's PM4 write pointer before and after the call;
 // the INDIRECT_BUFFER packets it wrote name the recorded buffers that execute now.

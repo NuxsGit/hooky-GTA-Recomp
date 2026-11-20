@@ -35,15 +35,18 @@ First run
      - Open it once, then System Settings > Privacy & Security > "GTAV was blocked..." > Open Anyway
      - or, in Terminal:  xattr -dr com.apple.quarantine /Applications/GTAV.app
 3. Open GTAV.app. Pick Disc 1, Disc 2 and the title update with the "Choose..." buttons, and the
-   game folder (default: ~/Library/Application Support/GTAV Recomp). Press Install & build.
+   game folder (default for new installs: ~/Games/GTAV Recomp). An existing saved game folder
+   or ~/Library/Application Support/GTAV Recomp is reused. Press Install & build.
 4. Setup checks every file against known-good hashes, copies them into the game folder, generates
    C++ from your game executable, compiles it into gtav_game.dylib with the bundled clang and
-   removes the build files. This takes about 15-40 minutes. Cancel (or closing the window) stops
+   keeps incremental build objects. This takes about 15-40 minutes. Cancel (or closing the window) stops
    it; installing again continues where it stopped.
 5. Press Play. The first minutes of play translate shaders in the background; some objects can be
    missing until their shader is ready. They are kept in the game folder (data/spirv) for later.
 
-Later runs: opening GTAV.app starts the game directly. Hold Option while opening it to get the
+Later runs: GTAV.app opens the illustrated mode hub. Campaign solo uses your story saves;
+Sandbox solo and Private session have a separate profile. Campaign co-op is unavailable.
+Hold Option while opening GTAV.app to get the
 setup window again (for example after moving your discs, or to repair the install).
 Logs: <game folder>/data/logs (gtav.log for the game, install.log for setup).
 

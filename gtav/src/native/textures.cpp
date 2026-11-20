@@ -1,15 +1,11 @@
-// gtav - guest texture decode, ported from the Skate 3 native renderer's
-// EnsureGuestTextureFromWords (same SDK texture helpers): packed small mips are located with
-// GetMipLocation, tiled mips are sized with the swizzle-aware upper bound and untiled in
-// contiguous runs, and every mip is endian-swapped per the fetch constant.
+// gtav - guest texture decode. Use ReXGlue's GPU texture layout for 2D subresource
+// strides and packed offsets. Untile each mip in contiguous runs and apply the fetch endianness.
 
 #include "textures.h"
 
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/xenos.h>
-#include <rex/kernel.h>
-#include <rex/system.h>
 
 #define XXH_INLINE_ALL
 #include <xxhash.h>
@@ -23,6 +19,8 @@ namespace gtav::native {
 namespace {
 
 namespace xenos = rex::graphics::xenos;
+namespace tex = rex::graphics::texture_util;
+using rex::graphics::FormatInfo;
 using plume::RenderFormat;
 using plume::RenderSwizzle;
 
@@ -278,6 +276,90 @@ plume::RenderComponentMapping Swizzle(xenos::TextureFormat format, uint32_t swiz
   return plume::RenderComponentMapping(c(0), c(1), c(2), c(3));
 }
 
+constexpr uint32_t kPhysicalMask = kGuestTextureAddressSpace - 1;
+constexpr uint32_t kMaxGuestTextureBytes = 64u << 20;
+
+xenos::xe_gpu_texture_fetch_t Fetch(const uint32_t words[6]) {
+  xenos::xe_gpu_texture_fetch_t fetch;
+  std::memcpy(&fetch, words, sizeof(fetch));
+  return fetch;
+}
+
+const FormatInfo* BlockFormat(const xenos::xe_gpu_texture_fetch_t& fetch) {
+  if (fetch.type != xenos::FetchConstantType::kTexture || !(fetch.base_address & (kPhysicalMask >> 12)))
+    return nullptr;
+  // Bad fetches can name formats with zero-sized blocks. Don't pass them to the SDK layout helpers.
+  const auto* format = FormatInfo::Get(uint32_t(fetch.format));
+  return format && format->block_width && format->block_height && std::has_single_bit(format->bytes_per_block())
+             ? format : nullptr;
+}
+
+bool ValidRange(uint32_t address, uint64_t bytes) {
+  return address && bytes && bytes <= kMaxGuestTextureBytes && address + bytes <= kGuestTextureAddressSpace;
+}
+
+const uint8_t* MapRange(std::span<const uint8_t> physical, uint32_t address, uint32_t size) {
+  return ValidRange(address, size) && uint64_t(address) + size <= physical.size() ? physical.data() + address : nullptr;
+}
+
+struct Guest2DLayout {
+  struct Level {
+    uint32_t address, bytes, pitch_blocks, x, y;
+  };
+  uint32_t width, height, mip_count;
+  uint32_t base_address, base_bytes, mip_address, mip_bytes;
+  Level levels[16];
+};
+
+// The legacy TextureInfo visible-size estimate could end inside the last tiled row and leave
+// out packed mips entirely. Use the same subresource strides as the SDK renderer, and describe
+// the actual 2D reads once for upload, raw hashing and write-watch invalidation.
+bool Describe2D(const xenos::xe_gpu_texture_fetch_t& fetch, const FormatInfo& fi, Guest2DLayout& out) {
+  if (!fetch.pitch || fetch.stacked) return false;
+  if (fetch.dimension == xenos::DataDimension::k1D) {
+    if (fetch.tiled || fetch.packed_mips) return false;
+  } else if (fetch.dimension != xenos::DataDimension::k2DOrStacked) {
+    return false;
+  }
+  uint32_t w, h, base_page, mip_page, max_level;
+  tex::GetSubresourcesFromFetchConstant(fetch, &w, &h, nullptr, &base_page, &mip_page, nullptr, &max_level);
+  ++w;
+  ++h;
+  if (!base_page || w > 8192 || h > 8192) return false;
+  const uint32_t bw = fi.block_width, bh = fi.block_height, bpb = fi.bytes_per_block();
+  const uint32_t log2_bpb = std::countr_zero(bpb);
+  uint32_t count = 1;
+  // Keep existing upload limits: only complete BC blocks at lower levels, and only base for NPOT.
+  if (mip_page && base_page != mip_page && std::has_single_bit(w) && std::has_single_bit(h))
+    while (count <= max_level && (w >> count) >= bw && (h >> count) >= bh) ++count;
+  const auto guest = tex::GetGuestTextureLayout(fetch.dimension, fetch.pitch, w, h, 1, bool(fetch.tiled),
+                                                fetch.format, bool(fetch.packed_mips), true, count - 1);
+  out.width = w;
+  out.height = h;
+  out.mip_count = count;
+  out.base_address = base_page << 12;
+  out.mip_address = count > 1 ? mip_page << 12 : 0;
+  out.mip_bytes = 0;
+  for (uint32_t m = 0; m < count; ++m) {
+    const auto stored = std::min(m, guest.packed_level);
+    const auto& storage = m ? guest.mips[stored] : guest.base;
+    const uint32_t pitch = storage.row_pitch_bytes / bpb;
+    uint32_t x = 0, y = 0, z = 0;
+    if (m >= guest.packed_level) tex::GetPackedMipOffset(w, h, 1, fetch.format, m, x, y, z);
+    const uint32_t right = x + (std::max(w >> m, 1u) + bw - 1) / bw;
+    const uint32_t bottom = y + (std::max(h >> m, 1u) + bh - 1) / bh;
+    const uint64_t bytes = fetch.tiled ? tex::GetTiledAddressUpperBound2D(right, bottom, pitch, log2_bpb)
+                                       : uint64_t(bottom - 1) * storage.row_pitch_bytes + uint64_t(right) * bpb;
+    const uint32_t offset = m ? guest.mip_offsets_bytes[stored] : 0;
+    const uint32_t base = m ? out.mip_address : out.base_address;
+    if (!ValidRange(base, offset + bytes)) return false;
+    out.levels[m] = {base + offset, uint32_t(bytes), pitch, x, y};
+    if (m) out.mip_bytes = std::max(out.mip_bytes, offset + uint32_t(bytes));
+    else out.base_bytes = uint32_t(bytes);
+  }
+  return true;
+}
+
 }  // namespace
 
 uint32_t FetchBaseAddress(const uint32_t words[6]) {
@@ -285,67 +367,54 @@ uint32_t FetchBaseAddress(const uint32_t words[6]) {
   return words[1] & 0xFFFFF000;
 }
 
-uint64_t HashGuestTexture(const uint32_t words[6], bool sampled) {
-  xenos::xe_gpu_texture_fetch_t fetch = {};
-  fetch.dword_0 = words[0];
-  fetch.dword_1 = words[1];
-  fetch.dword_2 = words[2];
-  fetch.dword_3 = words[3];
-  fetch.dword_4 = words[4];
-  fetch.dword_5 = words[5];
-  if (fetch.type != xenos::FetchConstantType::kTexture || fetch.base_address == 0) return 0;
-  const auto* pre = rex::graphics::FormatInfo::Get(uint32_t(fetch.format));
-  if (!pre || !pre->block_width || !pre->block_height || !pre->bytes_per_block()) return 0;
-  rex::graphics::TextureInfo info;
-  if (!rex::graphics::TextureInfo::Prepare(fetch, &info)) return 0;
-  auto* mem = REX_KERNEL_MEMORY();
-  auto hash_range = [&](uint32_t addr, uint32_t size, uint64_t seed) {
-    if (!addr || !size || size > (64u << 20) || (addr & 0x1FFFFFFF) + uint64_t(size) > 0x20000000) return seed;
-    return XXH3_64bits_withSeed(mem->TranslatePhysical(addr), size, seed);
-  };
-  if (sampled) {
-    // 16 runs of 256 bytes spread over the base level and 4 over the mips: catches a streaming
-    // slot that now holds another texture, at ~5 KB per check.
-    auto sample = [&](uint32_t addr, uint32_t size, uint32_t runs, uint64_t seed) {
-      if (size <= runs * 256u) return hash_range(addr, size, seed);
-      uint32_t step = (size - 256) / (runs - 1) & ~255u;
-      for (uint32_t i = 0; i < runs; i++) seed = hash_range(addr + i * step, 256, seed);
-      return seed;
-    };
-    uint64_t h = sample(info.memory.base_address, info.memory.base_size, 16, 1);
-    return sample(info.memory.mip_address, info.memory.mip_size, 4, h);
+bool GuestTextureRanges(const uint32_t words[6], uint32_t ranges[4]) {
+  const auto fetch = Fetch(words);
+  const auto* fi = BlockFormat(fetch);
+  if (!fi) return false;
+  if (fetch.dimension == xenos::DataDimension::k3D) {
+    rex::graphics::TextureInfo info;
+    if (fetch.stacked || !rex::graphics::TextureInfo::Prepare(fetch, &info)) return false;
+    ranges[0] = info.memory.base_address & kPhysicalMask;
+    ranges[1] = info.memory.base_size;
+    ranges[2] = ranges[3] = 0;  // the volume decoder only loads the base level
+    return ValidRange(ranges[0], ranges[1]);
   }
-  uint64_t h = hash_range(info.memory.base_address, info.memory.base_size, 1);
-  return hash_range(info.memory.mip_address, info.memory.mip_size, h);
+  Guest2DLayout layout;
+  if (!Describe2D(fetch, *fi, layout)) return false;
+  ranges[0] = layout.base_address;
+  ranges[1] = layout.base_bytes;
+  ranges[2] = layout.mip_address;
+  ranges[3] = layout.mip_bytes;
+  return true;
 }
 
-bool GuestTextureRanges(const uint32_t words[6], uint32_t ranges[4]) {
-  xenos::xe_gpu_texture_fetch_t fetch = {};
-  fetch.dword_0 = words[0];
-  fetch.dword_1 = words[1];
-  fetch.dword_2 = words[2];
-  fetch.dword_3 = words[3];
-  fetch.dword_4 = words[4];
-  fetch.dword_5 = words[5];
-  if (fetch.type != xenos::FetchConstantType::kTexture || fetch.base_address == 0) return false;
-  const auto* pre = rex::graphics::FormatInfo::Get(uint32_t(fetch.format));
-  if (!pre || !pre->block_width || !pre->block_height || !pre->bytes_per_block()) return false;
-  rex::graphics::TextureInfo info;
-  if (!rex::graphics::TextureInfo::Prepare(fetch, &info)) return false;
-  ranges[0] = info.memory.base_address, ranges[1] = info.memory.base_size;
-  ranges[2] = info.memory.mip_address, ranges[3] = info.memory.mip_address ? info.memory.mip_size : 0;
-  return ranges[0] && ranges[1];
+uint64_t HashGuestTexture(const uint32_t words[6], std::span<const uint8_t> physical, bool sampled) {
+  uint32_t ranges[4];
+  if (!GuestTextureRanges(words, ranges)) return 0;
+  uint64_t hash = 1;
+  for (uint32_t i = 0; i < 4; i += 2) {
+    const uint32_t bytes = ranges[i + 1];
+    if (!bytes) continue;
+    const auto* data = MapRange(physical, ranges[i], bytes);
+    if (!data) return 0;
+    const uint32_t runs = i == 0 ? 16 : 4;
+    if (!sampled || bytes <= runs * 256u) {
+      hash = XXH3_64bits_withSeed(data, bytes, hash);
+    } else {
+      const uint32_t step = (bytes - 256) / (runs - 1) & ~255u;
+      for (uint32_t run = 0; run < runs; ++run)
+        hash = XXH3_64bits_withSeed(data + (run + 1 == runs ? bytes - 256 : run * step), 256, hash);
+    }
+  }
+  return hash;
 }
 
 // Volume textures: base level, slice after slice. Tiled 3D textures use 32x32x4-block tiles
 // (texture_util::GetTiledOffset3D); small and rare, so offsets are computed per block.
-bool Decode3D(const rex::graphics::TextureInfo& info, const HostFormat& host, uint32_t swizzle,
-              DecodedTexture* out) {
+static bool Decode3D(const rex::graphics::TextureInfo& info, const HostFormat& host, uint32_t swizzle,
+                     std::span<const uint8_t> physical, DecodedTexture* out) {
   const auto* fi = info.format_info();
   const uint32_t bpb = fi->bytes_per_block();
-  if (!bpb || (bpb & (bpb - 1)) || !info.memory.base_address || !info.memory.base_size ||
-      info.memory.base_size > (64u << 20))
-    return false;
   const uint32_t bpb_log2 = uint32_t(std::countr_zero(bpb));
   const uint32_t width = info.width + 1, height = info.height + 1, depth = info.depth + 1;
   if (width > 2048 || height > 2048 || depth > 2048) return false;
@@ -353,8 +422,8 @@ bool Decode3D(const rex::graphics::TextureInfo& info, const HostFormat& host, ui
   const uint32_t cols = (width + bw - 1) / bw, rows = (height + bh - 1) / bh;
   const uint32_t pitch_h = info.extent.block_pitch_h, pitch_v = info.extent.block_pitch_v;
   const uint32_t src_size = info.memory.base_size;
-  if ((info.memory.base_address & 0x1FFFFFFF) + uint64_t(src_size) > 0x20000000) return false;
-  const uint8_t* guest = REX_KERNEL_MEMORY()->TranslatePhysical(info.memory.base_address);
+  const uint8_t* guest = MapRange(physical, info.memory.base_address & kPhysicalMask, src_size);
+  if (!guest) return false;
   const uint32_t host_bpb = host.convert == Convert::kNone ? bpb : host.host_bytes_per_block;
   out->format = host.format;
   out->width = cols * bw;
@@ -419,69 +488,37 @@ static void PackOpaqueTo565(DecodedTexture* t) {
   t->format = RenderFormat::B5G6R5_UNORM;
 }
 
-bool DecodeGuestTexture(const uint32_t words[6], DecodedTexture* out) {
-  xenos::xe_gpu_texture_fetch_t fetch = {};
-  fetch.dword_0 = words[0];
-  fetch.dword_1 = words[1];
-  fetch.dword_2 = words[2];
-  fetch.dword_3 = words[3];
-  fetch.dword_4 = words[4];
-  fetch.dword_5 = words[5];
-  if (fetch.type != xenos::FetchConstantType::kTexture || fetch.base_address == 0) return false;
-  // A garbage fetch constant can name a format whose table entry is all zeros, and Prepare
-  // divides by its block size.
-  const auto* pre = rex::graphics::FormatInfo::Get(uint32_t(fetch.format));
-  if (!pre || !pre->block_width || !pre->block_height || !pre->bytes_per_block()) return false;
-  rex::graphics::TextureInfo info;
-  if (!rex::graphics::TextureInfo::Prepare(fetch, &info)) return false;
+bool DecodeGuestTexture(const uint32_t words[6], std::span<const uint8_t> physical, DecodedTexture* out) {
+  const auto fetch = Fetch(words);
+  const auto* fi = BlockFormat(fetch);
   HostFormat host;
-  if (!GetHostFormat(info.format, &host)) return false;
-  if (info.dimension == xenos::DataDimension::k3D) return Decode3D(info, host, fetch.swizzle, out);
-  if (info.dimension != xenos::DataDimension::k2DOrStacked || info.is_stacked || info.width >= 8192 ||
-      info.height >= 8192 || info.memory.base_address == 0 || info.memory.base_size == 0 ||
-      info.memory.base_size > (64u << 20))
-    return false;
-
-  const auto* fi = info.format_info();
-  const uint32_t bpb = fi->bytes_per_block();
-  if (!bpb || (bpb & (bpb - 1))) return false;
-  const uint32_t bpb_log2 = uint32_t(std::countr_zero(bpb));
-  const uint32_t width = info.width + 1, height = info.height + 1;
-  const uint32_t bw = fi->block_width, bh = fi->block_height;
-  const bool pow2 = !(width & (width - 1)) && !(height & (height - 1));
-
-  uint32_t mip_count = 1;
-  if (pow2 && info.memory.mip_address) {
-    uint32_t avail = std::min(info.mip_levels(), info.GetMaxMipLevels());
-    while (mip_count < avail && (width >> mip_count) >= bw && (height >> mip_count) >= bh) {
-      uint32_t ox, oy;
-      if (!info.GetMipLocation(mip_count, &ox, &oy, true)) break;
-      mip_count++;
-    }
+  if (!fi || !GetHostFormat(fetch.format, &host)) return false;
+  if (fetch.dimension == xenos::DataDimension::k3D) {
+    rex::graphics::TextureInfo info;
+    return !fetch.stacked && rex::graphics::TextureInfo::Prepare(fetch, &info) &&
+           Decode3D(info, host, fetch.swizzle, physical, out);
   }
-
-  auto* mem = REX_KERNEL_MEMORY();
+  Guest2DLayout layout;
+  if (!Describe2D(fetch, *fi, layout)) return false;
+  const uint32_t bpb = fi->bytes_per_block();
+  const uint32_t bpb_log2 = uint32_t(std::countr_zero(bpb));
+  const uint32_t width = layout.width, height = layout.height;
+  const uint32_t bw = fi->block_width, bh = fi->block_height;
   out->format = host.format;
   out->width = ((width + bw - 1) / bw) * bw;
   out->height = ((height + bh - 1) / bh) * bh;
-  out->mip_count = mip_count;
+  out->mip_count = layout.mip_count;
+  out->depth = 1;
+  out->volume = false;
   out->data.clear();
-  std::vector<uint8_t> row, converted;
-  for (uint32_t m = 0; m < mip_count; m++) {
-    uint32_t ox = 0, oy = 0;
-    // Mip 0 goes through GetMipLocation too: textures <= 16 texels store their base level packed
-    // inside a 32x32 tile at a block offset.
-    uint32_t addr = info.GetMipLocation(m, &ox, &oy, true);
-    auto ext = info.GetMipExtent(m, true);
-    uint32_t pitch_blocks = m == 0 ? info.extent.block_pitch_h : ext.block_pitch_h;
-    uint32_t mw = std::max(width >> m, 1u), mh = std::max(height >> m, 1u);
-    uint32_t cols = (mw + bw - 1) / bw, rows = (mh + bh - 1) / bh;
-    uint32_t src_size = m == 0 ? info.memory.base_size : ext.all_blocks() * bpb;
-    if (info.is_tiled)
-      src_size = std::max(src_size, rex::graphics::texture_util::GetTiledAddressUpperBound2D(
-                                        cols + ox, rows + oy, pitch_blocks, bpb_log2));
-    if ((addr & 0x1FFFFFFF) + uint64_t(src_size) > 0x20000000) return false;
-    const uint8_t* guest = mem->TranslatePhysical(addr);
+  std::vector<uint8_t> row;
+  for (uint32_t m = 0; m < layout.mip_count; m++) {
+    const auto& level = layout.levels[m];
+    const uint32_t ox = level.x, oy = level.y, pitch_blocks = level.pitch_blocks, src_size = level.bytes;
+    const uint8_t* guest = MapRange(physical, level.address, src_size);
+    if (!guest) return false;
+    const uint32_t mw = std::max(width >> m, 1u), mh = std::max(height >> m, 1u);
+    const uint32_t cols = (mw + bw - 1) / bw, rows = (mh + bh - 1) / bh;
 
     const uint32_t host_bpb = host.convert == Convert::kNone ? bpb : host.host_bytes_per_block;
     auto& mip = out->mips[m];
@@ -493,9 +530,8 @@ bool DecodeGuestTexture(const uint32_t words[6], DecodedTexture* out) {
     const uint32_t row_bytes = cols * bpb;
     const uint32_t run_blocks = std::clamp(16u >> bpb_log2, 1u, 8u);
     row.resize(row_bytes);
-    converted.resize(size_t(cols) * host_bpb);
     for (uint32_t by = 0; by < rows; by++) {
-      if (!info.is_tiled) {
+      if (!fetch.tiled) {
         uint32_t off = ((by + oy) * pitch_blocks + ox) * bpb;
         if (off + row_bytes <= src_size) std::memcpy(row.data(), guest + off, row_bytes);
         else std::memset(row.data(), 0, row_bytes);
@@ -512,7 +548,7 @@ bool DecodeGuestTexture(const uint32_t words[6], DecodedTexture* out) {
           bx += run;
         }
       }
-      SwapEndian(row.data(), row_bytes, info.endianness);
+      SwapEndian(row.data(), row_bytes, fetch.endianness);
       uint8_t* dst = out->data.data() + mip.offset + size_t(by) * cols * host_bpb;
       if (host.convert == Convert::kNone) {
         std::memcpy(dst, row.data(), row_bytes);
@@ -521,7 +557,7 @@ bool DecodeGuestTexture(const uint32_t words[6], DecodedTexture* out) {
       }
     }
   }
-  out->swizzle = Swizzle(info.format, fetch.swizzle);
+  out->swizzle = Swizzle(fetch.format, fetch.swizzle);
 #ifdef __ANDROID__
   // Adreno cannot sample R16G16B16A16_UNORM at all (no SAMPLED_IMAGE format feature): store the
   // same 0..1 values as SNORM (sampled and filtered there), 15 bits of the 16.

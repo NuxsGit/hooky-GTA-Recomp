@@ -132,7 +132,7 @@ bool OnEvent(void*, SDL_Event* e) {
   if (e->type != SDL_EVENT_FINGER_DOWN && e->type != SDL_EVENT_FINGER_MOTION && e->type != SDL_EVENT_FINGER_UP &&
       e->type != SDL_EVENT_FINGER_CANCELED)
     return true;
-  if (e->tfinger.touchID == SDL_MOUSE_TOUCHID || !REXCVAR_GET(gtav_touch_controls)) return true;
+  if (e->tfinger.touchID == SDL_MOUSE_TOUCHID || !REXCVAR_QUERY(bool, gtav_touch_controls)) return true;
   float w = g_w.load(), h = g_h.load();
   if (w <= 0 || h <= 0) return true;
   float x = e->tfinger.x * w, y = e->tfinger.y * h;
@@ -216,7 +216,7 @@ class TouchDriver final : public InputDriver {
   TouchDriver() : InputDriver(nullptr, 0) {}
   X_STATUS Setup() override { return X_STATUS_SUCCESS; }
   void EnumerateDevices(std::vector<DeviceInfo>& out) override {
-    if (!REXCVAR_GET(gtav_touch_controls)) return;
+    if (!REXCVAR_QUERY(bool, gtav_touch_controls)) return;
     DeviceInfo info;
     info.id = kTouchDevice;
     info.name = "Touch screen";
@@ -224,7 +224,7 @@ class TouchDriver final : public InputDriver {
     out.push_back(info);
   }
   X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out) override {
-    if (id != kTouchDevice || !REXCVAR_GET(gtav_touch_controls)) return X_ERROR_DEVICE_NOT_CONNECTED;
+    if (id != kTouchDevice || !REXCVAR_QUERY(bool, gtav_touch_controls)) return X_ERROR_DEVICE_NOT_CONNECTED;
     if (!g_watch_added.exchange(true)) SDL_AddEventWatch(OnEvent, nullptr);
     if (out) {
       std::memset(out, 0, sizeof(*out));
@@ -239,7 +239,7 @@ class TouchDriver final : public InputDriver {
     return X_ERROR_SUCCESS;
   }
   X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t, X_INPUT_CAPABILITIES* caps) override {
-    if (id != kTouchDevice || !REXCVAR_GET(gtav_touch_controls)) return X_ERROR_DEVICE_NOT_CONNECTED;
+    if (id != kTouchDevice || !REXCVAR_QUERY(bool, gtav_touch_controls)) return X_ERROR_DEVICE_NOT_CONNECTED;
     if (caps) {
       std::memset(caps, 0, sizeof(*caps));
       caps->type = 0x01;
@@ -267,7 +267,7 @@ class TouchDriver final : public InputDriver {
 std::unique_ptr<rex::input::InputDriver> CreateDriver() { return std::make_unique<TouchDriver>(); }
 
 bool Visible() {
-  if (!REXCVAR_GET(gtav_touch_controls)) return false;
+  if (!REXCVAR_QUERY(bool, gtav_touch_controls)) return false;
   // Re-checked twice a second: a pad connected over Bluetooth hides the overlay.
   static std::atomic<uint64_t> next_check{0};
   static std::atomic<bool> pad{false};

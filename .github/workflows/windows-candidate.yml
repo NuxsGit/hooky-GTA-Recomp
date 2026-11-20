@@ -1,0 +1,293 @@
+name: Windows x64 packages
+
+on:
+  schedule:
+    - cron: '17 3 * * *'  # UTC; GitHub runs schedules only from the default branch
+  workflow_dispatch:
+    inputs:
+      nightly:
+        description: Build a Nightly (publish only from main in the official repository)
+        type: boolean
+        default: false
+      stage_draft:
+        description: Attach to the empty matching draft (never publish it)
+        type: boolean
+        default: false
+  push:
+    branches: ['arena/**']
+    paths:
+      - '.github/workflows/windows-candidate.yml'
+      - 'tools/release/**'
+      - 'loader/**'
+      - 'gtav/**'
+      - 'rexglue-sdk-gtav-linux.patch'
+      - 'xenosrecomp-gtav.patch'
+      - 'plume-gtav.patch'
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      serial: ${{ steps.version.outputs.serial }}
+      build: ${{ steps.version.outputs.build }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - id: version
+        name: Select the release channel and build version
+        shell: bash
+        env:
+          NIGHTLY: ${{ github.event_name == 'schedule' || inputs.nightly || (github.event_name == 'push' && contains(github.event.head_commit.message, '[nightly-candidate]')) }}
+          STAGE_DRAFT: ${{ inputs.stage_draft }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          serial=''
+          build=true
+          if [[ "$NIGHTLY" == true ]]; then
+            [[ "$STAGE_DRAFT" != true ]] || { echo 'Nightly cannot stage a stable draft'; exit 1; }
+            [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,2}$ ]]
+            printf -v serial '%s%03d' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          fi
+          tag="v$(PYTHONPATH=tools/release python3 -c 'import sys; from release_metadata import build_version; print(build_version(sys.argv[1]))' "$serial")"
+          if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            if [[ "$GITHUB_REPOSITORY" != NuxsGit/hooky-GTA-Recomp || "$GITHUB_REF" != refs/heads/main ]]; then
+              build=false
+            else
+              # No extra copy of a daily build when there is no new source on main.
+              latest=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 20 --json tagName,isPrerelease \
+                --jq 'map(select(.isPrerelease and (.tagName | test("^v[0-9.]+-nightly\\.[0-9]+$")))) | .[0].tagName // ""')
+              if [[ -n "$latest" ]]; then
+                target=$(gh release view "$latest" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)
+                if [[ "$target" == "$GITHUB_SHA" ]]; then build=false; fi
+              fi
+            fi
+          fi
+          printf 'build=%s\nserial=%s\ntag=%s\n' "$build" "$serial" "$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: metadata
+    if: needs.metadata.outputs.build == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Restore the matching SDK install
+        id: sdk-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/windows-sdk-cache
+          key: win-x64-rex-f5337cd-d3d12-rd-llvm19.1.5-${{ hashFiles('rexglue-sdk-gtav-linux.patch') }}
+      - name: Get official LLVM and shader-tool license
+        shell: pwsh
+        run: |
+          $base = "$env:RUNNER_TEMP\gtav-build-deps"
+          New-Item -ItemType Directory $base | Out-Null
+          $installer = "$base\LLVM-19.1.5-win64.exe"
+          Invoke-WebRequest -Uri 'https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.5/LLVM-19.1.5-win64.exe' -OutFile $installer
+          # Hash from microsoft/winget-pkgs, LLVM.LLVM 19.1.5 x64 installer manifest.
+          $hash = '9B29856202D82047B504A9E501D66080BED0EAFF3F1127191F4F361E0E00C770'
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $hash) { throw 'LLVM installer hash mismatch' }
+          & 'C:\Program Files\7-Zip\7z.exe' x '-y' "-o$base\llvm" $installer
+          if ($LASTEXITCODE -ne 0) { throw 'LLVM extraction failed' }
+          # NSIS can include the license in its UI without installing a plain text copy.
+          $license = "$base\llvm\LICENSE.TXT"
+          if (-not (Test-Path $license)) {
+            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-19.1.5/llvm/LICENSE.TXT' -OutFile $license
+            if ((Get-FileHash $license -Algorithm SHA256).Hash -ne '8D85C1057D742E597985C7D4E6320B015A9139385CFF4CBAE06FFC0EBE89AFEE') {
+              throw 'LLVM license hash mismatch'
+            }
+          }
+          # The dxc-bin x64 PE version resource is 1.8.2407.7 (416fab6b5).
+          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/microsoft/DirectXShaderCompiler/416fab6b5c4ba956a320d9131102304da995edfc/LICENSE.TXT' -OutFile "$base\dxc-LICENSE.TXT"
+          python -m pip install 'cmake==3.31.10'
+          if ($LASTEXITCODE -ne 0) { throw 'CMake installation failed' }
+          (python -c 'import sysconfig; print(sysconfig.get_path("scripts"))') >> $env:GITHUB_PATH
+      - name: Compile and test extracted package
+        env:
+          GTAV_NIGHTLY_SERIAL: ${{ needs.metadata.outputs.serial }}
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 || exit /b 1
+          python -u tools\release\build_windows_candidate.py --llvm "%RUNNER_TEMP%\gtav-build-deps\llvm" --dxc-license "%RUNNER_TEMP%\gtav-build-deps\dxc-LICENSE.TXT" --sdk-cache build\windows-sdk-cache --nightly-build "%GTAV_NIGHTLY_SERIAL%"
+      - name: Record the successful SDK install even if a later build step failed
+        if: ${{ !cancelled() && steps.sdk-cache.outputs.cache-hit != 'true' && hashFiles('build/windows-sdk-cache/*/.complete') != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/windows-sdk-cache
+          key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
+      - name: Hash the Windows ZIP
+        shell: pwsh
+        run: |
+          $zip = Get-Item 'dist/gtav-recomp-windows-x64.zip'
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($zip.Name)" | Set-Content -Encoding ascii 'dist/SHA256SUMS.windows'
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: windows-x64-release-candidate
+          path: |
+            dist/gtav-recomp-windows-x64.zip
+            dist/SHA256SUMS.windows
+          if-no-files-found: error
+          compression-level: 0
+
+  source:
+    needs: metadata
+    if: needs.metadata.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tag: ${{ steps.archive.outputs.tag }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Archive the source from the same commit and dependency pins
+        id: archive
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GITHUB_ACTIONS
+          PYTHONPATH=tools/release python3 -c 'from build_windows_candidate import checkout_dependencies, REPO; checkout_dependencies(REPO)'
+          tag="$TAG"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-nightly\.[1-9][0-9]{0,17})?$ ]]
+          # Local to the runner only: no tag or release gets published.
+          git tag "$tag" "$GITHUB_SHA"
+          mkdir -p dist
+          sh tools/release/make_source_archive.sh "dist/gtav-recomp-src-$tag.tar.xz" "$tag" \
+            rexglue-sdk thirdparty/XenosRecomp thirdparty/plume
+          tar -tf "dist/gtav-recomp-src-$tag.tar.xz" > "$RUNNER_TEMP/packed-source.txt"
+          grep -Fx 'gtav-recomp-src/SOURCE.txt' "$RUNNER_TEMP/packed-source.txt"
+          (cd dist && sha256sum "gtav-recomp-src-$tag.tar.xz" > SHA256SUMS.source)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: matching-source
+          path: |
+            dist/gtav-recomp-src-*.tar.xz
+            dist/SHA256SUMS.source
+          if-no-files-found: error
+          compression-level: 0
+
+  stage-draft:
+    needs: [metadata, build, source]
+    # This is opt-in: builds alone cannot change a release.
+    if: >-
+      github.repository == 'NuxsGit/hooky-GTA-Recomp' && needs.metadata.outputs.serial == '' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.stage_draft) ||
+       (github.event_name == 'push' && contains(github.event.head_commit.message, '[stage-windows-draft]')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: windows-release-draft
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: windows-x64-release-candidate
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: matching-source
+      - name: Attach candidate only if the draft still has no assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.source.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_gh() {
+            local output
+            if output=$(gh "$@" 2>&1); then
+              printf '%s\n' "$output"
+            else
+              output=${output//%/%25}
+              output=${output//$'\n'/%0A}
+              output=${output//$'\r'/%0D}
+              echo "::error title=Release staging::$output" >&2
+              return 1
+            fi
+          }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tr -d '\r' < SHA256SUMS.windows > SHA256SUMS
+          cat SHA256SUMS.source >> SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          checked_gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets,body > release.json
+          if ! jq -e '.isDraft and (.isPrerelease | not) and (.assets | length == 0)' release.json > /dev/null; then
+            echo '::error::Refusing to replace an existing candidate or modify a published release'
+            exit 1
+          fi
+          checked_gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA"
+          checked_gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
+            gtav-recomp-windows-x64.zip "gtav-recomp-src-$TAG.tar.xz" SHA256SUMS
+          {
+            echo '> **Brouillon — paquet Windows x64 à valider en jeu.**'
+            printf '\nBuild `%s` : paquet du fork et sources correspondantes. Aucun fichier du jeu ni build mobile joint.\n\n' "$GITHUB_SHA"
+            echo 'Les tests sans jeu ont passé. Avant publication : installation et lancement avec vos disques et TU27, DualSense USB et Bluetooth en jeu, puis contrôle de contamination du paquet.'
+            printf '\n'
+            jq -r .body release.json | sed '/^> \*\*Brouillon /d; /^Les tests du launcher Linux /d'
+          } > notes.md
+          checked_gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft --notes-file notes.md
+
+  publish-nightly:
+    needs: [metadata, build, source]
+    if: >-
+      github.repository == 'NuxsGit/hooky-GTA-Recomp' && github.ref == 'refs/heads/main' &&
+      needs.metadata.outputs.serial != '' &&
+      (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.nightly))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: windows-publish-nightly
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: windows-x64-release-candidate
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: matching-source
+      - name: Publish an independent prerelease, never the stable feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[1-9][0-9]{0,17}$ ]]
+          tr -d '\r' < SHA256SUMS.windows > SHA256SUMS
+          cat SHA256SUMS.source >> SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          {
+            echo '> **Nightly expérimental pour Windows x64.** Ce build ne remplace pas la version Stable.'
+            printf '\nCommit `%s`. Le ZIP vérifié et les sources correspondantes ne contiennent aucun fichier du jeu.\n' "$GITHUB_SHA"
+            echo 'Tests automatisés sans les disques/TU27 : compilation, lanceur, mise à jour et démarrage du sélecteur. Pas de validation en jeu.'
+          } > notes.md
+          # A release created against an existing tag would silently ignore --target.
+          [[ $(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG" --jq length) == 0 ]]
+          gh release create "$TAG" gtav-recomp-windows-x64.zip "gtav-recomp-src-$TAG.tar.xz" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --prerelease --latest=false \
+            --title "Hooky GTA Recomp $TAG" --notes-file notes.md
+          # The REST asset metadata is the same schema and digest the launcher will use.
+          api=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json apiUrl --jq .apiUrl)
+          [[ "$api" =~ ^https://api\.github\.com/repos/NuxsGit/hooky-GTA-Recomp/releases/[0-9]+$ ]]
+          gh api "${api#https://api.github.com/}" > release.json
+          jq -e --arg sha "$GITHUB_SHA" --arg tag "$TAG" --arg source "gtav-recomp-src-$TAG.tar.xz" \
+            --arg digest "sha256:$(cut -d ' ' -f1 SHA256SUMS.windows)" \
+            '.draft and .prerelease and .target_commitish == $sha and .tag_name == $tag and
+             ([.assets[] | select(.state == "uploaded" and .size > 0) | .name] | sort) ==
+             (["gtav-recomp-windows-x64.zip", $source, "SHA256SUMS"] | sort) and
+             any(.assets[]; .name == "gtav-recomp-windows-x64.zip" and .digest == $digest)' release.json
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false

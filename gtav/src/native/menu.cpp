@@ -1,22 +1,32 @@
 #include "menu.h"
 
+#include "../debug_tools.h"
+#include "../sandbox/desktop.h"
+
+#ifdef GTAV_DESKTOP_WORKSHOP
+#include "../phone/PhoneShellUI.h"
+#include "../sandbox/BuildMenuUI.h"
+#include "../sandbox/CreativeRuntime.h"
+#include <SDL3/SDL.h>
+#endif
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
 #include "input.h"
 #include "touch_controls.h"
 
-#include "paths.h"
+#include "graphics_menu_ui.h"
+#include "settings_runtime.h"
 
 #include <imgui.h>
-#include <rex/cvar.h>
-#include <rex/logging.h>
 
 #include <algorithm>
 #include <atomic>
-#include <cstdlib>
-#include <fstream>
+#include <chrono>
+#include <cmath>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,7 +35,7 @@ namespace gtav::native::menu {
 namespace {
 
 struct Input {
-  enum Type { kMove, kButton, kWheel, kKey } type;
+  enum Type { kMove, kButton, kWheel, kKey, kText, kText16 } type;
   float x = 0, y = 0;
   int code = 0;
   bool down = false;
@@ -33,70 +43,39 @@ struct Input {
 
 std::mutex g_input_mutex;
 std::vector<Input> g_input;
-std::atomic<bool> g_open{false};
+using debug::Panel;
+std::atomic<Panel> g_panel{Panel::Closed};
 bool g_clear_imgui_input = false;
+#ifdef GTAV_DESKTOP_WORKSHOP
+std::atomic<bool> g_reset_phone{false};
+#endif
 
 ImGuiContext* g_context = nullptr;
 bool g_font_uploaded = false;
 float g_scale = 1.0f;
 
-// Every setting the menu shows, by cvar name. Saved to gtav_settings.ini as name=value.
-constexpr const char* kSettings[] = {
-    "gtav_fps_limit",
-    "gtav_native_vsync",
-    "gtav_native_fps",
-    "gtav_native_tile_penumbra_all",
-    "gtav_native_async_pipelines",
-    "gpu_skip_rendering_lag_ms",
-    "gtav_native_exact_cache",
-    "gtav_native_texture_recheck_frames",
-    "gtav_touch_controls",
-};
+// Coalesce synchronous preference writes during slider drags and rapid edits.
+// Live cvar edits are applied immediately; disk writes wait for idle or close.
+std::mutex g_save_mutex;
+std::chrono::steady_clock::time_point g_last_edit{};
+bool g_pending_save = false;
 
-std::filesystem::path SettingsPath() { return ExeDir() / "gtav_settings.ini"; }
-
-void SaveSettings() {
-  std::ofstream out(SettingsPath());
-  out << "# GTA V native renderer settings (F1 menu). name=value, applied over the command line.\n";
-  for (const char* name : kSettings) out << name << '=' << rex::cvar::GetFlagByName(name) << '\n';
+void NotePendingSave() {
+  std::lock_guard lock(g_save_mutex);
+  g_last_edit = std::chrono::steady_clock::now();
+  g_pending_save = true;
 }
 
-bool GetBool(const char* name) { return rex::cvar::GetFlagByName(name) == "true"; }
-void SetBool(const char* name, bool value) { rex::cvar::SetFlagByName(name, value ? "true" : "false"); }
-
-// Presets: the two ends of the trade-off. "Best image" draws everything exactly as soon as it
-// appears (new pipelines are built on the spot, a short hitch the first time an effect shows up)
-// with the per-pixel sun shadows; "Max performance" keeps the frame moving (new effects are
-// skipped for a frame or two while they compile), lets the game skip shadow work per tile and
-// lets the emulated GPU trail the game less.
-// How far the emulated GPU trails the game's kicks (ms): 6 is the tested value (foliage stopped
-// flickering while driving); 2 flickered. 4 is ~10% faster on Windows (88 -> 98 fps running
-// around, 10-29) and no worse than 6 in a headless flicker-catch A/B; not yet checked driving.
-constexpr const char* kSafeGpuLag = "6";
-constexpr const char* kFastGpuLag = "4";
-
-void ApplyPreset(bool best) {
-#ifdef __ANDROID__
-  // Phones: the per-pixel sun tiles cost no measurable fps (same-run A/B on an Adreno 730), and
-  // without them the game's per-tile shortcut shows gray 16x16 blocks at object edges.
-  SetBool("gtav_native_tile_penumbra_all", true);
-#else
-  SetBool("gtav_native_tile_penumbra_all", best);
-#endif
-  SetBool("gtav_native_async_pipelines", !best);
-  rex::cvar::SetFlagByName("gpu_skip_rendering_lag_ms", best ? kSafeGpuLag : kFastGpuLag);
-#ifdef __ANDROID__
-  // Phones: "Best image" is also the steady one, locked at 30 fps with vsync (sustained play heats
-  // the phone less and throttles later); "Max performance" runs uncapped.
-  rex::cvar::SetFlagByName("gtav_fps_limit", best ? "30" : "0");
-  SetBool("gtav_native_vsync", best);
-#else
-  if (!best) {
-    rex::cvar::SetFlagByName("gtav_fps_limit", "0");
-    SetBool("gtav_native_vsync", false);
-  }
-#endif
-  SaveSettings();
+void FlushPendingSaveImpl(bool force) {
+  std::lock_guard lock(g_save_mutex);
+  if (!g_pending_save) return;
+  auto now = std::chrono::steady_clock::now();
+  if (!force && now - g_last_edit < std::chrono::milliseconds(350)) return;
+  // Settings runtime is owned by the render thread after BeginRun, but Commit
+  // is also safe to call from the window thread for force flushes: the file
+  // is the same and edits are already in the shared Preferences object.
+  settings::Commit();
+  g_pending_save = false;
 }
 
 void EnsureContext(uint32_t h) {
@@ -109,6 +88,30 @@ void EnsureContext(uint32_t h) {
   io.IniFilename = nullptr;
   io.LogFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+#ifdef GTAV_DESKTOP_WORKSHOP
+  auto& platform = ImGui::GetPlatformIO();
+#ifndef _WIN32
+  platform.Platform_GetClipboardTextFn = [](ImGuiContext*) -> const char* {
+    static std::string clipboard;
+    clipboard.clear();
+    SDL_RunOnMainThread([](void* opaque) {
+      char* text = SDL_GetClipboardText();
+      if (!text) return;
+      auto& output = *static_cast<std::string*>(opaque);
+      output.assign(text, std::min(std::char_traits<char>::length(text), size_t{256}));
+      SDL_free(text);
+    }, &clipboard, true);
+    return clipboard.c_str();
+  };
+#endif
+  platform.Platform_SetClipboardTextFn = [](ImGuiContext*, const char* text) {
+    char* copy = SDL_strdup(text);
+    if (copy && !SDL_RunOnMainThread([](void* opaque) {
+          SDL_SetClipboardText(static_cast<const char*>(opaque));
+          SDL_free(opaque);
+        }, copy, false)) SDL_free(copy);
+  };
+#endif
   g_scale = std::max(1.0f, float(h) / 720.0f);
 #if defined(__APPLE__) && TARGET_OS_IPHONE
   g_scale *= 1.6f;  // a 5.4-inch screen driven by fingers: larger text and controls
@@ -125,9 +128,9 @@ void EnsureContext(uint32_t h) {
 }
 
 void Push(const Input& in) {
-  if (!g_open) return;
+  if (!IsOpen()) return;
   std::lock_guard lock(g_input_mutex);
-  if (g_open && g_input.size() < 1024) g_input.push_back(in);
+  if (IsOpen() && g_input.size() < 1024) g_input.push_back(in);
 }
 
 ImGuiKey ToImGui(Key key) {
@@ -139,146 +142,153 @@ ImGuiKey ToImGui(Key key) {
     case Key::kEnter: return ImGuiKey_Enter;
     case Key::kSpace: return ImGuiKey_Space;
     case Key::kTab: return ImGuiKey_Tab;
+    case Key::kBackspace: return ImGuiKey_Backspace;
+    case Key::kDelete: return ImGuiKey_Delete;
+    case Key::kHome: return ImGuiKey_Home;
+    case Key::kEnd: return ImGuiKey_End;
+    case Key::kCtrl: return ImGuiMod_Ctrl;
+    case Key::kShift: return ImGuiMod_Shift;
+    case Key::kSuper: return ImGuiMod_Super;
+    case Key::kA: return ImGuiKey_A;
+    case Key::kC: return ImGuiKey_C;
+    case Key::kV: return ImGuiKey_V;
+    case Key::kX: return ImGuiKey_X;
+    case Key::kY: return ImGuiKey_Y;
+    case Key::kZ: return ImGuiKey_Z;
   }
   return ImGuiKey_None;
 }
 
-void Build(uint32_t fps, double frame_ms) {
-#if defined(__APPLE__) && TARGET_OS_IPHONE
-  // Centred: the screen's sides are under the rounded corners and the notch.
+void BuildSettings(uint32_t fps, double frame_ms, const PresentationInfo& info) {
   const ImVec2 display = ImGui::GetIO().DisplaySize;
-  ImGui::SetNextWindowPos(ImVec2(display.x * 0.5f, display.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-#else
-  ImGui::SetNextWindowPos(ImVec2(40.0f * g_scale, 40.0f * g_scale), ImGuiCond_FirstUseEver);
-#endif
-  ImGui::SetNextWindowSize(ImVec2(520.0f * g_scale, 0.0f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowPos(ImVec2(display.x * 0.5f, display.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  const ImVec2 available(std::max(1.0f, display.x - 24.0f), std::max(1.0f, display.y - 24.0f));
+  ImGui::SetNextWindowSize(ImVec2(std::min(680.0f * g_scale, available.x),
+                                 std::min(575.0f * g_scale, available.y)), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), available);
   bool open = true;
-  if (!ImGui::Begin("Settings (F1 / Esc / B to close)", &open, ImGuiWindowFlags_NoCollapse)) {
-    ImGui::End();
-    return;
+  if (ImGui::Begin("Graphics settings (F1)", &open, ImGuiWindowFlags_NoCollapse)) {
+    auto& prefs = settings::Player();
+    if (settings::DrawGraphicsMenu(prefs, {uint32_t(display.x), uint32_t(display.y)}, fps, frame_ms, info, g_scale))
+      NotePendingSave();
+    // Flush once the user idles or stops dragging. While a slider is active we
+    // keep the disk quiet and only update the live cvar.
+    const bool dragging = ImGui::IsAnyItemActive();
+    if (!dragging) FlushPendingSaveImpl(false);
   }
-  ImGui::Text("%u fps  (%.1f ms per frame)", fps, frame_ms);
-  ImGui::Separator();
-
-  ImGui::TextUnformatted("Preset");
-  if (ImGui::Button("Best image")) ApplyPreset(true);
-  ImGui::SameLine();
-  if (ImGui::Button("Max performance")) ApplyPreset(false);
-  ImGui::TextDisabled("Compare the fps above after switching.");
-  ImGui::Separator();
-
-  bool changed = false;
-  int limit = std::atoi(rex::cvar::GetFlagByName("gtav_fps_limit").c_str());
-  int choice = limit == 30 ? 0 : limit == 60 ? 1 : limit <= 0 ? 2 : 3;
-  const char* limits[] = {"30 (the game's own limiter)", "60", "Uncapped", "Custom (command line)"};
-  ImGui::SetNextItemWidth(260.0f * g_scale);
-  if (ImGui::Combo("Frame rate limit", &choice, limits, choice == 3 ? 4 : 3) && choice < 3) {
-    rex::cvar::SetFlagByName("gtav_fps_limit", choice == 0 ? "30" : choice == 1 ? "60" : "0");
-    changed = true;
-  }
-
-  auto check = [&](const char* label, const char* name, const char* help) {
-    bool v = GetBool(name);
-    if (ImGui::Checkbox(label, &v)) {
-      SetBool(name, v);
-      changed = true;
-    }
-    if (help && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", help);
-  };
-  check("VSync", "gtav_native_vsync", "Wait for the display refresh: no tearing, fps capped at the refresh rate.");
-  check("FPS counter", "gtav_native_fps", "Frames per second in the top-left corner.");
-  ImGui::Separator();
-  ImGui::TextUnformatted("Accuracy");
-  check("Per-pixel sun shadows", "gtav_native_tile_penumbra_all",
-        "On: every screen tile computes sun shadows per pixel (no blocky shadows or car reflections).\n"
-        "Off: the game's own per-tile shortcut, which goes blocky on this renderer (gray 16x16 blocks).");
-  check("Compile new effects in the background", "gtav_native_async_pipelines",
-        "On: no hitch when a new effect first appears; it is skipped for a frame or two instead.\n"
-        "Off: it is drawn from its first frame, with a short hitch while it is built.");
-  {
-    bool fast = std::atoi(rex::cvar::GetFlagByName("gpu_skip_rendering_lag_ms").c_str()) < std::atoi(kSafeGpuLag);
-    if (ImGui::Checkbox("Low GPU latency", &fast)) {
-      rex::cvar::SetFlagByName("gpu_skip_rendering_lag_ms", fast ? kFastGpuLag : kSafeGpuLag);
-      changed = true;
-    }
-    if (ImGui::IsItemHovered())
-      ImGui::SetTooltip("On: the emulated GPU trails the game by 2 ms instead of 6 (about 20%% more fps).\n"
-                        "Off: the tested setting; with On, watch foliage and distant meshes while driving.");
-  }
-  ImGui::Separator();
-  ImGui::TextUnformatted("Textures");
-  check("Exact texture checks", "gtav_native_exact_cache",
-        "On: every texture is fully re-checked each frame: no stale gray blocks, but more CPU time.\n"
-        "Off: large textures are spot-checked between full checks (faster).");
-  {
-    int frames = std::atoi(rex::cvar::GetFlagByName("gtav_native_texture_recheck_frames").c_str());
-    ImGui::SetNextItemWidth(200.0f * g_scale);
-    if (ImGui::SliderInt("Full re-check every N frames", &frames, 1, 30)) {
-      rex::cvar::SetFlagByName("gtav_native_texture_recheck_frames", std::to_string(frames));
-      changed = true;
-    }
-    if (ImGui::IsItemHovered())
-      ImGui::SetTooltip("Lower: textures the game streams in show up sooner (fewer gray blocks), more CPU.");
-  }
-  ImGui::Separator();
-  check("Touch controls", "gtav_touch_controls", "The on-screen gamepad (hidden while a controller is connected).");
-  ImGui::TextDisabled("Controller: RB + Back opens/closes this menu; D-pad + A to change, B to close.");
-  if (changed) SaveSettings();
   ImGui::End();
-  if (!open) Close();
+  if (!open && g_panel == Panel::Settings) {
+    FlushPendingSaveImpl(true);
+    Close();
+  } else if (open) {
+    // Also flush on panel switch without closing the window: the user moved
+    // to Debug/Workshop; the F1 render thread may return before next BuildSettings.
+    FlushPendingSaveImpl(false);
+  }
+}
+
+void BuildDebug(uint32_t fps, double frame_ms) {
+  const auto display = ImGui::GetIO().DisplaySize;
+  ImGui::SetNextWindowSize(ImVec2(std::min(820.f * g_scale, display.x - 20),
+                                std::min(520.f * g_scale, display.y - 20)), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowPos(ImVec2(display.x * .5f, display.y * .5f), ImGuiCond_Appearing, ImVec2(.5f, .5f));
+  bool open = true;
+  if (ImGui::Begin("GTA V Recomp | Debug (F2 / Esc)", &open, ImGuiWindowFlags_NoCollapse))
+    debug::DrawPanel(fps, frame_ms, g_scale);
+  ImGui::End();
+  if (!open && g_panel == Panel::Debug) Close();
+}
+
+#ifdef GTAV_DESKTOP_WORKSHOP
+void BuildWorkshop() {
+  const auto screen = ImGui::GetIO().DisplaySize;
+  ImGui::SetNextWindowPos(ImVec2(screen.x * .5f, screen.y * .5f), ImGuiCond_Appearing, ImVec2(.5f, .5f));
+  ImGui::SetNextWindowSize(ImVec2(std::min(760.f * g_scale, screen.x - 16), std::min(545.f * g_scale, screen.y - 16)),
+                           ImGuiCond_FirstUseEver);
+  bool open = true;
+  if (ImGui::Begin("GTA V Recomp | Workshop (F6 / Esc)", &open, ImGuiWindowFlags_NoCollapse)) sandbox::DrawWorkshop();
+  ImGui::End();
+  if (!open && g_panel == Panel::Workshop) Close();
+}
+#endif
+
+void SwitchPanel(Panel wanted, std::optional<Panel> only_if = {}) {
+  // Flush any pending F1 save before the panel changes or closes: the
+  // F1 render thread may return before building widgets (early-out).
+  if (wanted == Panel::Closed || g_panel.load() == Panel::Settings) FlushPendingSaveImpl(true);
+  std::lock_guard lock(g_input_mutex);
+  if (only_if && g_panel.load() != *only_if) return;
+  const auto next = debug::TogglePanel(g_panel.load(), wanted);
+  g_panel = next;
+  g_input.clear();
+  g_clear_imgui_input = true;
+  debug::PanelControls().SetOpen(next == Panel::Debug);
+  input::Reset();
+#ifdef GTAV_DESKTOP_WORKSHOP
+  if (sandbox::Active()) {
+    workshop::SetCapture(next == Panel::Build, next == Panel::Phone, next != Panel::Closed && next != Panel::Build && next != Panel::Phone);
+    if (next == Panel::Phone) g_reset_phone = true;
+  }
+#endif
 }
 
 }  // namespace
 
-void Toggle() {
-  std::lock_guard lock(g_input_mutex);
-  g_open = !g_open.load();
-  g_input.clear();
-  g_clear_imgui_input = true;
-  input::Reset();
+void Toggle() { SwitchPanel(Panel::Settings); }
+void ToggleDebug() { SwitchPanel(Panel::Debug); }
+#ifdef GTAV_DESKTOP_WORKSHOP
+void OpenWorkshop() { if (!WorkshopOpen() && sandbox::Active()) SwitchPanel(Panel::Workshop); }
+bool ToggleWorkshop() {
+  if (!sandbox::Active()) return false;
+  SwitchPanel(Panel::Workshop);
+  return true;
 }
-void Close() {
-  std::lock_guard lock(g_input_mutex);
-  g_open = false;
-  g_input.clear();
-  g_clear_imgui_input = true;
-  input::Reset();
+bool WorkshopOpen() { return g_panel.load() == Panel::Workshop; }
+bool ToggleBuild() {
+  if (!sandbox::Active()) return false;
+  if (g_panel.load() == Panel::Build) SwitchPanel(Panel::Closed, Panel::Build);
+  else if (workshop::BuildAllowed()) SwitchPanel(Panel::Build);
+  return true;
 }
-bool IsOpen() { return g_open.load(); }
+bool OpenPhone() {
+  // Let arrows and P reach the current text/nav widget; never open over a text field.
+  if (!sandbox::Active() || IsOpen()) return false;
+  SwitchPanel(Panel::Phone, Panel::Closed);
+  return true;
+}
+void CloseCreative() {
+  const auto panel = g_panel.load();
+  if (panel == Panel::Build || panel == Panel::Phone) SwitchPanel(Panel::Closed, panel);
+}
+bool TextPanel() {
+  const auto panel = g_panel.load();
+  return panel == Panel::Workshop || panel == Panel::Build || panel == Panel::Phone;
+}
+void OnText(uint32_t ch) {
+  if (ch >= 32 && ch != 127 && ch <= 0x10ffff && TextPanel()) Push({Input::kText, 0, 0, int(ch)});
+}
+void OnText16(uint32_t ch) {
+  if (ch >= 32 && ch != 127 && ch <= 0xffff && TextPanel()) Push({Input::kText16, 0, 0, int(ch)});
+}
+#endif
+void Close() { SwitchPanel(Panel::Closed); }
+bool IsOpen() { return g_panel.load() != Panel::Closed; }
 void OnMouseMove(float x, float y) { Push({Input::kMove, x, y}); }
 void OnMouseButton(int button, bool down) { Push({Input::kButton, 0, 0, button, down}); }
 void OnMouseWheel(float dy) { Push({Input::kWheel, 0, dy}); }
 void OnKey(Key key, bool down) { Push({Input::kKey, 0, 0, int(key), down}); }
 
-void TestSet(const std::string& name, const std::string& value) {
-  REXLOG_INFO("[native] menu test: {} = {}", name, value);
-  rex::cvar::SetFlagByName(name, value);
-  if (std::getenv("GTAV_IGNORE_SETTINGS")) return;  // benchmark runs leave gtav_settings.ini alone
-  SaveSettings();
-  REXLOG_INFO("[native] menu test: saved");
-}
-
-void LoadSettings() {
-  // GTAV_IGNORE_SETTINGS=1: command-line settings only (benchmark runs).
-  if (std::getenv("GTAV_IGNORE_SETTINGS")) return;
-  std::ifstream in(SettingsPath());
-  if (!in) return;
-  std::string line;
-  while (std::getline(in, line)) {
-    if (line.empty() || line[0] == '#') continue;
-    auto eq = line.find('=');
-    if (eq == std::string::npos) continue;
-    std::string name = line.substr(0, eq), value = line.substr(eq + 1);
-    if (std::find_if(std::begin(kSettings), std::end(kSettings), [&](const char* s) { return name == s; }) ==
-        std::end(kSettings))
-      continue;
-    if (rex::cvar::SetFlagByName(name, value)) REXLOG_INFO("[native] setting {} = {} (gtav_settings.ini)", name, value);
-  }
-}
-
-ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms) {
+ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const PresentationInfo& info) {
   const bool touch_overlay = touch::Visible();
-  if (!g_open && !touch_overlay) return nullptr;
+#ifdef GTAV_DESKTOP_WORKSHOP
+  const bool workshop_hud = sandbox::Active();
+#else
+  const bool workshop_hud = false;
+#endif
+  if (!IsOpen() && !touch_overlay && !workshop_hud) {
+    FlushPendingSaveImpl(false);
+    return nullptr;
+  }
   EnsureContext(h);
   ImGuiContext* previous = ImGui::GetCurrentContext();
   ImGui::SetCurrentContext(g_context);
@@ -299,6 +309,8 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms) {
         case Input::kButton: io.AddMouseButtonEvent(in.code, in.down); break;
         case Input::kWheel: io.AddMouseWheelEvent(0.0f, in.y); break;
         case Input::kKey: io.AddKeyEvent(ToImGui(Key(in.code)), in.down); break;
+        case Input::kText: io.AddInputCharacter(unsigned(in.code)); break;
+        case Input::kText16: io.AddInputCharacterUTF16(ImWchar16(in.code)); break;
       }
     }
     g_input.clear();
@@ -309,7 +321,41 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms) {
     io.Fonts->GetTexDataAsRGBA32(&pixels, &fw, &fh);
   }
   ImGui::NewFrame();
-  if (g_open) Build(fps, frame_ms);
+  switch (g_panel.load()) {
+    case Panel::Settings: BuildSettings(fps, frame_ms, info); break;
+    case Panel::Debug: BuildDebug(fps, frame_ms); break;
+    case Panel::Workshop:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      BuildWorkshop();
+#endif
+      break;
+    case Panel::Build:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (!workshop::BuildAllowed()) SwitchPanel(Panel::Closed, Panel::Build);
+      else {
+        const auto view = workshop::Snapshot();
+        // Desktop presents across the viewport; only the mobile renderer letterboxes.
+        if (!workshop::DrawBuildMenu(*view, g_scale, {0, 0, {w, h}})) SwitchPanel(Panel::Closed, Panel::Build);
+      }
+#endif
+      break;
+    case Panel::Phone:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (g_reset_phone.exchange(false)) workshop::ResetPhone();
+      switch (workshop::DrawPhone(*workshop::Snapshot(), fps, g_scale)) {
+        case workshop::PhoneAction::Session: SwitchPanel(Panel::Workshop, Panel::Phone); break;
+        case workshop::PhoneAction::Build: if (workshop::BuildAllowed()) SwitchPanel(Panel::Build, Panel::Phone); break;
+        case workshop::PhoneAction::Close: SwitchPanel(Panel::Closed, Panel::Phone); break;
+        case workshop::PhoneAction::None: break;
+      }
+#endif
+      break;
+    case Panel::Closed:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (workshop_hud) sandbox::DrawHud();
+#endif
+      break;
+  }
   if (touch_overlay) touch::Draw(ImGui::GetForegroundDrawList(), float(w), float(h));
   ImGui::Render();
   ImDrawData* data = ImGui::GetDrawData();
@@ -335,5 +381,7 @@ void SetFontTexture(uint32_t descriptor) {
   g_font_uploaded = true;
   if (previous && previous != g_context) ImGui::SetCurrentContext(previous);
 }
+
+void FlushPendingSave(bool force) { FlushPendingSaveImpl(force); }
 
 }  // namespace gtav::native::menu
