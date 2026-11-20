@@ -174,6 +174,7 @@ ImGuiKey ToImGui(Key key) {
   return ImGuiKey_None;
 }
 
+void SwitchPanel(Panel wanted, std::optional<Panel> only_if);
 void BuildSettings(uint32_t fps, double frame_ms, const PresentationInfo& info) {
   const ImVec2 display = ImGui::GetIO().DisplaySize;
   ImGui::SetNextWindowPos(ImVec2(display.x * 0.5f, display.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
