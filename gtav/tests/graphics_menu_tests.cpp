@@ -76,6 +76,9 @@ int main() {
   click("Potato");
   CHECK(prefs.PendingRestart() && prefs.Value(Key::LowMemory) == "true" && flags[Key::LowMemory] == "false");
   CHECK(fresh.Open(path).Value(Key::SceneScale) == "0.5" && fresh[Key::MaterialFiltering] == "false");
+  click("Extra Potato");
+  CHECK(prefs.PendingRestart() && prefs.Value(Key::SceneScale) == "0.333333" && prefs.Value(Key::ExtraPotato) == "true");
+  CHECK(fresh.Open(path).Value(Key::SceneScale) == "0.333333" && fresh[Key::ExtraPotato] == "true" && fresh[Key::LowMemory] == "true");
   click("Standard");
   CHECK(!prefs.PendingRestart() && flags[Key::Fsr1] == "false" && flags[Key::FrameLimit] == "30");
   CHECK(fresh.Open(path).Value(Key::LowMemory) == "false");

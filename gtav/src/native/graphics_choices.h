@@ -24,6 +24,7 @@ inline constexpr Choice kOutputChoices[]{
 inline constexpr Choice kScaleChoices[]{
     {"1.5", {"150%", "150%"}}, {"1", {"100%", "100%"}}, {"0.875", {"87.5%", "87,5%"}}, {"0.75", {"75%", "75%"}},
     {"0.666667", {"66.7%", "66,7%"}}, {"0.5", {"50%", "50%"}},
+    {"0.333333", {"33.3% (Extra Potato)", "33,3% (Extra Potato)"}},
 };
 inline constexpr Choice kUpscalingChoices[]{
     {"false", {"Linear", "Linéaire"}}, {"true", {"AMD FSR 1", "AMD FSR 1"}},
@@ -82,10 +83,12 @@ inline constexpr std::array kStartupRows{kOutputRow, kScaleRow, kUpscalingRow, k
 // A preset is a set of edits, not a second source of configuration. Output, FPS cap, VSync,
 // driver/queue choices and explicit realism overrides are left alone. Matching the accessible
 // preset values avoids displaying "Ultra" when, for example, CLI locked the scene to 75%.
+// Extra Potato reduces triangle density to GTA IV levels (extra lean caches, lower LOD) for "3x rien" hardware; Vulkan still required.
 struct Preset {
   Text title, help;
   const char* scale;
   bool filtering, lean, fsr1;
+  bool extra_potato = false;
 };
 inline constexpr Preset kPresets[]{
     {{"Standard", "Standard"}, {"Native scene detail and normal caches.", "Détail natif et caches normaux."},
@@ -96,6 +99,9 @@ inline constexpr Preset kPresets[]{
     {{"Potato", "Potato"}, {"50% scene, lighter caches. Vulkan still required.",
                              "Scène à 50 %, caches réduits. Vulkan reste nécessaire."},
       "0.5", false, true, false},
+    {{"Extra Potato", "Extra Potato"}, {"33% scene, ultra-lean caches, aggressive LOD (GTA IV faces). Runs on 3x rien; Vulkan still required.",
+                             "Scène à 33 %, caches ultra-réduits, LOD agressif (visages GTA IV). Tourne sur 3x rien ; Vulkan requis."},
+      "0.333333", false, true, false, true},
     {{"Balanced", "Équilibré"}, {"87.5% scene, with FSR 1 on Windows.", "Scène à 87,5 %, avec FSR 1 sous Windows."},
       "0.875", false, false, true},
     {{"Performance", "Performance"}, {"75% scene, with FSR 1 on Windows.", "Scène à 75 %, avec FSR 1 sous Windows."},
@@ -104,10 +110,19 @@ inline constexpr Preset kPresets[]{
 
 struct PresetEdit { Key key; const char* value; };
 constexpr auto PresetEdits(const Preset& preset) {
+  if (preset.extra_potato) {
+    return std::array{PresetEdit{Key::SceneScale, preset.scale},
+        PresetEdit{Key::MaterialFiltering, preset.filtering ? "true" : "false"},
+        PresetEdit{Key::LowMemory, preset.lean ? "true" : "false"},
+        PresetEdit{Key::Fsr1, preset.fsr1 ? "true" : "false"},
+        PresetEdit{Key::ExtraPotato, preset.extra_potato ? "true" : "false"}};
+  }
+  // Standard presets also clear Extra Potato when switching away.
   return std::array{PresetEdit{Key::SceneScale, preset.scale},
       PresetEdit{Key::MaterialFiltering, preset.filtering ? "true" : "false"},
       PresetEdit{Key::LowMemory, preset.lean ? "true" : "false"},
-      PresetEdit{Key::Fsr1, preset.fsr1 ? "true" : "false"}};
+      PresetEdit{Key::Fsr1, preset.fsr1 ? "true" : "false"},
+      PresetEdit{Key::ExtraPotato, "false"}};
 }
 
 inline size_t PresetIndex(const Preferences& prefs) {
@@ -124,7 +139,8 @@ inline size_t PresetIndex(const Preferences& prefs) {
 }
 
 inline bool CanApplyPreset(const Preferences& prefs) {
-  return prefs.CanEdit(Key::SceneScale) || prefs.CanEdit(Key::MaterialFiltering) || prefs.CanEdit(Key::LowMemory);
+  return prefs.CanEdit(Key::SceneScale) || prefs.CanEdit(Key::MaterialFiltering) || prefs.CanEdit(Key::LowMemory) ||
+         prefs.CanEdit(Key::ExtraPotato);
 }
 
 struct PresetResult { bool edited = false; const char* rejected = nullptr; };

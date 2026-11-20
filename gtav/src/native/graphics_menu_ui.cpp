@@ -147,7 +147,7 @@ void Performance(Controls& ui, const PresentationInfo& info) {
     ImGui::Text("Requested preset: %s", selected < std::size(kPresets) ? kPresets[selected].title.en : "Custom");
     ImGui::BeginDisabled(!CanApplyPreset(ui.prefs));
     for (size_t i = 0; i < std::size(kPresets); i++) {
-      if (i == 1 || i == 2 || i == 4) ImGui::SameLine();
+      if (i % 3 != 0) ImGui::SameLine();
       const auto& preset = kPresets[i];
       if (ImGui::Button(preset.title.en)) {
         const auto result = ApplyPreset(ui.prefs, preset);
@@ -157,15 +157,20 @@ void Performance(Controls& ui, const PresentationInfo& info) {
       if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", preset.help.en);
     }
     ImGui::EndDisabled();
-    ImGui::TextWrapped("Preset changes keep the FPS limit, display overrides and locked options. Potato targets low-memory PCs; compatible Vulkan graphics are still required.");
-    ImGui::TextDisabled("This run: %.0f%% scene  /  %u GPU slot%s  /  %s caches", info.scene_scale * 100,
-                        info.gpu_slots, info.gpu_slots == 1 ? "" : "s", info.lean_memory ? "reduced" : "normal");
+    ImGui::TextWrapped("Preset changes keep the FPS limit, display overrides and locked options. Potato targets low-memory PCs; Extra Potato (33%% scene, GTA IV faces) runs on 3x rien ultra-low hardware. Compatible Vulkan graphics are still required.");
+    ImGui::TextDisabled("This run: %.0f%% scene  /  %u GPU slot%s  /  %s caches%s", info.scene_scale * 100,
+                        info.gpu_slots, info.gpu_slots == 1 ? "" : "s", info.lean_memory ? "reduced" : "normal",
+                        info.scene_scale < 0.4f ? " (Extra Potato)" : "");
     ImGui::Separator();
     ImGui::TextUnformatted("Quality tweaks");
     ui.Check(Key::MaterialFiltering, "Enhanced material filtering (restart)",
              "Raises anisotropy to 8x on eligible repeating, mipmapped materials when supported. Wave state and depth are unchanged.");
     ui.Check(Key::LowMemory, "Reduced memory usage (restart)",
              "Reduces cache targets, uploads and GPU frames in flight. Shaders load as needed. Not a RAM limit.");
+    ui.Check(Key::ExtraPotato, "Extra Potato (restart)",
+             "33% scene, ultra-lean caches, aggressive LOD: GTA IV-level faces for 3x rien ultra-low hardware. Vulkan still required.");
+    if (ui.prefs.Value(Key::ExtraPotato) == "true")
+      ImGui::TextColored(kAmber, "Extra Potato active: GTA IV-style geometry on minimal hardware.");
   }
 #ifdef __ANDROID__
   // Keep the existing mobile presets: these change pacing as well as compile policy.

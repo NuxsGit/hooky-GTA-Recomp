@@ -11,6 +11,9 @@ namespace gtav::native {
 inline constexpr uint32_t kFullScenePitch = 1280;
 inline constexpr uint32_t kMaxTargetRows = 4096;  // includes the stacked sun shadow cascades
 inline constexpr float kUltraSceneScale = 1.5f;
+inline constexpr float kMinSceneScale = 0.333333f;  // Extra Potato: GTA IV-level geometry budget
+inline constexpr float kPotatoSceneScale = 0.5f;
+inline constexpr float kExtraPotatoSceneScale = 0.333333f;
 inline constexpr uint32_t kMaxFrameSlots = 2;
 inline constexpr uint64_t kMiB = 1ull << 20;
 
@@ -20,7 +23,7 @@ inline uint32_t ScaledTexels(uint32_t n, float scale) {
 
 inline float SceneScale(double requested, float fallback, bool desktop, uint64_t max_texture_size) {
   const float scale = std::isfinite(requested)
-      ? float(std::clamp(requested, 0.5, desktop ? double(kUltraSceneScale) : 1.0)) : fallback;
+      ? float(std::clamp(requested, double(kMinSceneScale), desktop ? double(kUltraSceneScale) : 1.0)) : fallback;
   // Scale is fixed for the whole run (including warmed pipelines). Don't mix different non-unit
   // scales if a tall target grows; fall back to native size on adapters with a small image limit.
   return scale > 1.0f && ScaledTexels(kMaxTargetRows, scale) > max_texture_size ? 1.0f : scale;
@@ -50,14 +53,21 @@ struct GraphicsMemoryPolicy {
   int32_t texture_budget_mib = 1024, buffer_budget_mib = 0;
   uint64_t upload_chunk = 64 * kMiB;
   bool lean = false;
+  bool extra_potato = false;  // ultra-lean: GTA IV faces on 3x rien hardware
 };
 
-constexpr GraphicsMemoryPolicy MakeGraphicsMemoryPolicy(bool lean, uint64_t default_upload_chunk) {
+constexpr GraphicsMemoryPolicy MakeGraphicsMemoryPolicy(bool lean, bool extra_potato, uint64_t default_upload_chunk) {
   // Soft budgets for evictable caches only; active textures, resolves and guest memory are not capped.
-  if (lean) return {1, 15, 30, 192, 64, 16 * kMiB, true};
+  // Extra Potato aggressively trims caches and upload arena to stay smooth on minimal GPUs (saccades-free).
+  if (extra_potato) return {1, 10, 20, 96, 32, 8 * kMiB, true, true};
+  if (lean) return {1, 15, 30, 192, 64, 16 * kMiB, true, false};
   GraphicsMemoryPolicy policy;
   policy.upload_chunk = default_upload_chunk;
   return policy;
+}
+
+constexpr GraphicsMemoryPolicy MakeGraphicsMemoryPolicy(bool lean, uint64_t default_upload_chunk) {
+  return MakeGraphicsMemoryPolicy(lean, false, default_upload_chunk);
 }
 
 constexpr uint32_t NextFrameSlot(uint32_t slot, const GraphicsMemoryPolicy& policy) {
