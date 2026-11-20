@@ -2,6 +2,7 @@
 
 #include "graphics_preferences.h"
 
+#include <array>
 #include <span>
 
 namespace gtav::native::settings {
