@@ -178,7 +178,7 @@ if(GTAV_LAUNCHER_TESTS)
         # An older launcher for the exact-package test. Only the HTTP transport is replaced;
         # the dashboard timer, policy, installer, lock and restart helper are production code.
         add_executable(gtav_launcher_update_fixture WIN32 src/main.cpp src/windows_update.cpp
-            src/update.cpp tests/update_transport_stub.cpp src/install.cpp src/sources.cpp src/desktop_home.cpp
+            src/update.cpp tests/update_transport_stub.cpp src/install.cpp src/sources.cpp src/desktop_home.cpp src/campaign_config.cpp
             src/launcher.manifest ../gtav/src/native/adreno_shader_fix.cpp)
         target_include_directories(gtav_launcher_update_fixture PRIVATE src)
         target_compile_definitions(gtav_launcher_update_fixture PRIVATE
