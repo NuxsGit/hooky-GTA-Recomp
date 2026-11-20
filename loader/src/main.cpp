@@ -992,29 +992,21 @@ LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         g_update_notice = UpdateSummary(g_update_result);
         AppendLog(std::wstring(ChannelName(g_preferences.channel)) + L" | " + Widen(g_update_result.message));
         // Notification à chaque nouvelle version détectée (même sans asset, pour prévenir le mainteneur)
+        // Non bloquant pour ne pas gêner les tests automatisés (gtav_windows_update_tests attend le Dashboard)
         if (!g_update_result.latest.empty() && g_update_result.latest != g_last_notified_version &&
             (g_update_result.status == UpdateStatus::Available || g_update_result.status == UpdateStatus::NoPackage)) {
           g_last_notified_version = g_update_result.latest;
           const bool has_asset = bool(g_update_result.asset);
-          std::wstring title = has_asset ? L"🔔 Mise à jour disponible : v" + Widen(g_update_result.latest)
-                                         : L"⚠️ Nouvelle version sans paquet Windows : v" + Widen(g_update_result.latest);
-          std::wstring body = Widen(g_update_result.message);
-          body += has_asset ? L"\n\nLe paquet est vérifié (SHA-256). Veux-tu ouvrir l’onglet Mises à jour pour l’installer ?"
-                            : L"\n\nLe tag existe mais le ZIP Windows x64 n’a pas été publié. Vérifie les Actions GitHub.";
-          // Faire clignoter la barre des tâches et émettre un son système, même en arrière-plan
+          // Flash + beep même en arrière-plan, visible dans la barre des tâches
           FlashWindow(g_wnd, TRUE);
           MessageBeep(MB_ICONASTERISK);
-          // Si la fenêtre est visible, proposer d’ouvrir l’onglet Updates ; sinon le message reste dans les logs
-          if (IsWindowVisible(g_wnd)) {
-            int btn = MessageBoxW(g_wnd, (title + L"\n\n" + body).c_str(), L"Hooky GTA Recomp — Mise à jour", MB_YESNO | MB_ICONINFORMATION);
-            if (btn == IDYES) ShowPage(Page::Updates);
-          } else {
-            // Fenêtre masquée : on reste discret mais la prochaine mise au premier plan montrera la bannière
-            AppendLog(title + L" | " + body);
-          }
-        } else if (g_update_result.status == UpdateStatus::NoRelease) {
-          // Canal vide : réinitialiser la mémoire de notification pour ne pas bloquer une future version du même numéro
-          // (ne rien faire, on garde le dernier notifié pour éviter le spam sur le même - vide)
+          // Le résumé est déjà dans g_update_notice et visible dans l’onglet Mises à jour ;
+          // on ajoute un log explicite pour que l’utilisateur qui n’est pas sur Updates voie la notif
+          std::wstring title = has_asset ? L"🔔 Mise à jour disponible : v" + Widen(g_update_result.latest)
+                                         : L"⚠️ Nouvelle version sans paquet Windows : v" + Widen(g_update_result.latest);
+          AppendLog(title + L" | " + Widen(g_update_result.message));
+          // Pas de MessageBox bloquant ici : les tests Windows (WaitWindow GtavRecompDashboard) échouent si on bloque.
+          // L’utilisateur voit la bannière « mise à jour disponible » dans Updates et le flash de la fenêtre.
         }
       }
       RefreshUpdateControls();
