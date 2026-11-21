@@ -2,7 +2,7 @@
 // Asset-free, no retail data, no GPU. Simule la charge qui a motive le preset N100 Ultra 25%.
 // Compile: g++ -std=c++20 -O2 n100_benchmark.cpp -o n100_benchmark
 // Usage: ./gtav_n100_benchmark [--quick] [--json] [--ultra]
-// Verifie: CPU sans AVX2 (N100), 25% scene, 64/16 MiB, 1 worker, 1 frame slot
+// Verifie: CPU sans AVX2 (N100), 25% scene, 96/32 MiB, 1 worker, 1 frame slot
 #include "../src/native/graphics_policy.h"
 #include "../src/native/graphics_preferences.h"
 
@@ -180,8 +180,8 @@ static Result bench_scaled_texels(bool quick) {
 }
 static Result bench_upload(bool quick) {
   (void)quick;
-  // Simulate upload arena fragmentation like upload_arena_tests: 4MiB chunk on N100 Ultra vs 64MiB standard
-  const uint64_t ultra = 4 * (1<<20);
+  // Simulate upload arena fragmentation like upload_arena_tests: 8MiB chunk on N100 Ultra vs 64MiB standard
+  const uint64_t ultra = 8 * (1<<20);
   const uint64_t standard = 64 * (1<<20);
   auto t0 = chrono::high_resolution_clock::now();
   bool fits = FitsUpload(ultra, 0, 3*(1<<20));
@@ -193,7 +193,7 @@ static Result bench_upload(bool quick) {
   double ms = chrono::duration<double, std::milli>(t1-t0).count();
   // N100 Ultra reduces chunk 16x -> less stall on 8GB
   double ratio = double(standard)/double(ultra);
-  return {"Upload chunk N100 4MiB", "x leaner", ratio, ms, "standard 64MiB / ultra 4MiB = "+std::to_string((int)ratio)+"x, fits 3MiB? "+std::string(fits?"yes":"no")};
+  return {"Upload chunk N100 8MiB", "x leaner", ratio, ms, "standard 64MiB / ultra 8MiB = "+std::to_string((int)ratio)+"x, fits 3MiB? "+std::string(fits?"yes":"no")};
 }
 
 static void print_header() {
@@ -204,7 +204,7 @@ static void print_header() {
   std::cout << " AVX2: " << (has_avx2()?"YES (pas N100, Haswell+ - attend NO)":"NO (N100/Gracemont - attendu)") << "\n";
   std::cout << " RAM total: " << mem_total_mib() << " MiB" << (mem_total_mib() && mem_total_mib() < 9000 ? " (8 Go - profil N100)":"") << "\n";
   std::cout << " Threads: " << std::thread::hardware_concurrency() << " (N100 attendu: 4)\n";
-  std::cout << " Preset N100 Ultra: 25% scene, 64 MiB tex / 16 MiB buf / 4 MiB upload, 1 frame slot, FSR1, 1x aniso, fog off\n";
+  std::cout << " Preset N100 Ultra: 25% scene, 96 MiB tex / 32 MiB buf / 8 MiB upload, 1 frame slot, FSR1, 1x aniso, fog off\n";
   std::cout << "------------------------------------------------------------\n";
 }
 
@@ -223,8 +223,8 @@ static void print_policy() {
   pr("N100 Ultra", ultra, "25%");
   std::cout << "------------------------------------------------------------\n";
   // verify N100 Ultra values vs header
-  bool ok = ultra.texture_budget_mib==64 && ultra.buffer_budget_mib==16 && ultra.upload_chunk==4*kMiB && ultra.frame_slots==1 && ultra.ultra_potato;
-  std::cout << " N100 Ultra check: " << (ok?"PASS":"FAIL") << " (64/16/4MiB, 1 slot, ultra_potato=true)  kMinSceneScale=" << kMinSceneScale << " kUltraPotatoScale=" << kUltraPotatoSceneScale << "\n";
+  bool ok = ultra.texture_budget_mib==96 && ultra.buffer_budget_mib==32 && ultra.upload_chunk==8*kMiB && ultra.frame_slots==1 && ultra.ultra_potato;
+  std::cout << " N100 Ultra check: " << (ok?"PASS":"FAIL") << " (96/32/8MiB, 1 slot, ultra_potato=true)  kMinSceneScale=" << kMinSceneScale << " kUltraPotatoScale=" << kUltraPotatoSceneScale << "\n";
   if (!ok) std::cout << "  !! Valeurs attendues non matchees - revoir graphics_policy.h\n";
   // output preset too
   std::cout << " SceneScale(0.25) -> " << SceneScale(0.25,1,true,8192) << " (attendu 0.25)  Scaled 1280x720@0.25 = " << ScaledTexels(1280,0.25f) << "x" << ScaledTexels(720,0.25f) << "\n";
@@ -297,16 +297,16 @@ int main(int argc, char** argv) {
   if (!avx_ok) std::cout << " Note: AVX2 detecte -> ce n'est pas un N100 reel (Gracemont sans AVX2) - test lance sur autre CPU, preset Ultra reste valide.\n";
   if (ram && ram>17000) std::cout << " Note: >16 Go detecte -> Lenovo N100 8Go attendu, lenient policy anyway.\n";
   std::cout << " Conseil Lenovo N100:\n";
-  std::cout << "  - Preset recommande: N100 Ultra (25% scene, FSR1, 64/16 MiB) -> 480x270 interne, ~10x moins texels, saccades-free 8Go\n";
+  std::cout << "  - Preset recommande: N100 Ultra (25% scene, FSR1, 96/32 MiB) -> 480x270 interne, ~10x moins texels, saccades-free 8Go\n";
   std::cout << "  - Workers shader: 1 (ultra) vs 4-6 standard -> evite spike CPU 6W TDP\n";
-  std::cout << "  - Budget: texture 64MiB + buffer 16MiB -> tient dans UHD partage (vs 1024MiB standard)\n";
+  std::cout << "  - Budget: texture 96MiB + buffer 32MiB -> tient dans UHD partage (vs 1024MiB standard)\n";
   std::cout << "  - Si >30 FPS vise: ajouter --gtav_fps_limit=0 + --vsync=false apres warmup\n";
   std::cout << " Run: ./gtav_n100_benchmark --quick  (30s)  |  ctest -R n100 --verbose\n";
   std::cout << "============================================================\n";
   // sanity checks for ctest: fail if Ultra policy broken
   constexpr auto ultra = MakeGraphicsMemoryPolicy(false,true,true, 64 * kMiB);
-  if (ultra.texture_budget_mib!=64 || ultra.upload_chunk!=4*kMiB) {
-    std::cerr << "FAIL: N100 Ultra policy mismatch\n";
+  if (ultra.texture_budget_mib!=96 || ultra.upload_chunk!=8*kMiB) {
+    std::cerr << "FAIL: N100 Ultra policy mismatch (expected 96/32/8)\n";
     return 1;
   }
   if (SceneScale(0.25,1,true,8192)!=0.25f) {
