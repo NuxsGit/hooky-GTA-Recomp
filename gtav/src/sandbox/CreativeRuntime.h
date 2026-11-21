@@ -23,7 +23,7 @@ bool Fresh(const DesktopView&);
 bool LocalAuthority();
 bool BuildAllowed();
 bool Submit(Command, bool build_panel = false);
-void SetCapture(bool build, bool phone, bool other = false);
+void SetCapture(bool build, bool admin_panel, bool other = false);
 bool ActiveCapture();
 void SetPreview(uint32_t model, Placement);
 bool FlightKey(unsigned bit, bool down);

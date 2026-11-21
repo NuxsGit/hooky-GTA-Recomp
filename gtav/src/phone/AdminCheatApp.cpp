@@ -93,7 +93,7 @@ void MovementPage(const DesktopView& v, const PlayerView& local) {
   if (ImGui::Combo("Flight speed", &speed, "x1\0x3\0x8\0x15\0")) Submit({.op = Op::Speed, .value = speeds[speed]});
   ImGui::EndDisabled();
   if (!v.caps.Has(Effect::Noclip)) ImGui::TextDisabled("Noclip needs the extended TU27 ABI opt-in.");
-  ImGui::TextWrapped("Close the phone to steer: ZQSD (WASD positions), Space up, Ctrl down. On foot only.");
+  ImGui::TextWrapped("Close Workshop to steer: ZQSD (WASD positions), Space up, Ctrl down. On foot only.");
   GtaButton("Health 200 + armor 100", can && v.caps.Has(Tool::Heal), {Op::Heal});
   GtaButton("Clear blood and weapon damage", can && v.caps.Has(Tool::Damage), {Op::Damage});
 }

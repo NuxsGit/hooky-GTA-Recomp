@@ -4,7 +4,7 @@
 #include "sandbox/BuildMenuUI.h"
 #include "sandbox/CreativeRuntime.h"
 #include "sandbox/desktop.h"
-#include "phone/PhoneShellUI.h"
+#include "phone/AdminCheatApp.h"
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -36,15 +36,20 @@ Session::~Session() = default;
 SessionView Session::View() const { return {}; }
 }
 
-static bool phone = false;
+static bool admin = false;
 void Frame() {
   labels.clear(); rects.clear();
   auto& io = ImGui::GetIO();
   ImGui::NewFrame();
-  if (phone) DrawPhone(v, 60, 1.f);
+  if (admin) {
+    ImGui::SetNextWindowSize(ImVec2(760, 565), ImGuiCond_Always);
+    ImGui::Begin("Admin fixture");
+    DrawAdminCheatApp(v, v.players.front());
+    ImGui::End();
+  }
   else CHECK(DrawBuildMenu(v, 1.f, {0, 0, {unsigned(io.DisplaySize.x), unsigned(io.DisplaySize.y)}}));
   ImGui::Render();
-  CHECK(ImGui::GetDrawData()->TotalVtxCount > 200);
+  if (!admin || owner) CHECK(ImGui::GetDrawData()->TotalVtxCount > 200);
 }
 ImVec2 At(const char* label) {
   if (!labels.contains(label)) { for (const auto& [s, _] : labels) std::fprintf(stderr, "[%s]\n", s.c_str()); }
@@ -91,15 +96,10 @@ int main() {
   Click({975, 375}, 1); CHECK(preview.model == 0);
   io.AddKeyEvent(ImGuiKey_Z, true); Frame();
   io.AddKeyEvent(ImGuiKey_Z, false); Frame(); CHECK(sent.back().op == Op::Undo);
-  phone = true; ResetPhone(); Frame(); Frame();
-  CHECK(labels.contains("ADMIN OS\nHost controls"));
-  Click("ADMIN OS\nHost controls");
-  Frame();
+  admin = true; Frame(); Frame();
   CHECK(labels.contains("Allow Players to build in Creative") && labels.contains("Pieces / player"));
   owner = false; Frame();
-  CHECK(!labels.contains("ADMIN OS\nHost controls") && !labels.contains("Pieces / player"));
-  io.DisplaySize = {800, 540}; Frame(); Frame();
-  CHECK(labels.contains("SESSION\nWorkshop F6"));
+  CHECK(!labels.contains("Pieces / player"));
   ImGui::DestroyContext();
   std::puts("ImGui: filter, Z typing guard, placement wheel/click/cancel, AdminOS and live revocation passed");
 }

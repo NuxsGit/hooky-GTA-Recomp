@@ -20,7 +20,6 @@ void OpenWorkshop();  // startup, before the native window appears
 bool ToggleWorkshop();  // F6, sandbox modes only
 bool WorkshopOpen();
 bool ToggleBuild();  // F8 on Workshop desktop, consumes the shortcut even when Build is denied
-bool OpenPhone();  // P / Up only when no other overlay is handling input
 void CloseCreative();  // focus lost: cancel placement and relinquish cursor
 bool TextPanel();
 void OnText(uint32_t codepoint);
