@@ -6,6 +6,7 @@
 #include "session.h"
 #include "scene.h"
 #include "campaign.h"
+#include "CreatorManager.h"
 
 namespace rex { struct PathConfig; }
 
@@ -26,6 +27,10 @@ std::optional<VehicleRequest> TakeVehicleRequest();
 bool SceneEnabled();
 void ReportSceneUnavailable();
 void ReportVehicle(const char* message);
+
+CreatorManager* GetCreatorManager();
+
+bool IsCreatorMode();
 
 // Render thread.
 void DrawWorkshop();

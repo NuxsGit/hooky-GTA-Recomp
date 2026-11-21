@@ -14,7 +14,7 @@ n'est spécifique au N100 par accident — ils sont volontairement partagés par
 | Levier | Où | Effet attendu (N100) |
 |---|---|---|
 | Scene scale 0.25 (N100 Ultra), 0.333 (Extra), 0.5 (Potato) | `graphics_policy.h` / `SceneScale` | ÷4 à ÷2 les fragments 3D ; le floater `ScaledTexels` garde les cibles ≤ 320×180 à 0.25. |
-| 1 slot de frame (`kMaxFrameSlots`→1), budgets textures 64/96/192 MiB, buffers 16/32/64 MiB, chunk upload 4/8/16 MiB | `graphics_policy.h` `MakeGraphicsMemoryPolicy` | Moins de mémoire vidéo, moins d'uploads CPU, 1 image à la fois (latence). |
+| 1 slot de frame (`kMaxFrameSlots`→1), budgets textures 96/96/192 MiB, buffers 32/32/64 MiB, chunk upload 8/8/16 MiB | `graphics_policy.h` `MakeGraphicsMemoryPolicy` | Moins de mémoire vidéo, moins d'uploads CPU, 1 image à la fois (latence). Ultra passé de 64/16/4 à 96/32/8 le 2026-11-21 pour corriger artefacts noirs + têtes sur vitres. |
 | Saut de mip (min LOD) : +2 pour Ultra, +1 pour Extra, +1 skip material-mip | `backend.cpp` (Sampler) | -2 niveaux de mip = ~4× moins de bande passante de texture par fetch pour les tex mipmapped eligible. |
 | Aniso cap 1× pour Ultra/Extra (16× standard) | `backend.cpp` `sampler_anisotropy_cap` | Évite le filtre anisotrope coûteux. |
 | Fog strip 3D omis (`ReduceFog`) | préréglage Extra/Ultra | Retire une passe coûteuse de fog à distance. |
@@ -27,11 +27,13 @@ n'est spécifique au N100 par accident — ils sont volontairement partagés par
 
 Sur la machine N100, le render thread est CPU-limité (8 Go, CPU intégré 4 cœurs, mémoire
 partagée). Tout cache de grande texture faisait un **hash échantillonné à chaque frame**.
-Nouveau défaut (cvar non défini = défaut) :
+Nouveau défaut (cvar non défini = défaut) — **corrigé 2026-11-21 pour stabilité** :
 
-- **N100 Ultra** : sample toutes les **3** frames ;
+- **N100 Ultra** : sample toutes les **2** frames (était 3 → aliasing : tête Franklin sur vitre voiture) ;
 - **Extra Potato / Potato** : sample toutes les **2** frames ;
 - **Standard** : toutes les frames (comportement historique).
+
+Le cache sampled passe désormais de 16×256 (4 Ko) à 24×256 (6 Ko) + vérif même dans la fenêtre N (backend.cpp) pour éviter les faux positifs. L'ancien skip pur temporel est retiré.
 
 En cas de définition explicite (`--gtav_native_texture_sample_frames=N`), la valeur est
 **conservée**. Le hash complet d'une grande texture reste toutes les 30 frames

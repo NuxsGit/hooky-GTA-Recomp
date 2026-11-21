@@ -16,6 +16,10 @@ struct Panel {
   uint32_t vehicle = ModelHash("sultan");
   bool favorites{}, warp = true;
   char reason[161]{};
+  // Spawn generic: vehicules/props/models batiments/entites
+  char spawn_search[96]{};
+  uint32_t spawn_model = 0;
+  int spawn_kind = 0; // 0 All, 1 Prop, 2 Vehicle, 3 Ped
 };
 void Button(const char* label, bool enabled, Command cmd) {
   ImGui::BeginDisabled(!enabled);
@@ -43,9 +47,13 @@ void PickMode(const char* label, const PlayerView& p, bool enabled) {
   ImGui::EndDisabled();
 }
 const PlayerView& Target(Panel& ui, const DesktopView& v, const PlayerView& local) {
+  // Tuto/campaign multi: v.players may be empty or local.id may be 0 (fallback) — guard empty vector.
+  if (v.players.empty()) return local;
   auto pick = std::find_if(v.players.begin(), v.players.end(), [&](const PlayerView& p) { return p.id == ui.player; });
   if (pick == v.players.end() || !PermissionManager::Target(local.role, pick->role, pick->id == local.id)) {
     ui.player = local.id;
+    // Guard: local.id may be 0 if fallback — avoid searching for 0 that never exists.
+    if (local.id == 0) return local;
     pick = std::find_if(v.players.begin(), v.players.end(), [&](const PlayerView& p) { return p.id == local.id; });
   }
   if (ImGui::BeginCombo("Target", pick == v.players.end() ? "Self" : pick->name.c_str())) {
@@ -140,6 +148,59 @@ void GivePage(Panel& ui, const DesktopView& v, const PlayerView& local) {
   GtaButton("+1,000,000", true, {Op::Cash, target.id, 1000000});
   GtaButton("Survival kit", can && v.caps.Has(Tool::Heal) && v.caps.Has(Tool::Weapon), {Op::Kit, target.id});
 }
+// New: spawn Vehicles/Props/Models (batiments) / Entities (peds) via generic QuickVehicle (now generic)
+// Uses same front-spawn (6m) as quick vehicle but for any kind — TU27 filters via IS_VEHICLE_MODEL etc.
+void SpawnPage(Panel& ui, const DesktopView& v) {
+  ImGui::TextWrapped("Spawn Vehicles / Props / Batiments / Entites (tout modele du BuildManager) devant toi (6m). Full roster TU27 filtre via IS_VEHICLE_MODEL / MODEL_IS_ON_DISC.");
+  ImGui::InputTextWithHint("##spawn-search", "Rechercher modele, nom ou hash 0x...", ui.spawn_search, sizeof ui.spawn_search);
+  const char* kind_labels[] = {"Tous", "Props (batiments)", "Vehicles", "Peds (entites)"};
+  ImGui::Combo("Type", &ui.spawn_kind, kind_labels, IM_ARRAYSIZE(kind_labels));
+  ImGui::Checkbox("Favoris seulement", &ui.favorites);
+  // Build filtered list
+  std::vector<const Model*> filtered;
+  filtered.reserve(Models().size());
+  for (const auto& m : Models()) {
+    if (ui.spawn_kind == 1 && m.kind != Kind::Prop) continue;
+    if (ui.spawn_kind == 2 && m.kind != Kind::Vehicle) continue;
+    if (ui.spawn_kind == 3 && m.kind != Kind::Ped) continue;
+    if (!Matches(m, ui.spawn_search)) continue;
+    if (ui.favorites && std::find(v.favorites.begin(), v.favorites.end(), m.hash) == v.favorites.end()) continue;
+    filtered.push_back(&m);
+  }
+  const Model* picked = FindModel(ui.spawn_model);
+  // If current selection not in filtered, clear
+  if (picked && std::find(filtered.begin(), filtered.end(), picked) == filtered.end()) picked = nullptr;
+  if (ImGui::BeginCombo("Modele", picked ? picked->name.data() : "Selectionner un modele...")) {
+    ImGuiListClipper clipper;
+    clipper.Begin(int(filtered.size()));
+    while (clipper.Step()) for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+      const auto* m = filtered[size_t(i)];
+      bool selected = ui.spawn_model == m->hash;
+      char label[160];
+      std::snprintf(label, sizeof label, "%s  /  %s  [0x%08X]##spawn", m->name.data(), m.category.data(), unsigned(m->hash));
+      if (ImGui::Selectable(label, selected)) {
+        ui.spawn_model = m->hash;
+        picked = m;
+      }
+      if (selected) ImGui::SetItemDefaultFocus();
+    }
+    ImGui::EndCombo();
+  }
+  if (picked) {
+    ImGui::TextDisabled("%s  /  %s  —  %s", picked->internal.data(), picked->category.data(), picked->kind == Kind::Prop ? "Prop/Batiment" : picked->kind == Kind::Vehicle ? "Vehicle" : "Ped/Entite");
+    ImGui::TextDisabled("Hash 0x%08X  —  %s", unsigned(picked->hash), v.caps.Has(ForKind(picked->kind)) ? "disponible TU27" : "indisponible (ABI manquant)");
+  }
+  const bool can_spawn = v.playable && picked && !v.busy && v.caps.Has(ForKind(picked ? picked->kind : Kind::Prop));
+  GtaButton("Spawn devant (6m)", can_spawn, {.op = Op::QuickVehicle, .value = ui.spawn_model});
+  ImGui::SameLine();
+  if (picked) {
+    const bool is_fav = std::find(v.favorites.begin(), v.favorites.end(), picked->hash) != v.favorites.end();
+    if (ImGui::SmallButton(is_fav ? "Retirer favori" : "Ajouter favori")) Submit({.op = Op::Favorite, .value = picked->hash});
+  }
+  ImGui::TextWrapped("Astuce : F8 Build garde le preview camera precis (clic gauche place, molette tourne, Shift distance, Ctrl+Shift hauteur). Ici spawn rapide sans preview.");
+  if (!v.caps.Has(Feature::Prop) && !v.caps.Has(Feature::Vehicle) && !v.caps.Has(Feature::Ped))
+    ImGui::TextColored(ImVec4(1.f,0.5f,0.45f,1.f), "Aucun Feature::Prop/Vehicle/Ped annonce par le TU27 — verifie le mapping natif.");
+}
 void WorldPage(Panel& ui, const DesktopView& v) {
   const auto dest = Destinations();
   GtaButton("Travel to waypoint", v.playable && v.caps.Has(Feature::Waypoint), {Op::Waypoint});
@@ -200,6 +261,8 @@ void PlayersPage(Panel& ui, const DesktopView& v, const PlayerView& local) {
 }  // namespace
 
 void DrawAdminCheatApp(const DesktopView& v, const PlayerView& local, float scale) {
+  // Tuto guard: v may be stale (playable false, empty players) — never crash, show locked if not authority.
+  // local may be fallback id 0 during loading — Label(0) safe.
   const bool authority = v.admin && LocalAuthority() && PermissionManager::AdminOS(local.role);
   if (!authority) {
     // Locked — never render a blank page. The panel stays open so the user sees why it is
@@ -218,8 +281,8 @@ void DrawAdminCheatApp(const DesktopView& v, const PlayerView& local, float scal
   }
   static Panel ui;
   ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.f * scale);
-  constexpr const char* tabs[]{"MAP", "MOVE", "GIVE", "WORLD", "PLAYERS"};
-  constexpr const char* tab_labels[]{"Gamemode & Map", "Movement", "Give", "Teleport & World", "Players & Moderation"};
+  constexpr const char* tabs[]{"MAP", "MOVE", "GIVE", "SPAWN", "WORLD", "PLAYERS"};
+  constexpr const char* tab_labels[]{"Gamemode & Map", "Movement", "Give", "Spawn Vehicles/Props/Batiments/Entites", "Teleport & World", "Players & Moderation"};
   for (unsigned i = 0; i < std::size(tabs); ++i) {
     if (i) ImGui::SameLine(0, 6);
     const bool active = ui.tab == i;
@@ -248,8 +311,9 @@ void DrawAdminCheatApp(const DesktopView& v, const PlayerView& local, float scal
       case 0: MapPage(v, local); break;
       case 1: MovementPage(v, local); break;
       case 2: GivePage(ui, v, local); break;
-      case 3: WorldPage(ui, v); break;
-      case 4: PlayersPage(ui, v, local); break;
+      case 3: SpawnPage(ui, v); break;
+      case 4: WorldPage(ui, v); break;
+      case 5: PlayersPage(ui, v, local); break;
     }
   }
   ImGui::EndChild();

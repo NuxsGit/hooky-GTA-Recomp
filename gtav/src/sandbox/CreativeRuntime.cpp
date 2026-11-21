@@ -117,7 +117,7 @@ std::shared_ptr<const DesktopView> Snapshot() {
 bool Fresh(const DesktopView& v) { return v.sampled_at && sandbox::NowMs() - v.sampled_at <= 900; }
 bool LocalAuthority() {
   const auto mode = sandbox::CurrentMode();
-  if (mode == sandbox::Mode::Solo || mode == sandbox::Mode::Campaign) return true;
+  if (mode == sandbox::Mode::Solo || mode == sandbox::Mode::Campaign || mode == sandbox::Mode::Creator) return true;
   if (mode == sandbox::Mode::Multiplayer || mode == sandbox::Mode::CampaignCoop) {
     const auto link = sandbox::Party().LinkState();
     return link == sandbox::Link::Idle || link == sandbox::Link::Hosting || link == sandbox::Link::Failed;

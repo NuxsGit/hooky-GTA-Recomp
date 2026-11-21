@@ -6,7 +6,9 @@
 #ifdef GTAV_DESKTOP_WORKSHOP
 #include "../phone/AdminCheatApp.h"
 #include "../sandbox/BuildMenuUI.h"
+#include "../sandbox/CreatorEditorUI.h"
 #include "../sandbox/CreativeRuntime.h"
+#include "../sandbox/CreatorManager.h"
 #include <SDL3/SDL.h>
 #endif
 
@@ -234,10 +236,12 @@ void BuildDebug(uint32_t fps, double frame_ms) {
 #ifdef GTAV_DESKTOP_WORKSHOP
 void BuildCheats() {
   const auto screen = ImGui::GetIO().DisplaySize;
+  // Tuto: screen can be 0 during transition — avoid ImGui window with negative constraints.
+  if (screen.x <= 1 || screen.y <= 1) return;
   ImGui::SetNextWindowPos(ImVec2(screen.x * .5f, screen.y * .5f), ImGuiCond_Appearing, ImVec2(.5f, .5f));
   ImGui::SetNextWindowSize(ImVec2(std::min(900.f * g_scale, screen.x - 16), std::min(660.f * g_scale, screen.y - 16)),
                            ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(screen.x - 12, screen.y - 12));
+  ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(std::max(0.f, screen.x - 12), std::max(0.f, screen.y - 12)));
   bool open = true;
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
   if (ImGui::Begin("CHEATS  //  ADMIN  [F5]  —  Tous les modes", &open, ImGuiWindowFlags_NoCollapse)) {
@@ -251,9 +255,12 @@ void BuildCheats() {
     if (!view) {
       ImGui::TextDisabled("Quick workshop bridge unavailable.");
     } else {
+      // Campagne multi tuto: view may be valid but players empty and sampled_at 0 -> fresh false -> show waiting, never deref null.
       const bool fresh = workshop::Fresh(*view);
       const bool authority = workshop::LocalAuthority();
-      auto self = std::find_if(view->players.begin(), view->players.end(), [](const workshop::PlayerView& p) { return p.id == workshop::kLocalOwner; });
+      // Guard empty players (tuto loading) — no local yet.
+      auto self = view->players.empty() ? view->players.end()
+          : std::find_if(view->players.begin(), view->players.end(), [](const workshop::PlayerView& p) { return p.id == workshop::kLocalOwner; });
       const workshop::PlayerView* local = self != view->players.end() ? &*self : nullptr;
       const workshop::PlayerView fallback{};
       const auto& local_ref = local ? *local : fallback;
@@ -287,17 +294,45 @@ void BuildCheats() {
 
 void BuildWorkshop() {
   const auto screen = ImGui::GetIO().DisplaySize;
+  if (screen.x <= 1 || screen.y <= 1) return;
   ImGui::SetNextWindowPos(ImVec2(screen.x * .5f, screen.y * .5f), ImGuiCond_Appearing, ImVec2(.5f, .5f));
   ImGui::SetNextWindowSize(ImVec2(std::min(760.f * g_scale, screen.x - 16), std::min(565.f * g_scale, screen.y - 16)),
                            ImGuiCond_FirstUseEver);
   bool open = true;
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
   if (ImGui::Begin("WORKSHOP  //  LOS SANTOS  [F6]", &open, ImGuiWindowFlags_NoCollapse)) {
+    // DrawWorkshop already guards Active() and empty world, but keep menu open even during tuto mission.
     sandbox::DrawWorkshop();
   }
   ImGui::End();
   ImGui::PopStyleVar();
   if (!open && g_panel == Panel::Workshop) Close();
+}
+
+void BuildCreator() {
+  const auto screen = ImGui::GetIO().DisplaySize;
+  if (screen.x <= 1 || screen.y <= 1) return;
+  // Fullscreen overlay Unity/Unreal style — no window chrome, uses CreatorEditorUI 3-panel layout
+  // We keep an invisible host window to own the ImGui context, real panels are inside DrawCreatorEditor
+  ImGui::SetNextWindowPos(ImVec2(0,0));
+  ImGui::SetNextWindowSize(screen);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0,0));
+  bool open = true;
+  ImGui::Begin("##creator-fullscreen", &open, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+  // Fetch state from sandbox
+  auto* mgr = sandbox::GetCreatorManager();
+  const auto wv = workshop::Snapshot();
+  sandbox::CreatorEditorView view{
+    mgr,
+    wv ? *wv : workshop::DesktopView{},
+    g_scale,
+    false
+  };
+  sandbox::DrawCreatorEditor(view);
+  ImGui::End();
+  ImGui::PopStyleVar(2);
+  if (!open) Close();
 }
 #endif
 
@@ -316,10 +351,11 @@ void SwitchPanel(Panel wanted, std::optional<Panel> only_if = {}) {
 #ifdef GTAV_DESKTOP_WORKSHOP
   // Cheat panel (F5) uses same admin capture as Workshop so Submit works for cheats in all modes,
   // including Campaign where sandbox::Active() is false. Always update capture, not only when Active().
+  // Creator (F7) is a full editor — captures like Build+Workshop.
   {
-    const bool is_build = next == Panel::Build;
-    const bool is_admin = next == Panel::Workshop || next == Panel::Cheats;
-    const bool other = next != Panel::Closed && next != Panel::Build && next != Panel::Workshop && next != Panel::Cheats;
+    const bool is_build = next == Panel::Build || next == Panel::Creator;
+    const bool is_admin = next == Panel::Workshop || next == Panel::Cheats || next == Panel::Creator;
+    const bool other = next != Panel::Closed && next != Panel::Build && next != Panel::Workshop && next != Panel::Cheats && next != Panel::Creator;
     workshop::SetCapture(is_build, is_admin, other);
   }
 #endif
@@ -353,13 +389,21 @@ bool ToggleBuild() {
   else if (workshop::BuildAllowed()) SwitchPanel(Panel::Build);
   return true;
 }
+bool ToggleCreator() {
+  if (!sandbox::Active()) return false;
+  // Creator MAP editor — allowed in any Workshop mode, but ideal in Mode::Creator
+  // Still allow in Solo/Multi so players can prototype without restarting
+  SwitchPanel(Panel::Creator);
+  return true;
+}
+bool CreatorOpen() { return g_panel.load() == Panel::Creator; }
 void CloseCreative() {
   const auto panel = g_panel.load();
-  if (panel == Panel::Build || panel == Panel::Cheats) SwitchPanel(Panel::Closed, panel);
+  if (panel == Panel::Build || panel == Panel::Cheats || panel == Panel::Creator) SwitchPanel(Panel::Closed, panel);
 }
 bool TextPanel() {
   const auto panel = g_panel.load();
-  return panel == Panel::Workshop || panel == Panel::Build || panel == Panel::Cheats;
+  return panel == Panel::Workshop || panel == Panel::Build || panel == Panel::Cheats || panel == Panel::Creator;
 }
 void OnText(uint32_t ch) {
   if (ch >= 32 && ch != 127 && ch <= 0x10ffff && TextPanel()) Push({Input::kText, 0, 0, int(ch)});
@@ -376,6 +420,11 @@ void OnMouseWheel(float dy) { Push({Input::kWheel, 0, dy}); }
 void OnKey(Key key, bool down) { Push({Input::kKey, 0, 0, int(key), down}); }
 
 ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const PresentationInfo& info) {
+  // Tuto first mission: w/h can be transiently 0 during loading/cutscene — guard ImGui against zero viewport.
+  if (w == 0 || h == 0) {
+    FlushPendingSaveImpl(false);
+    return nullptr;
+  }
   const bool touch_overlay = touch::Visible();
 #ifdef GTAV_DESKTOP_WORKSHOP
   const bool workshop_hud = sandbox::Active();
@@ -431,6 +480,8 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const P
       if (!workshop::BuildAllowed()) SwitchPanel(Panel::Closed, Panel::Build);
       else {
         const auto view = workshop::Snapshot();
+        // Tuto/campaign coop: view may be stale or null during mission loading — don't deref null.
+        if (!view) { SwitchPanel(Panel::Closed, Panel::Build); break; }
         // Desktop presents across the viewport; only the mobile renderer letterboxes.
         if (!workshop::DrawBuildMenu(*view, g_scale, {0, 0, {w, h}})) SwitchPanel(Panel::Closed, Panel::Build);
       }
@@ -439,6 +490,11 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const P
     case Panel::Cheats:
 #ifdef GTAV_DESKTOP_WORKSHOP
       BuildCheats();
+#endif
+      break;
+    case Panel::Creator:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      BuildCreator();
 #endif
       break;
     case Panel::Closed:

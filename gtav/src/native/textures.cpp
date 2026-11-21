@@ -397,7 +397,9 @@ uint64_t HashGuestTexture(const uint32_t words[6], std::span<const uint8_t> phys
     if (!bytes) continue;
     const auto* data = MapRange(physical, ranges[i], bytes);
     if (!data) return 0;
-    const uint32_t runs = i == 0 ? 16 : 4;
+    // Stability 2026-11-21: sampled hash was 16*256 (4KB) for base — too sparse, caused aliasing (Franklin head on car window)
+    // Increase to 24*256 (6KB) base + 8*256 mips for more coverage, still far cheaper than full hash.
+    const uint32_t runs = i == 0 ? 24 : 8;
     if (!sampled || bytes <= runs * 256u) {
       hash = XXH3_64bits_withSeed(data, bytes, hash);
     } else {

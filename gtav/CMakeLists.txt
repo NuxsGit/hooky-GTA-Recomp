@@ -130,7 +130,7 @@ if(NOT ANDROID AND NOT GTAV_IOS)
         src/sandbox/protocol.cpp src/sandbox/session.cpp src/sandbox/courses.cpp src/sandbox/paths.cpp src/sandbox/scene.cpp src/sandbox/campaign.cpp src/sandbox/campaign_death.cpp)
     include(WorkshopCore.cmake)
     target_sources(gtav PRIVATE ${GTAV_WORKSHOP_CORE}
-        src/sandbox/CreativeRuntime.cpp src/sandbox/Tu27Workshop.cpp src/sandbox/BuildMenuUI.cpp
+        src/sandbox/CreativeRuntime.cpp src/sandbox/Tu27Workshop.cpp src/sandbox/BuildMenuUI.cpp src/sandbox/CreatorEditorUI.cpp
         src/phone/AdminCheatApp.cpp)
     if(WIN32)
         target_link_libraries(gtav PRIVATE ws2_32 bcrypt iphlpapi)

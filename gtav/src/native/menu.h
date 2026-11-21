@@ -24,6 +24,8 @@ bool CheatsOpen();
 bool ToggleCheat();  // Compat alias for ToggleCheats (singular naming from a2e60d43)
 bool CheatOpen();
 bool ToggleBuild();  // F8 on Workshop desktop, consumes the shortcut even when Build is denied
+bool ToggleCreator(); // F7 — Creator MAP Unity/Unreal style editor
+bool CreatorOpen();
 void CloseCreative();  // focus lost: cancel placement and relinquish cursor
 bool TextPanel();
 void OnText(uint32_t codepoint);
