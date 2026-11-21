@@ -188,7 +188,7 @@ class Hub {
     // Keep startup rows first, then realism/performance extras for N100 Ultra tuning
     static const gfx::Row kFogRow{gfx::Key::ReduceFog, {"Distant fog", "Brouillard lointain"},
         {"Hide one distant fog strip (live toggle)", "Cache un voile lointain (direct)"}, gfx::kSwitchChoices};
-    const gfx::Row* extras[] = {&gfx::kAnisotropyRow, &gfx::kContactRayRow, &kFogRow};
+    const gfx::Row* extras[] = {&gfx::kAnisotropyRow, &gfx::kContactRayRow, &gfx::kFrameGenRow, &kFogRow};
     for (auto* row : extras) if (prefs.Available(row->key)) graphics_rows_.push_back(row);
     if (backdrop_) {
       for (int y = 0; y < kHeight; ++y) {
