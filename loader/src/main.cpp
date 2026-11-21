@@ -28,6 +28,7 @@
 #include "campaign_config.h"
 #include "desktop_home.h"
 #include "install.h"
+#include "launcher_resources.h"
 #include "sources.h"
 #include "update.h"
 #include "windows_update.h"
@@ -84,7 +85,7 @@ HWND g_wnd, g_edit[3], g_install, g_play, g_cancel, g_progress, g_stage, g_log, 
 HWND g_rebuild, g_update, g_update_zip, g_release, g_download, g_stable, g_nightly, g_auto;
 HWND g_update_text, g_feed_text, g_latest_text, g_auto_card, g_channel_hint;
 HWND g_install_label, g_install_text, g_badge, g_kicker, g_title;
-HWND g_campaign_ip, g_campaign_port, g_campaign_save, g_campaign_label;
+HWND g_campaign_ip, g_campaign_port, g_campaign_save;
 bool g_close_after_job = false, g_rebuilding = false, g_installing_update = false, g_update_automatic = false;
 bool g_checking = false, g_no_background = false, g_pause_auto = false;
 unsigned g_check_generation = 0;
@@ -99,7 +100,8 @@ int g_phone_job = 0;  // the running job: 0 install, 1 iPhone build, 2 Android b
 HFONT g_font, g_heading, g_display, g_small, g_mono;
 HBRUSH g_field_brush;
 UINT g_dpi = 96;
-constexpr int kWidth = 1024, kHeight = 648;
+constexpr int kWidth = 1024, kHeight = 746;
+constexpr int kCampaignTop = 540, kStatusTop = 650;
 constexpr COLORREF kCanvas = RGB(15, 18, 25), kRail = RGB(19, 24, 34), kPanel = RGB(24, 31, 44),
                    kHero = RGB(30, 42, 60), kField = RGB(12, 17, 27),
                    kBorder = RGB(54, 66, 85), kText = RGB(246, 244, 242), kMuted = RGB(177, 189, 208),
@@ -328,7 +330,7 @@ void SetBusy(bool busy) {
   RefreshUpdateControls();
 }
 
-void AddStartMenuShortcut(const fs::path& launcher);
+void AddLauncherShortcuts(const fs::path& launcher);
 fs::path ExePath();
 
 void StartInstall(bool rebuild) {
@@ -591,9 +593,8 @@ void CreateControls() {
     const BOOL dark = TRUE;
     DwmSetWindowAttribute(g_wnd, 20, &dark, sizeof(dark));  // immersive dark title bar on supported Windows versions
   }
-  Label(Always, L"H", 22, 34, 44, 41, &g_heading, kDark, SS_CENTERIMAGE | SS_CENTER);
   Label(Always, L"HOOKY", 80, 34, 107, 25, &g_heading);
-  Label(Always, L"RECOMP  /  DESKTOP", 81, 61, 115, 17, &g_small, kMuted);
+  Label(Always, L"RECOMP", 81, 61, 115, 17, &g_small, kMuted);
   Label(Always, L"BIBLIOTHÈQUE", 26, 117, 150, 20, &g_small, kMuted);
   for (size_t i = 0; i < std::size(kNavigation); ++i) {
     const auto& nav = kNavigation[i];
@@ -625,16 +626,18 @@ void CreateControls() {
 
   // Campaign co-op server host (launcher-editable IP/port). This reuses the same TCP transport
   // as private sessions but isolates saves under data/user/campaign_coop and locks characters.
-  // Y compacté pour laisser de l'air avant "ÉTAT DE L'INSTALLATION" (fix chevauchement texte)
-  g_campaign_label = Label(Overview, L"03  /  CAMPAGNE CO-OP  ·  3 JOUEURS (M / F / T)", 256, 512, 420, 18, &g_small, kMint);
-  Label(Overview, L"IP d’écoute (vide = auto)", 256, 530, 190, 18, &g_small, kMuted);
-  Label(Overview, L"Port TCP", 505, 530, 90, 18, &g_small, kMuted);
-  g_campaign_ip = Make(Overview, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 254, 548, 230, 26, kIdCampaignIp, &g_mono);
-  g_campaign_port = Make(Overview, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 500, 548, 90, 26, kIdCampaignPort, &g_mono);
+  Label(Overview, L"03  /  CAMPAGNE CO-OP", 256, kCampaignTop + 12, 260, 19, &g_small, kMint);
+  Label(Overview, L"3 joueurs · Mickaël, Franklin, Trevor · Sauvegarde séparée",
+        526, kCampaignTop + 12, 450, 19, &g_small, kMuted, SS_RIGHT | SS_ENDELLIPSIS);
+  Label(Overview, L"IP d’écoute (vide = auto)", 256, kCampaignTop + 37, 225, 18, &g_small, kMuted);
+  Label(Overview, L"Port TCP", 502, kCampaignTop + 37, 90, 18, &g_small, kMuted);
+  g_campaign_ip = Make(Overview, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
+                       254, kCampaignTop + 55, 230, 28, kIdCampaignIp, &g_mono);
+  g_campaign_port = Make(Overview, L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
+                         500, kCampaignTop + 55, 90, 28, kIdCampaignPort, &g_mono);
   SendMessageW(g_campaign_ip, EM_SETLIMITTEXT, 15, 0);
   SendMessageW(g_campaign_port, EM_SETLIMITTEXT, 5, 0);
-  g_campaign_save = Button(Overview, L"Enregistrer", 605, 547, 110, 28, kIdCampaignSave);
-  Label(Overview, L"Mickaël / Franklin / Trevor verrouillés dès le début · sauvegarde isolée campaign_coop", 256, 575, 520, 16, &g_small, kMuted);
+  g_campaign_save = Button(Overview, L"Enregistrer", 605, kCampaignTop + 55, 126, 28, kIdCampaignSave);
 
   for (int i = 0; i < 3; ++i) {
     const int y = 145 + i * 84;
@@ -672,11 +675,11 @@ void CreateControls() {
   Button(Logs, L"Ouvrir le dossier des journaux", 254, 471, 257, 38, kIdOpenLogs);
   SendMessageW(g_log, EM_SETLIMITTEXT, 128 * 1024, 0);
 
-  Label(Always, L"ÉTAT DE L’INSTALLATION", 255, 592, 518, 18, &g_small, kMuted);
-  g_stage = Label(Always, L"", 254, 610, 572, 25, &g_font, kText, SS_ENDELLIPSIS);
-  g_progress = Make(Always, PROGRESS_CLASSW, L"", PBS_SMOOTH, 254, 632, 575, 8, kIdProgress);
+  Label(Always, L"ÉTAT DE L’INSTALLATION", 255, kStatusTop + 13, 518, 18, &g_small, kMuted);
+  g_stage = Label(Always, L"", 254, kStatusTop + 33, 572, 22, &g_font, kText, SS_ENDELLIPSIS);
+  g_progress = Make(Always, PROGRESS_CLASSW, L"", PBS_SMOOTH, 254, kStatusTop + 60, 575, 8, kIdProgress);
   SendMessageW(g_progress, PBM_SETRANGE32, 0, 1000);
-  g_cancel = Button(Always, L"Annuler", 845, 595, 131, 42, kIdCancel);
+  g_cancel = Button(Always, L"Annuler", 845, kStatusTop + 22, 131, 42, kIdCancel);
   Layout();
   LoadInputs();
   LoadCampaignInputs();
@@ -754,7 +757,12 @@ void PaintDashboard(HWND window) {
   Box(dc, client, kCanvas, kCanvas);
   Box(dc, {0, 0, Px(206), client.bottom}, kRail, kRail);
   Box(dc, {Px(205), 0, Px(206), client.bottom}, kBorder, kBorder);
-  Box(dc, {Px(22), Px(34), Px(66), Px(75)}, kAccent, kAccent);
+  const int icon_size = Px(42);
+  if (auto icon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_SIDEBAR),
+                                                IMAGE_ICON, icon_size, icon_size, 0))) {
+    DrawIconEx(dc, Px(22), Px(34), icon, icon_size, icon_size, 0, nullptr, DI_NORMAL);
+    DestroyIcon(icon);
+  }
   Panel(dc, 859, 57, 137, 33, kRail);
   Box(dc, {Px(26), Px(559), Px(181), Px(560)}, kBorder, kBorder);
   if (g_page == Page::Overview) {
@@ -763,6 +771,7 @@ void PaintDashboard(HWND window) {
     Box(dc, {Px(233), Px(120), Px(236), Px(376)}, kAccent, kAccent);
     Panel(dc, 232, 396, 361, 128);
     Panel(dc, 608, 396, 390, 128);
+    Panel(dc, 232, kCampaignTop, 766, 94);
   } else {
     Panel(dc, 232, 116, 766, 416);
     if (g_page == Page::Setup || g_page == Page::Updates) {
@@ -770,7 +779,7 @@ void PaintDashboard(HWND window) {
       Box(dc, {Px(254), Px(y), Px(976), Px(y + 1)}, kBorder, kBorder);
     }
   }
-  Panel(dc, 232, 542, 766, 87, kRail);
+  Panel(dc, 232, kStatusTop, 766, 80, kRail);
   EndPaint(window, &paint);
 }
 
@@ -1052,7 +1061,7 @@ LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         ShellExecuteW(hw, nullptr, L"explorer.exe", arg.c_str(), nullptr, SW_SHOWNORMAL);
       } else if (wp) {
         SetWindowTextW(g_stage, L"Le jeu est prêt. Tu peux jouer.");
-        AddStartMenuShortcut(ExePath());
+        AddLauncherShortcuts(ExePath());
         ShowPage(Page::Overview);
         SetFocus(g_play);
       } else {
@@ -1167,29 +1176,35 @@ fs::path ExePath() {
   return length && length < buf.size() ? fs::path(buf.substr(0, length)) : fs::path();
 }
 
-void AddStartMenuShortcut(const fs::path& launcher) {
-  // Only the default install owns this shortcut. A portable test build must not hijack it.
-  if (!SameFolder(launcher.parent_path(), DefaultGameHome())) return;
-  wchar_t programs[MAX_PATH] = {};
-  if (FAILED(SHGetFolderPathW(nullptr, CSIDL_PROGRAMS, nullptr, SHGFP_TYPE_CURRENT, programs))) return;
-  const auto link_path = fs::path(programs) / L"GTA V Recomp.lnk";
+void AddLauncherShortcut(const fs::path& launcher, int folder, const wchar_t* arguments,
+                         const wchar_t* description) {
+  wchar_t path[MAX_PATH] = {};
+  if (FAILED(SHGetFolderPathW(nullptr, folder, nullptr, SHGFP_TYPE_CURRENT, path))) return;
+  const auto link_path = fs::path(path) / L"GTA V Recomp.lnk";
   std::error_code ec;
   if (fs::exists(link_path, ec) || ec) return;
-  const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  if (FAILED(com)) return;
   IShellLinkW* link = nullptr;
   if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link)))) {
-    link->SetPath(launcher.c_str());
-    link->SetWorkingDirectory(launcher.parent_path().c_str());
-    link->SetArguments(L"--play");
-    link->SetDescription(L"Choisir un mode de jeu GTA V Recomp");
-    IPersistFile* file = nullptr;
-    if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
-      file->Save(link_path.c_str(), TRUE);
-      file->Release();
+    if (SUCCEEDED(link->SetPath(launcher.c_str())) &&
+        SUCCEEDED(link->SetWorkingDirectory(launcher.parent_path().c_str())) &&
+        SUCCEEDED(link->SetArguments(arguments)) && SUCCEEDED(link->SetDescription(description)) &&
+        SUCCEEDED(link->SetIconLocation(launcher.c_str(), 0))) {
+      IPersistFile* file = nullptr;
+      if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
+        file->Save(link_path.c_str(), TRUE);
+        file->Release();
+      }
     }
     link->Release();
   }
+}
+
+void AddLauncherShortcuts(const fs::path& launcher) {
+  // Portable/test builds must not hijack shortcuts owned by the default installation.
+  if (!SameFolder(launcher.parent_path(), DefaultGameHome())) return;
+  if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return;
+  AddLauncherShortcut(launcher, CSIDL_PROGRAMS, L"--play", L"Choisir un mode de jeu GTA V Recomp");
+  AddLauncherShortcut(launcher, CSIDL_DESKTOPDIRECTORY, L"", L"Ouvrir le launcher GTA V Recomp");
   CoUninitialize();
 }
 
@@ -1290,7 +1305,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
   }
   if (rebuild || unattended) return Unattended(rebuild);
   if (iphone || android) return PhoneUnattended(android);
-  if (GetInstallStatus(g_root, g_root) == InstallStatus::Ready) AddStartMenuShortcut(exe);
+  if (GetInstallStatus(g_root, g_root) == InstallStatus::Ready) AddLauncherShortcuts(exe);
   if (play && !setup) {
     std::wstring error;
     if (LaunchGame(g_root, &error, game_args)) return 0;
@@ -1319,7 +1334,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
   wc.hInstance = inst;
   wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
   wc.lpszClassName = L"GtavRecompDashboard";
-  wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
+  wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_LAUNCHER));
   RegisterClassW(&wc);
   RECT r = {0, 0, Px(kWidth), Px(kHeight)};
   DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;

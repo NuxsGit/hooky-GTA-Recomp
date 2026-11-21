@@ -93,7 +93,7 @@ from them.
 
 Later: `gtav_launcher.exe` opens **Accueil**, with game status and **Choisir le mode**. The sidebar keeps
 **Installation**, **Mises à jour** and **Journaux** separate. `gtav_launcher.exe --play` is still a
-shortcut to open the mode hub directly. Setup adds a Start menu entry.
+shortcut to open the mode hub directly. The default installation adds a Start menu entry and a desktop shortcut. The desktop shortcut opens **Accueil**.
 
 ## Linux
 
