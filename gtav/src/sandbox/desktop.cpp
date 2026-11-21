@@ -206,7 +206,7 @@ void ShowNetwork(const SessionView& view) {
   } else {
     if (view.link == Link::Hosting) {
       ImGui::Text("Listening on TCP %u. The room stays open while your game is running.", unsigned(view.port));
-      if (is_campaign) ImGui::Text("Campaign coop: %zu / 3 protagonists assigned", view.world.players.size(), size_t(3));
+      if (is_campaign) ImGui::Text("Campaign coop: %zu / 3 protagonists assigned", view.world.players.size());
       if (view.host_addresses.empty()) {
         ImGui::TextWrapped("No local IPv4 detected at startup. Connect to the LAN/VPN and restart the room, "
                            "or share a reachable IPv4 and the code manually.");
@@ -347,7 +347,7 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
     }
     mode.store(chosen, std::memory_order_relaxed);
     native::menu::OpenWorkshop();
-    REXLOG_INFO("[campaign] coop mode: 3 protagonists unlocked from start, save isolated at %s",
+    REXLOG_INFO("[campaign] coop mode: 3 protagonists unlocked from start, save isolated at {}",
                 campaign->profile_root.string().c_str());
     // Pre-apply launcher-editable host defaults to cvars so ShowNetwork can prefill
     {
@@ -373,12 +373,12 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
     creator_manager = std::make_unique<CreatorManager>(creator->maps_root);
     // Creator uses full workshop authority: build, cheats, creative — like a Unity editor with play mode
     workshop::Start(creator->profile_root, true, {
-        [](std::string_view line) { REXLOG_INFO(\"{}\", line); },
-        [](uint8_t failed) { REXLOG_WARN(\"[creator] could not write config documents (mask {})\", unsigned(failed)); },
+        [](std::string_view line) { REXLOG_INFO("{}", line); },
+        [](uint8_t failed) { REXLOG_WARN("[creator] could not write config documents (mask {})", unsigned(failed)); },
     });
     mode.store(chosen, std::memory_order_relaxed);
     native::menu::OpenWorkshop();
-    REXLOG_INFO("[creator] MAP editor mode — Unity/Unreal style. Profile %s  Maps %s",
+    REXLOG_INFO("[creator] MAP editor mode - Unity/Unreal style. Profile {}  Maps {}",
                 creator->profile_root.string().c_str(), creator->maps_root.string().c_str());
     // Auto-open creator editor on start for immediate editing (user can close with F7/Esc)
     // Defer to next frame? We open workshop now, creator via F7
