@@ -1435,6 +1435,154 @@ class Renderer {
     }
   }
 
+  void PresentIdle() {
+    // Idle present while no guest frames are queued — avoids the Win32 window staying on its
+    // initial GDI gray brush for seconds during cold boot (N100, shader compile). Clear to black
+    // and keep the swapchain alive; once the guest starts, normal Present takes over.
+    if (vsync_ != REXCVAR_GET(gtav_native_vsync)) {
+      vsync_ = REXCVAR_GET(gtav_native_vsync);
+      submitter_.Drain();
+      std::lock_guard lock(present_mutex_);
+      swapchain_->setVsyncEnabled(vsync_);
+    }
+#ifdef __ANDROID__
+    if (!SurfaceReady()) return;
+#endif
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    if (ios_background_.load(std::memory_order_acquire)) {
+      if (!ios_drained_.load(std::memory_order_relaxed)) {
+        RetireAll();
+        ios_drained_.store(true, std::memory_order_release);
+      }
+      return;
+    }
+#endif
+    if (swapchain_->needsResize()) {
+      RetireAll();
+      if (!swapchain_->resize()) {
+        framebuffers_.clear();
+#ifdef __ANDROID__
+        surface_lost_ = true;
+#endif
+      }
+      CreateFramebuffers();
+    }
+    if (swapchain_->isEmpty()) return;
+    const uint32_t slot = slot_;
+    auto wait_start = std::chrono::steady_clock::now();
+    Retire(slot);
+    auto wait_end = std::chrono::steady_clock::now();
+    list_ = lists_[slot].get();
+    list_->begin();
+    plume::g_exactBarrierStages = REXCVAR_GET(gtav_native_exact_barriers);
+    plume::g_clearLoadOps = REXCVAR_GET(gtav_native_load_clears);
+    if (backend_ok_) backend_.BeginFrame(slot);
+    uint32_t image = 0;
+    list_ = present_lists_[slot].get();
+    list_->begin();
+    bool acquired;
+    {
+      std::lock_guard lock(present_mutex_);
+      acquired = swapchain_->acquireTexture(acquires_[slot].get(), &image);
+    }
+#ifdef __ANDROID__
+    if (!acquired) surface_lost_ = true;
+#endif
+    if (!acquired) {
+      list_->end();
+      if (backend_ok_) backend_.EndFrame(slot);
+      const plume::RenderCommandList* lists = list_;
+      plume::RenderCommandFence* fence = fences_[slot].get();
+      submitter_.Push([this, lists, fence] {
+        const plume::RenderCommandList* l = lists;
+        queue_cmd_->executeCommandLists(&l, 1, nullptr, 0, nullptr, 0, fence);
+      });
+      in_flight_[slot] = true;
+      slot_ = NextFrameSlot(slot, memory_);
+      return;
+    }
+    auto acquire_end = std::chrono::steady_clock::now();
+    plume::RenderTexture* target = swapchain_->getTexture(image);
+    swap_target_ = target;
+    swap_image_ = image;
+    list_->barriers(plume::RenderBarrierStage::GRAPHICS,
+                    plume::RenderTextureBarrier(target, plume::RenderTextureLayout::COLOR_WRITE));
+    list_->setFramebuffer(framebuffers_[image].get());
+    uint32_t w = swapchain_->getWidth(), h = swapchain_->getHeight();
+    list_->setViewports(plume::RenderViewport(0, 0, float(w), float(h)));
+    list_->setScissors(plume::RenderRect(0, 0, int32_t(w), int32_t(h)));
+    // Loading clear — black, not the magenta debug for missing front after boot
+    list_->clearColor(0, plume::RenderColor(0.0f, 0.0f, 0.0f, 1.0f));
+    auto now = std::chrono::steady_clock::now();
+    fps_frames_++;
+    double fps_elapsed = std::chrono::duration<double>(now - fps_since_).count();
+    if (fps_elapsed >= 1.0) {
+      fps_value_ = uint32_t(fps_frames_ / fps_elapsed + 0.5);
+      fps_frames_ = 0;
+      fps_since_ = now;
+    }
+    if (backend_ok_ && REXCVAR_GET(gtav_native_fps))
+      backend_.DrawCounter(list_, fps_value_, 8, 8, std::max(1u, h / 720), kSwapchainFormat);
+    if (backend_ok_) {
+      PresentationInfo presentation{};
+      presentation.vsync = swapchain_->isVsyncEnabled();
+      presentation.adapter = device_->getDescription().name;
+      presentation.scene_scale = backend_.RenderScale();
+      presentation.gpu_slots = memory_.frame_slots;
+      presentation.lean_memory = memory_.lean;
+      if (menu::IsOpen()) {
+        presentation.memory = backend_.MemoryStats();
+        presentation.realism = backend_.Realism();
+        presentation.pipelines = backend_.PipelineStatus();
+      }
+#ifdef _WIN32
+      presentation.boot_output = window_mode_;
+      presentation.queue_limit = uint32_t(QueueLimit());
+      const auto& caps = device_->getCapabilities();
+      presentation.anti_lag = DriverPacing(caps.amdAntiLagSupported, anti_lag_requested_, caps.amdAntiLagEnabled,
+                                          anti_lag_called_.load(std::memory_order_relaxed));
+#endif
+      double frame_ms = fps_value_ ? 1000.0 / fps_value_ : 0.0;
+      if (ImDrawData* menu_data = menu::Frame(w, h, fps_value_, frame_ms, presentation))
+        backend_.DrawMenu(list_, menu_data, kSwapchainFormat);
+    } else {
+      // Even without backend, keep ImGui HUD alive (workshop) — no DrawMenu, but avoid gray
+#ifdef GTAV_DESKTOP_WORKSHOP
+      if (menu::IsOpen() || sandbox::Active()) {
+#else
+      if (menu::IsOpen()) {
+#endif
+        PresentationInfo presentation{};
+        double frame_ms = fps_value_ ? 1000.0 / fps_value_ : 0.0;
+        if (ImDrawData* menu_data = menu::Frame(w, h, fps_value_, frame_ms, presentation)) {
+          // No backend to draw menu — still clear keeps window non-gray
+          (void)menu_data;
+        }
+      }
+    }
+    list_->barriers(plume::RenderBarrierStage::NONE,
+                    plume::RenderTextureBarrier(target, plume::RenderTextureLayout::PRESENT));
+    list_->end();
+    if (backend_ok_) backend_.EndFrame(slot);
+    const plume::RenderCommandList* lists = list_;
+    plume::RenderCommandSemaphore* wait = acquires_[slot].get();
+    plume::RenderCommandSemaphore* signal = release_[image].get();
+    plume::RenderCommandFence* fence = fences_[slot].get();
+    submitter_.Push([this, lists, wait, signal, fence, image] {
+      plume::RenderCommandSemaphore* w = wait;
+      plume::RenderCommandSemaphore* sg = signal;
+      const plume::RenderCommandList* l = lists;
+      queue_cmd_->executeCommandLists(&l, 1, &w, 1, &sg, 1, fence);
+      std::lock_guard lock(present_mutex_);
+      swapchain_->present(image, &sg, 1);
+    });
+    in_flight_[slot] = true;
+    slot_ = NextFrameSlot(slot, memory_);
+    auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    timing_.acquire_sum += ms(acquire_end - wait_end);
+    last_present_ = std::chrono::steady_clock::now();
+  }
+
   // GTAV_NATIVE_SHOT_DIR (+ GTAV_SHOT_SECS, default 10): periodic PPM captures of the native
   // front buffer, comparable with the emulated renderer's GTAV_SHOT_DIR captures.
   std::string ShotDir() {
@@ -1548,14 +1696,25 @@ class Renderer {
       return;
     }
     uint64_t presented = 0;
+    uint32_t idle_frames = 0;
     for (;;) {
       FramePacket frame;
       {
         std::unique_lock lock(mutex_);
         auto idle_start = std::chrono::steady_clock::now();
         render_state_ = 0;  // waiting for a frame
-        cv_.wait(lock, [this] { return !queue_.empty(); });
+        bool has_frame = cv_.wait_for(lock, std::chrono::milliseconds(50), [this] { return !queue_.empty(); });
         timing_.idle_sum += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - idle_start).count();
+        if (!has_frame) {
+          // No guest frame yet (cold boot, shader compile, N100) — keep the window alive with a
+          // black present instead of the Win32 GDI gray. Log once.
+          if (idle_frames++ == 0) REXLOG_INFO(\"[native] waiting for first guest frame — presenting idle (avoids ecran gris)\");
+          else if (idle_frames % 200 == 0) REXLOG_INFO(\"[native] still waiting for guest frame ({} idle presents)\", idle_frames);
+          lock.unlock();
+          PresentIdle();
+          continue;
+        }
+        idle_frames = 0;
         frame = std::move(queue_.front());
         queue_.pop_front();
       }
