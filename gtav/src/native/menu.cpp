@@ -4,7 +4,7 @@
 #include "../sandbox/desktop.h"
 
 #ifdef GTAV_DESKTOP_WORKSHOP
-#include "../phone/PhoneShellUI.h"
+#include "../phone/AdminCheatApp.h"
 #include "../sandbox/BuildMenuUI.h"
 #include "../sandbox/CreativeRuntime.h"
 #include <SDL3/SDL.h>
@@ -47,7 +47,6 @@ using debug::Panel;
 std::atomic<Panel> g_panel{Panel::Closed};
 bool g_clear_imgui_input = false;
 #ifdef GTAV_DESKTOP_WORKSHOP
-std::atomic<bool> g_reset_phone{false};
 #endif
 
 ImGuiContext* g_context = nullptr;
@@ -212,20 +211,7 @@ void BuildDebug(uint32_t fps, double frame_ms) {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
   if (ImGui::Begin("HOOKY  //  DEBUG  [F2]", &open, ImGuiWindowFlags_NoCollapse)) {
     ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "LOS SANTOS  //  DEBUG & WORKSHOP");
-    ImGui::TextDisabled("F2 debug  |  F6 Workshop  |  F8 Build  |  O/F7 Workshop Phone  |  Esc fermer");
-    ImGui::TextDisabled("Base phone P/Haut restore - Workshop phone sur O / F7 / Y (manette) - panel supplementaire");
-#ifdef GTAV_DESKTOP_WORKSHOP
-    // Quick GTA shortcuts inside F2 — Workshop phone separate from base GTA phone (base phone restored)
-    if (sandbox::Active()) {
-      ImGui::Separator();
-      if (ImGui::Button("Workshop Phone (O/F7/Y)")) { SwitchPanel(Panel::Phone, Panel::Debug); }
-      ImGui::SameLine();
-      if (ImGui::Button("Workshop (F6)")) { SwitchPanel(Panel::Workshop, Panel::Debug); }
-      ImGui::SameLine();
-      if (workshop::BuildAllowed() && ImGui::Button("Build (F8)")) { SwitchPanel(Panel::Build, Panel::Debug); }
-      ImGui::Separator();
-    }
-#endif
+    ImGui::TextDisabled("F2 Debug | F6 Workshop | F8 Build | Esc fermer");
     debug::DrawPanel(fps, frame_ms, g_scale);
   }
   ImGui::End();
@@ -241,7 +227,21 @@ void BuildWorkshop() {
                            ImGuiCond_FirstUseEver);
   bool open = true;
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
-  if (ImGui::Begin("WORKSHOP  //  LOS SANTOS  [F6]", &open, ImGuiWindowFlags_NoCollapse)) sandbox::DrawWorkshop();
+  if (ImGui::Begin("WORKSHOP  //  LOS SANTOS  [F6]", &open, ImGuiWindowFlags_NoCollapse)) {
+    sandbox::DrawWorkshop();
+    const auto mode = sandbox::CurrentMode();
+    const auto view = workshop::Snapshot();
+    if (mode != sandbox::Mode::Campaign && mode != sandbox::Mode::CampaignCoop &&
+        workshop::Fresh(*view) && view->admin && workshop::LocalAuthority()) {
+      for (const auto& player : view->players) {
+        if (player.id == workshop::kLocalOwner && workshop::PermissionManager::AdminOS(player.role) &&
+            ImGui::CollapsingHeader("AdminOS")) {
+          workshop::DrawAdminCheatApp(*view, player);
+          break;
+        }
+      }
+    }
+  }
   ImGui::End();
   ImGui::PopStyleVar();
   if (!open && g_panel == Panel::Workshop) Close();
@@ -262,8 +262,7 @@ void SwitchPanel(Panel wanted, std::optional<Panel> only_if = {}) {
   input::Reset();
 #ifdef GTAV_DESKTOP_WORKSHOP
   if (sandbox::Active()) {
-    workshop::SetCapture(next == Panel::Build, next == Panel::Phone, next != Panel::Closed && next != Panel::Build && next != Panel::Phone);
-    if (next == Panel::Phone) g_reset_phone = true;
+    workshop::SetCapture(next == Panel::Build, next == Panel::Workshop, next != Panel::Closed && next != Panel::Build && next != Panel::Workshop);
   }
 #endif
 }
@@ -286,20 +285,13 @@ bool ToggleBuild() {
   else if (workshop::BuildAllowed()) SwitchPanel(Panel::Build);
   return true;
 }
-bool OpenPhone() {
-  // Workshop phone (Hooky) - base GTA phone restored on P/Haut. Workshop phone on O/F7/Y (panel supplementaire).
-  // Keep available in Campaign as well; UI adapts to mode. Base phone now handled by guest - not consumed here.
-  if (IsOpen()) return false;
-  SwitchPanel(Panel::Phone, Panel::Closed);
-  return true;
-}
 void CloseCreative() {
   const auto panel = g_panel.load();
-  if (panel == Panel::Build || panel == Panel::Phone) SwitchPanel(Panel::Closed, panel);
+  if (panel == Panel::Build) SwitchPanel(Panel::Closed, panel);
 }
 bool TextPanel() {
   const auto panel = g_panel.load();
-  return panel == Panel::Workshop || panel == Panel::Build || panel == Panel::Phone;
+  return panel == Panel::Workshop || panel == Panel::Build;
 }
 void OnText(uint32_t ch) {
   if (ch >= 32 && ch != 127 && ch <= 0x10ffff && TextPanel()) Push({Input::kText, 0, 0, int(ch)});
@@ -373,17 +365,6 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const P
         const auto view = workshop::Snapshot();
         // Desktop presents across the viewport; only the mobile renderer letterboxes.
         if (!workshop::DrawBuildMenu(*view, g_scale, {0, 0, {w, h}})) SwitchPanel(Panel::Closed, Panel::Build);
-      }
-#endif
-      break;
-    case Panel::Phone:
-#ifdef GTAV_DESKTOP_WORKSHOP
-      if (g_reset_phone.exchange(false)) workshop::ResetPhone();
-      switch (workshop::DrawPhone(*workshop::Snapshot(), fps, g_scale)) {
-        case workshop::PhoneAction::Session: SwitchPanel(Panel::Workshop, Panel::Phone); break;
-        case workshop::PhoneAction::Build: if (workshop::BuildAllowed()) SwitchPanel(Panel::Build, Panel::Phone); break;
-        case workshop::PhoneAction::Close: SwitchPanel(Panel::Closed, Panel::Phone); break;
-        case workshop::PhoneAction::None: break;
       }
 #endif
       break;

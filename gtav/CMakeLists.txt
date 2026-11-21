@@ -131,7 +131,7 @@ if(NOT ANDROID AND NOT GTAV_IOS)
     include(WorkshopCore.cmake)
     target_sources(gtav PRIVATE ${GTAV_WORKSHOP_CORE}
         src/sandbox/CreativeRuntime.cpp src/sandbox/Tu27Workshop.cpp src/sandbox/BuildMenuUI.cpp
-        src/phone/PhoneShellUI.cpp src/phone/AdminCheatApp.cpp)
+        src/phone/AdminCheatApp.cpp)
     if(WIN32)
         target_link_libraries(gtav PRIVATE ws2_32 bcrypt iphlpapi)
     endif()

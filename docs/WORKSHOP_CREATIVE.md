@@ -12,12 +12,12 @@ by these tools. The launcher, updater and Campaign profile do not change.
 | **F6** | Existing Workshop sessions, checkpoint layouts, test drive and minigames. Editing/test drive now also require Creative access. |
 | **F8** | Open/close the Creative Build overlay when the authority and free-roam checks allow it. |
 | **Shift+F8** | Graphics replay when `--gtav_native_replay=true`. Campaign retains F8 for replay. |
-| **P**, **Up** or **D-pad Up** (SDL pad) | Open the Workshop phone when no other overlay is open. Esc or B puts it away. |
+| **P**, **Up** or **D-pad Up** (SDL pad) | Open or navigate the original GTA V phone when gameplay allows it. No Workshop overlay uses this shortcut. |
 | **Mouse in Build** | Aim in the game view outside the panel. Left-click to place; right-click to cancel the preview. Wheel rotates, Shift+wheel changes distance, Ctrl+Shift+wheel changes height. |
 | **Z / Shift+Z** | Undo / redo in Build, outside text fields. Ctrl+Y also redoes. |
-| **ZQSD / Space / Ctrl** | Steer Fly or Noclip after closing the phone. These are WASD physical positions on QWERTY. Flight is on foot. |
+| **ZQSD / Space / Ctrl** | Steer Fly or Noclip after closing Workshop. These are WASD physical positions on QWERTY. Flight is on foot. |
 
-Build and phone reuse the existing input gate: raw look deltas are flushed when switching panels,
+Build and Workshop reuse the existing input gate: raw look deltas are flushed when switching panels,
 movement/fire are captured while open, and focus loss cancels placement. The camera is not
 replaced. **F1** and **F2** still work, but F2's Story tools are Campaign-only.
 
@@ -32,7 +32,7 @@ Sprint is explicitly restored to `1.0`; super jump is a per-frame request, not a
 TU27 multiplier. It stops being requested on revocation. No movement toggles are rearmed by
 respawning or going back to Creative.
 
-## Build and the phone
+## Build and AdminOS
 
 - Build searches the catalog by display name, internal name, or the 32-bit hex hash. Tabs include
   props/architecture, vehicles, NPC/interactive models, favorites/recent, and presets. Models are
@@ -49,9 +49,8 @@ respawning or going back to Creative.
   previews the anchor; if one member cannot spawn, the batch rolls back. Recent activity keeps
   the last 30 models spawned, and history retains up to 100 actions per builder. **Clean my
   build** is irreversible and clears undo/redo, not favorites, presets or F6 layouts.
-- The phone has Session and Status tiles plus Build when authorized. Only Owner/Admin get the
-  **AdminOS** tile. Status shows the in-game hour, role, presented FPS and, for a joined private
-  room, the kernel TCP RTT if available (not a game-protocol ping).
+- **F6 Workshop** shows the session controls. Owner/Admin can expand **AdminOS** there.
+  **F8** is the only shortcut for Creative Build.
 - **AdminOS → Players & Moderation → Load / respawn three practice players** creates Alex, Noa
   and Sam in Solo. Their rows are labeled simulated. Test mode overrides, nearby on-foot moves
   in both directions, anchoring, give/heal/revive, and kick/ban with a reason. A ban survives a
@@ -95,7 +94,7 @@ never sleeps for a model and releases its streaming reference on success, failur
 revocation. It does not compete for the same model reference with the older F6 scene streamer.
 
 The shipping **private v2 TCP protocol still syncs poses, room layouts and race state only**.
-A v2 guest sees the phone shell and room status, not host privileges. The private host can use
+A v2 guest sees room status in F6 Workshop, not host privileges. The private host can use
 Build/AdminOS on the host copy but these commands and entities are not replicated; the simulated
 roster is Solo-only. Promotion, durable bans and shared gameplay require a transport that actually
 authenticates principals. No changes to the v2 wire format or the original trust model are made
@@ -125,5 +124,5 @@ and switch to Survival while streaming or flying. Test focus loss, return from a
 controller polling and a ped change. Open AdminOS on a fresh and existing Workshop profile; run
 practice moderation, check the audit, restart and unban. Test the extended opt-in separately
 and confirm invalid models or unresolved travel leave the world unchanged. A two-PC test should
-confirm the old v2 room still works, with a read-only phone on the guest. Do not treat tests on
+confirm the old v2 room still works, and verify the original phone on both host and guest. Do not treat tests on
 synthetic peds or a fake game as evidence of retail native safety or multiplayer physics.
