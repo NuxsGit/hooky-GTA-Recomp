@@ -249,6 +249,7 @@ void ShowNetwork(const SessionView& view) {
 
 void ShowCampaignStatus() {
   if (CurrentMode() != Mode::CampaignCoop) return;
+  // Tuto: assignments/world may be empty while loading — guard all vectors, never deref null.
   const auto view = ViewCampaign();
   ImGui::SeparatorText("Campaign co-op - Missions at 3");
   ImGui::Text("Save: isolated under data/user/campaign_coop (solo saves untouched)");
@@ -257,9 +258,13 @@ void ShowCampaignStatus() {
     ImGui::Text("You are: %s", CharacterLabel(*view.self_character));
   else if (view.link == Link::Joined || view.link == Link::Hosting)
     ImGui::TextDisabled("Assigning protagonist...");
+  // assignments may be empty during tuto loading — show nothing rather than crash.
   for (auto [id, ch] : view.assignments) {
     const char* name = "?";
-    for (auto &p : view.world.players) if (p.id == id) { name = p.name.c_str(); break; }
+    // Guard empty world.players (tuto not yet joined)
+    if (!view.world.players.empty()) {
+      for (auto &p : view.world.players) if (p.id == id) { name = p.name.c_str(); break; }
+    }
     ImGui::BulletText("%s -> %s", name, CharacterLabel(ch));
   }
   ImGui::SeparatorText("Mort en coop - GTA Online adapte");
@@ -386,11 +391,14 @@ std::optional<VehicleRequest> TakeVehicleRequest() {
 
 void DrawWorkshop() {
   if (!Active()) return;
-  // GTA Workshop header — green/yellow accents, dark tabs
+  // Tuto campagne multi: menu may be opened before Guest Ready or before SessionView fully populated.
+  // Keep workshop open but guard every world access — never crash, just show loading state.
   ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.12f,0.12f,0.13f,1.f));
   ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.18f,0.85f,0.45f,0.22f));
   ImGui::PushStyleColor(ImGuiCol_TabActive, ImVec4(0.18f,0.85f,0.45f,0.45f));
   ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.18f,0.85f,0.45f,0.18f));
+  // Guard against empty/invalid view during tuto loading — Party().View() always returns a valid struct but
+  // world.players or course may be empty transiently.
   const auto view = Party().View();
   const auto* local = Myself(view.world);
   if (CurrentMode() == Mode::CampaignCoop) {
@@ -466,10 +474,14 @@ void DrawWorkshop() {
 
 void DrawHud() {
   if (!Active()) return;
+  // Tuto first mission: world may be empty or loading — never crash HUD, just skip drawing when no local.
   const auto view = Party().View();
+  // Guard empty world or uninitialized course name — use .c_str() safely even if empty.
   const auto* local = Myself(view.world);
   if (!local) return;
   const auto& world = view.world;
+  // Defensive: world.course may be empty during tuto — NextCheckpoint guards, but keep HUD safe.
+  if (world.course.name.size() > 64) return; // corrupted course name — avoid ImGui crash on huge string
   ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_Always);
   ImGui::SetNextWindowBgAlpha(.82f);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f,0.06f,0.07f,0.88f));

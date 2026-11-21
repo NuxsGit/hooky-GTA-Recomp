@@ -43,9 +43,13 @@ void PickMode(const char* label, const PlayerView& p, bool enabled) {
   ImGui::EndDisabled();
 }
 const PlayerView& Target(Panel& ui, const DesktopView& v, const PlayerView& local) {
+  // Tuto/campaign multi: v.players may be empty or local.id may be 0 (fallback) — guard empty vector.
+  if (v.players.empty()) return local;
   auto pick = std::find_if(v.players.begin(), v.players.end(), [&](const PlayerView& p) { return p.id == ui.player; });
   if (pick == v.players.end() || !PermissionManager::Target(local.role, pick->role, pick->id == local.id)) {
     ui.player = local.id;
+    // Guard: local.id may be 0 if fallback — avoid searching for 0 that never exists.
+    if (local.id == 0) return local;
     pick = std::find_if(v.players.begin(), v.players.end(), [&](const PlayerView& p) { return p.id == local.id; });
   }
   if (ImGui::BeginCombo("Target", pick == v.players.end() ? "Self" : pick->name.c_str())) {
@@ -200,6 +204,8 @@ void PlayersPage(Panel& ui, const DesktopView& v, const PlayerView& local) {
 }  // namespace
 
 void DrawAdminCheatApp(const DesktopView& v, const PlayerView& local, float scale) {
+  // Tuto guard: v may be stale (playable false, empty players) — never crash, show locked if not authority.
+  // local may be fallback id 0 during loading — Label(0) safe.
   const bool authority = v.admin && LocalAuthority() && PermissionManager::AdminOS(local.role);
   if (!authority) {
     // Locked — never render a blank page. The panel stays open so the user sees why it is
