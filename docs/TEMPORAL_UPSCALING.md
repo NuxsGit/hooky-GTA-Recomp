@@ -79,3 +79,27 @@ has different readback overhead and is not an FPS test.
   existing instance/device feature paths (including optional Anti-Lag). Keep a working Linear
   or FSR 1 path when support, resources or dispatch fail. Compare **rendered** frame times and
   image quality in the same scene; neural rendering and frame generation need separate tests.
+
+## Frame generation cadence prototype
+
+`gtav/src/native/frame_generation_schedule.h` plans 1, 3, 5 or 7 intermediate
+presentation slots for x2, x4, x6 or x8. It rejects discontinuous or ineligible
+source pairs and intervals that cannot sustain the requested presentation rate.
+This is a tested CPU scheduling primitive only. No interpolation provider,
+validated TU27 motion inputs, or swap-chain integration is enabled by it. The
+launcher must continue to report frame generation as unavailable until those
+pieces can generate and present real intermediate images on supported hardware.
+
+### Offline x2 experiment
+
+For a local constant-rate gameplay recording, run:
+
+```powershell
+python tools/native/framegen_x2.py capture.mp4 capture-x2.mp4 --fps 30
+```
+
+Requires FFmpeg with `minterpolate` and `libx264`. The experiment estimates motion
+between successive frames and synthesizes a midpoint, with FFmpeg's scene-change
+fallback. It produces a silent comparison clip, not extra real-time Vulkan
+presentations. Because its input is the finished recording, the HUD is part of
+interpolation and can distort; use a HUD-free capture for motion evaluation.
