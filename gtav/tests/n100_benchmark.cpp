@@ -21,8 +21,17 @@
 #include <thread>
 #include <vector>
 
+#if defined(__GNUC__) || defined(__clang__)
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
 #include <cpuid.h>
+#endif
+#endif
+#ifdef _WIN32
+#include <windows.h>
+#include <intrin.h>
+#endif
+#ifndef _WIN32
+#include <unistd.h>
 #endif
 
 using namespace gtav::native;
@@ -43,12 +52,14 @@ static double median(std::vector<double> v) {
 }
 
 static bool has_avx2() {
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(_WIN32) && (defined(_M_X64) || defined(_M_IX86))
+  int info[4]; __cpuid(info, 7);
+  return (info[1] & (1<<5)) != 0; // AVX2 bit in EBX
+#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
 #if defined(__GNUC__) || defined(__clang__)
   return __builtin_cpu_supports("avx2");
 #else
-  // MSVC cpuid
-  int info[4]; __cpuid(info, 1); return (info[2] & (1<<5)) != 0; // AVX then check
+  return false;
 #endif
 #else
   return false;
@@ -56,6 +67,13 @@ static bool has_avx2() {
 }
 
 static std::string cpu_model() {
+#ifdef _WIN32
+  // Windows: registry or env, fallback unknown
+  char buf[256] = {};
+  DWORD sz = sizeof(buf);
+  // Try via GetSystemInfo not model, just return platform
+  return std::string("Windows CPU (") + std::to_string(std::thread::hardware_concurrency()) + " threads)";
+#else
   std::ifstream f("/proc/cpuinfo");
   std::string line;
   while (std::getline(f, line)) {
@@ -64,9 +82,15 @@ static std::string cpu_model() {
     }
   }
   return "unknown";
+#endif
 }
 
 static uint64_t mem_total_mib() {
+#ifdef _WIN32
+  MEMORYSTATUSEX st{}; st.dwLength = sizeof(st);
+  if (GlobalMemoryStatusEx(&st)) return st.ullTotalPhys / (1<<20);
+  return 0;
+#else
   std::ifstream f("/proc/meminfo");
   std::string k; uint64_t v; std::string unit;
   while (f >> k >> v >> unit) {
@@ -76,6 +100,7 @@ static uint64_t mem_total_mib() {
   long sz = sysconf(_SC_PAGE_SIZE);
   if (pages > 0 && sz > 0) return uint64_t(pages) * uint64_t(sz) / (1<<20);
   return 0;
+#endif
 }
 
 static Result bench_int(bool quick) {
