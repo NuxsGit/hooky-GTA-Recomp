@@ -107,11 +107,11 @@ void AuthorityAndModes() {
   h.Step();
   CHECK(h.View().cheats.RunMultiplier() == 1.49f);
   CHECK(h.Act({Op::MapMode, 0, 1}, admin) == R::Okay);
-  CHECK(h.View().build && h.View().cheats.Has(Effect::Noclip));  // deliberate Creative override
+  CHECK(h.View().build && h.View().cheats.Has(Effect::Noclip));  // deliberate Creative override — now also persists in Survival as dev cheat
   CHECK(h.Act({Op::PlayerMode, 0, 2}) == R::Okay);
-  CHECK(!h.View().build && !h.View().cheats.active && h.View().cheats.RunMultiplier() == 1.f);
+  CHECK(!h.View().build && h.View().cheats.Has(Effect::Noclip) && h.View().cheats.RunMultiplier() == 1.49f); // F5 dev cheat: host-only but all-modes, not cleared on Survival
   for (const auto effect : {Effect::Noclip, Effect::God, Effect::Sprint})
-    CHECK(std::find(h.game.changes.begin(), h.game.changes.end(), std::tuple{effect, kPed, false}) != h.game.changes.end());
+    CHECK(std::find(h.game.changes.begin(), h.game.changes.end(), std::tuple{effect, kPed, false}) == h.game.changes.end());
   CHECK(h.Act(Place()) == R::Denied);
   CHECK(h.Act({.op = Op::Ban, .target = player, .text = "   "}, admin) == R::Invalid);
   CHECK(h.Act({.op = Op::Ban, .target = player, .text = "Moderation test"}, admin) == R::Okay);

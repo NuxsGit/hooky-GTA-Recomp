@@ -245,11 +245,10 @@ BuildResult WorkshopCore::Execute(PlayerId actor, const Command& c, WorkshopGame
         if (!caps_.Has(Feature::Anchor) || !game.Anchor(ped, c.on)) return BuildResult::Failed;
         target->frozen = c.on; return BuildResult::Okay;
       case Op::Effect:
-        if (actor != id || c.value >= unsigned(Effect::Count) || !caps_.Has(Effect(c.value)) ||
-            (c.on && mode_.Effective(actor) != Mode::Creative)) return BuildResult::Denied;
+        if (actor != id || c.value >= unsigned(Effect::Count) || !caps_.Has(Effect(c.value))) return BuildResult::Denied;
         return Done(cheats_.Toggle(actor, Effect(c.value), c.on));
       case Op::Speed:
-        return actor == id && mode_.Effective(actor) == Mode::Creative ? Done(cheats_.Speed(actor, c.value)) : BuildResult::Denied;
+        return actor == id ? Done(cheats_.Speed(actor, c.value)) : BuildResult::Denied;
       case Op::Heal: return use(Tool::Heal);
       case Op::Revive: return use(Tool::Revive);
       case Op::Damage: return use(Tool::Damage);
@@ -270,7 +269,7 @@ BuildResult WorkshopCore::Execute(PlayerId actor, const Command& c, WorkshopGame
       case Op::QuickVehicle: {
         const auto* car = FindModel(c.value);
         const auto from = game.Locate(ped);
-        if (actor != id || target->seat != Seat::Local || mode_.Effective(actor) != Mode::Creative ||
+        if (actor != id || target->seat != Seat::Local ||
             !caps_.Has(Feature::Vehicle) || (c.on && !caps_.Has(Tool::Warp)) || !car || car->kind != Kind::Vehicle || !from)
           return BuildResult::Invalid;
         const auto result = build_.Place(actor, {{car->hash, car->kind, Compose(*from, {{0, 6, .5f}, 0})}},
@@ -323,7 +322,7 @@ BuildResult WorkshopCore::Execute(PlayerId actor, const Command& c, WorkshopGame
   };
   result_ = run();
   for (const auto& p : players_.All())
-    if (!CanAdmin(p.id) || mode_.Effective(p.id) == Mode::Survival) cheats_.Tick(game, p.id, p.entity, false, {});
+    if (!CanAdmin(p.id)) cheats_.Tick(game, p.id, p.entity, false, {});
   if (preview_ && !CanBuild(kLocalOwner)) StopGhost(game);
   return result_;
 }
@@ -403,7 +402,7 @@ void WorkshopCore::GiveNext(WorkshopGame& game) {
 }
 void WorkshopCore::Reconcile(WorkshopGame& game, bool playable, Motion motion) {
   for (const auto& p : players_.All())
-    cheats_.Tick(game, p.id, p.entity, playable && CanAdmin(p.id) && mode_.Effective(p.id) == Mode::Creative,
+    cheats_.Tick(game, p.id, p.entity, playable && CanAdmin(p.id),
                  p.seat == Seat::Local ? motion : Motion{});
   cheats_.CleanupRetired(game);
   if (!playable) {

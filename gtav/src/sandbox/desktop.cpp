@@ -292,7 +292,20 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
   else if (requested == "campaign-coop" || requested == "campaign_coop") chosen = Mode::CampaignCoop;
   else if (requested != "campaign") return Error("Unknown mode. Use menu, solo, multiplayer, campaign or campaign-coop.");
 
-  if (chosen == Mode::Campaign) return true;
+  if (chosen == Mode::Campaign) {
+    // Vrai cheat complet: start minimal workshop core for F5 dev panel even in solo Campaign.
+    // Host-only par defaut (tu es host en solo), tous les modes, grantable via Promote en coop.
+    // Use user_data_root as profile so permissions persist; does not mount story saves differently.
+    if (workshop_enabled) {
+      workshop::Start(paths.user_data_root, false, {
+          [](std::string_view line) { REXLOG_INFO("{}", line); },
+          [](uint8_t failed) { REXLOG_WARN("[cheat] could not write config documents (mask {})", unsigned(failed)); },
+      });
+      REXLOG_INFO("[cheat] Campaign solo: dev cheat F5 enabled (host-only, all-modes, workshop core started)");
+    }
+    mode.store(chosen, std::memory_order_relaxed);
+    return true;
+  }
   if (!workshop_enabled) return Error("Workshop modes need the native renderer (--gtav_native=on).");
 
   if (chosen == Mode::CampaignCoop) {
@@ -353,7 +366,11 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
   return true;
 }
 
-void Shutdown() { if (Active()) { workshop::Stop(); Party().Stop(); } }
+void Shutdown() {
+  // Always stop workshop core if it was started — now also started for Campaign (F5 cheat).
+  workshop::Stop();
+  if (Active()) Party().Stop();
+}
 void ReportGuest(Guest state) {
   guest_at.store(NowMs(), std::memory_order_relaxed);
   guest.store(state);

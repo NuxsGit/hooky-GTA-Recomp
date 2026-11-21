@@ -86,14 +86,15 @@ void MovementPage(const DesktopView& v, const PlayerView& local) {
   const bool can = v.playable && local.ready;
   constexpr const char* flags[]{"Noclip", "Fly (collisions stay on)", "God mode", "Unlimited stamina", "Super jump", "Fast run (1.49x)", "Never wanted"};
   for (unsigned i = 0; i < std::size(flags); ++i)
-    Check(flags[i], can && local.mode == Mode::Creative && v.caps.Has(Effect(i)), v.cheats.Has(Effect(i)), {.op = Op::Effect, .value = i});
+    Check(flags[i], can && v.caps.Has(Effect(i)), v.cheats.Has(Effect(i)), {.op = Op::Effect, .value = i});
   constexpr unsigned speeds[]{1, 3, 8, 15};
   int speed = int(std::find(std::begin(speeds), std::end(speeds), v.cheats.speed) - std::begin(speeds));
-  ImGui::BeginDisabled(!can || local.mode != Mode::Creative);
+  ImGui::BeginDisabled(!can);
   if (ImGui::Combo("Flight speed", &speed, "x1\0x3\0x8\0x15\0")) Submit({.op = Op::Speed, .value = speeds[speed]});
   ImGui::EndDisabled();
   if (!v.caps.Has(Effect::Noclip)) ImGui::TextDisabled("Noclip needs the extended TU27 ABI opt-in.");
-  ImGui::TextWrapped("Close this panel to steer: ZQSD (WASD positions), Space up, Ctrl down. On foot only.");
+  ImGui::TextWrapped("Close cheat panel (F5) to steer: ZQSD (WASD positions), Space up, Ctrl down. On foot only. Works in all modes.");
+  if (local.mode != Mode::Creative) ImGui::TextDisabled("Dev cheat active in all modes (host-only by default, grantable) — no longer Creative-only.");
   GtaButton("Health 200 + armor 100", can && v.caps.Has(Tool::Heal), {Op::Heal});
   GtaButton("Clear blood and weapon damage", can && v.caps.Has(Tool::Damage), {Op::Damage});
 }
@@ -113,7 +114,7 @@ void GivePage(Panel& ui, const DesktopView& v, const PlayerView& local) {
   GtaButton("Give selected", can && v.caps.Has(Tool::Weapon), {Op::Weapon, target.id, weapons[size_t(ui.weapon)].hash});
   ImGui::SameLine(); GtaButton("Give armory", can && v.caps.Has(Tool::Weapon), {Op::Armory, target.id});
   ImGui::TextWrapped("Only weapons available in the loaded TU27 build are given. Bulk give streams one request per frame.");
-  Check("Infinite clip (self)", v.playable && local.mode == Mode::Creative && v.caps.Has(Effect::InfiniteAmmo),
+  Check("Infinite clip (self)", v.playable && v.caps.Has(Effect::InfiniteAmmo),
         v.cheats.Has(Effect::InfiniteAmmo), {.op = Op::Effect, .value = unsigned(Effect::InfiniteAmmo)});
 
   ImGui::SeparatorText("Quick vehicle (self)");
@@ -127,7 +128,7 @@ void GivePage(Panel& ui, const DesktopView& v, const PlayerView& local) {
     ImGui::EndCombo();
   }
   ImGui::BeginDisabled(!v.caps.Has(Tool::Warp)); ImGui::Checkbox("Driver seat + start engine", &ui.warp); ImGui::EndDisabled();
-  GtaButton("Spawn in front", v.build && v.caps.Has(Feature::Vehicle) && picked && !v.busy,
+  GtaButton("Spawn in front", v.playable && v.caps.Has(Feature::Vehicle) && picked && !v.busy,
          {.op = Op::QuickVehicle, .value = ui.vehicle, .on = ui.warp && v.caps.Has(Tool::Warp)});
   GtaButton("Repair current vehicle", v.playable && v.caps.Has(Tool::Repair), {Op::Repair});
   ImGui::SameLine(); GtaButton("Clean", v.playable && v.caps.Has(Tool::Clean), {Op::Clean});

@@ -116,10 +116,16 @@ std::shared_ptr<const DesktopView> Snapshot() {
 }
 bool Fresh(const DesktopView& v) { return v.sampled_at && sandbox::NowMs() - v.sampled_at <= 900; }
 bool LocalAuthority() {
-  if (sandbox::CurrentMode() == sandbox::Mode::Solo) return true;
-  if (sandbox::CurrentMode() != sandbox::Mode::Multiplayer) return false;
-  const auto link = sandbox::Party().LinkState();
-  return link == sandbox::Link::Idle || link == sandbox::Link::Hosting || link == sandbox::Link::Failed;
+  const auto mode = sandbox::CurrentMode();
+  if (mode == sandbox::Mode::Solo || mode == sandbox::Mode::Campaign) return true;
+  if (mode == sandbox::Mode::Multiplayer || mode == sandbox::Mode::CampaignCoop) {
+    const auto link = sandbox::Party().LinkState();
+    return link == sandbox::Link::Idle || link == sandbox::Link::Hosting || link == sandbox::Link::Failed;
+  }
+  return false;
+}
+bool IsCheatAllowed(const DesktopView& v, const PlayerView& local) {
+  return Fresh(v) && v.admin && LocalAuthority() && PermissionManager::AdminOS(local.role);
 }
 bool BuildAllowed() {
   const auto v = Snapshot();

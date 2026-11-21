@@ -21,6 +21,7 @@ struct DesktopView : CoreView {
 std::shared_ptr<const DesktopView> Snapshot();
 bool Fresh(const DesktopView&);
 bool LocalAuthority();
+bool IsCheatAllowed(const DesktopView& v, const PlayerView& local);
 bool BuildAllowed();
 bool Submit(Command, bool build_panel = false);
 void SetCapture(bool build, bool admin_panel, bool other = false);
