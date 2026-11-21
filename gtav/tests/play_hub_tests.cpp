@@ -103,6 +103,17 @@ int main(int argc, char** argv) {
     CHECK(flags[Key::Fsr1] == "true" && prefs.LastSave() == gfx::SaveState::Saved);
     CHECK(!french.Click({413, 306}, 1));  // Potato resets FSR and visual extras
     CHECK(flags[Key::LowMemory] == "true" && flags[Key::MaterialFiltering] == "false" && flags[Key::Fsr1] == "false");
+    CHECK(french.Scroll(3));
+    CHECK(french.HoverZone({80, 306}) == 19);
+    CHECK(french.HoverZone({80, 255}) == 0);  // a scrolled-out row must not intercept the header
+    CHECK(!french.Click({944, 284}, 1));    // click top of scrollbar
+    CHECK(french.HoverZone({80, 306}) == 16);
+    CHECK(french.GamepadButton(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) == Hub::PadResult::Stay);
+    CHECK(!french.GraphicsOpen());
+    CHECK(french.GamepadButton(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) == Hub::PadResult::Stay);
+    CHECK(french.GraphicsOpen());
+    CHECK(french.GamepadButton(SDL_GAMEPAD_BUTTON_EAST) == Hub::PadResult::Stay && !french.GraphicsOpen());
+    CHECK(french.GamepadButton(SDL_GAMEPAD_BUTTON_START) == Hub::PadResult::Stay && french.GraphicsOpen());
     if (argc >= 2) {
       const std::string prefix = argv[1];
       CHECK(SDL_SavePNG(french.Draw(), (prefix + "-graphics-fr.png").c_str()));
