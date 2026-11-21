@@ -14,13 +14,15 @@
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 
+#include <memory>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <utility>
 
-REXCVAR_DEFINE_STRING(gtav_mode, "campaign", "GTAV", "Desktop startup mode: menu | solo | multiplayer | campaign | campaign-coop");
+REXCVAR_DEFINE_STRING(gtav_mode, "campaign", "GTAV", "Desktop startup mode: menu | solo | multiplayer | campaign | campaign-coop | creator");
 REXCVAR_DEFINE_BOOL(gtav_workshop_scene, true, "GTAV", "Workshop: show local props and remote ghosts in free roam");
 REXCVAR_DEFINE_STRING(gtav_campaign_host, "", "GTAV", "Campaign coop host IP (launcher editable, empty=auto)");
 REXCVAR_DEFINE_INT32(gtav_campaign_port, 30127, "GTAV", "Campaign coop host TCP port");
@@ -30,6 +32,8 @@ namespace fs = std::filesystem;
 namespace {
 std::atomic<Mode> mode{Mode::Campaign};
 std::filesystem::path courses;
+std::filesystem::path creator_maps;
+std::unique_ptr<CreatorManager> creator_manager;
 std::atomic<Guest> guest{Guest::Loading};
 std::atomic<int64_t> guest_at{0};
 std::mutex vehicle_mutex;
@@ -282,7 +286,9 @@ void ShowCampaignStatus() {
 
 Mode CurrentMode() { return mode.load(std::memory_order_relaxed); }
 bool Active() { return CurrentMode() != Mode::Campaign; }
+bool IsCreatorMode() { return CurrentMode() == Mode::Creator; }
 Session& Party() { static Session session; return session; }
+CreatorManager* GetCreatorManager() { return creator_manager.get(); }
 
 bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_root) {
   const auto requested = REXCVAR_GET(gtav_mode);
@@ -295,7 +301,8 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
   } else if (requested == "solo") chosen = Mode::Solo;
   else if (requested == "multiplayer") chosen = Mode::Multiplayer;
   else if (requested == "campaign-coop" || requested == "campaign_coop") chosen = Mode::CampaignCoop;
-  else if (requested != "campaign") return Error("Unknown mode. Use menu, solo, multiplayer, campaign or campaign-coop.");
+  else if (requested == "creator" || requested == "creator-map" || requested == "creatormap" || requested == "creator_map") chosen = Mode::Creator;
+  else if (requested != "campaign") return Error("Unknown mode. Use menu, solo, multiplayer, campaign, campaign-coop or creator.");
 
   if (chosen == Mode::Campaign) {
     // Vrai cheat complet: start minimal workshop core for F5 dev panel even in solo Campaign.
@@ -351,6 +358,33 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
     return true;
   }
 
+  if (chosen == Mode::Creator) {
+    CreatorWorkspaceError cerr{};
+    auto creator = PrepareCreatorWorkspace(paths.user_data_root, cerr);
+    if (!creator) {
+      return Error(cerr == CreatorWorkspaceError::MissingInstall ?
+          "Installed TU27 game data is missing. Install the game with the launcher first." :
+          "Could not create separate Creator MAP folders. Use a writable installation without links in those folders.");
+    }
+    paths.user_data_root = creator->profile_root;
+    installed_content_root = creator->common_content_root;
+    courses = creator->maps_root; // reuse courses var for legacy but maps is creator_maps
+    creator_maps = creator->maps_root;
+    creator_manager = std::make_unique<CreatorManager>(creator->maps_root);
+    // Creator uses full workshop authority: build, cheats, creative — like a Unity editor with play mode
+    workshop::Start(creator->profile_root, true, {
+        [](std::string_view line) { REXLOG_INFO(\"{}\", line); },
+        [](uint8_t failed) { REXLOG_WARN(\"[creator] could not write config documents (mask {})\", unsigned(failed)); },
+    });
+    mode.store(chosen, std::memory_order_relaxed);
+    native::menu::OpenWorkshop();
+    REXLOG_INFO("[creator] MAP editor mode — Unity/Unreal style. Profile %s  Maps %s",
+                creator->profile_root.string().c_str(), creator->maps_root.string().c_str());
+    // Auto-open creator editor on start for immediate editing (user can close with F7/Esc)
+    // Defer to next frame? We open workshop now, creator via F7
+    return true;
+  }
+
   WorkspaceError error{};
   const auto workspace = PrepareWorkspace(paths.user_data_root, error);
   if (!workspace) {
@@ -375,6 +409,7 @@ void Shutdown() {
   // Always stop workshop core if it was started — now also started for Campaign (F5 cheat).
   workshop::Stop();
   if (Active()) Party().Stop();
+  creator_manager.reset();
 }
 void ReportGuest(Guest state) {
   guest_at.store(NowMs(), std::memory_order_relaxed);
@@ -403,6 +438,8 @@ void DrawWorkshop() {
   const auto* local = Myself(view.world);
   if (CurrentMode() == Mode::CampaignCoop) {
     ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "CAMPAIGN CO-OP  //  3 PROTAGONISTS");
+  } else if (CurrentMode() == Mode::Creator) {
+    ImGui::TextColored(ImVec4(1.f,0.85f,0.08f,1.f), "CREATOR MAP  //  UNITY / UNREAL STYLE EDITOR");
   } else {
     ImGui::TextColored(ImVec4(1.f,0.85f,0.08f,1.f), "%s", CurrentMode() == Mode::Solo ? "SANDBOX SOLO  //  LOS SANTOS" : "PRIVATE MULTIPLAYER  //  ONLINE");
   }
@@ -439,6 +476,41 @@ void DrawWorkshop() {
   }
   if (ImGui::BeginTabItem("Map builder")) {
     EditCourse(view, local);
+    ImGui::EndTabItem();
+  }
+  // Creator MAP — Unity/Unreal style editor (NEW Mode, also accessible as tab in any workshop for prototyping)
+  if (ImGui::BeginTabItem("Creator MAP")) {
+    const bool is_creator = IsCreatorMode();
+    ImGui::TextColored(ImVec4(1.f,0.85f,0.08f,1.f), is_creator ? "Mode Creator MAP actif — editeur complet" : "Editeur Creator MAP — prototype dans ce mode");
+    ImGui::TextWrapped("Unity/Unreal style: Hierarchy (objets), Inspector (transform / script), Asset Browser (Props/Vehicles/Peds/Triggers), Viewport ghost, Play test. Isole dans data/user/creator/.");
+    if (is_creator && creator_manager) {
+      ImGui::Text("Map: %s  |  %zu objects  |  %zu triggers  |  %s", creator_manager->Current().name.c_str(),
+                  creator_manager->Current().objects.size(), creator_manager->Current().triggers.size(),
+                  creator_manager->Dirty() ? "* unsaved" : "saved");
+      auto list = ListCreatorMaps(creator_manager->MapsRoot());
+      if (!list.empty()) {
+        ImGui::TextDisabled("%zu maps on disk:", list.size());
+        for (auto &n : list) ImGui::BulletText("%s", n.c_str());
+      } else ImGui::TextDisabled("No maps yet — open the full editor with F7 to create one.");
+    } else {
+      ImGui::TextDisabled("Lance le jeu en Creator MAP depuis le PLAY hub (tuile 05) pour l'isolation complete et le Start/Play dedie.");
+    }
+    ImGui::Separator();
+    if (ImGui::Button("Open Creator Editor [F7]")) { ::gtav::native::menu::ToggleCreator(); }
+    ImGui::SameLine();
+    if (IsCreatorMode()) ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "F7: Unity-like 3-panel editor | F8: Build | F5: Cheats");
+    else ImGui::TextDisabled("F7 ouvre l'editeur meme hors Creator — mais tes maps restent dans data/user/creator/");
+    ImGui::SeparatorText("Workflow Creator");
+    ImGui::BulletText("1. F7 -> Asset Browser choisis Prop/Vehicle/Ped/Trigger -> click ajoute a Hierarchy");
+    ImGui::BulletText("2. Hierarchy selection -> Inspector: Position/Yaw/Scale, Lock, Duplicate/Delete");
+    ImGui::BulletText("3. Viewport: vise hors panneau, clic place ghost, molette yaw, Shift distance, Ctrl+Shift hauteur");
+    ImGui::BulletText("4. Toolbar: Save / Save As / Play (spawn all) / Stop (cleanup) — puis joue ton scenario");
+    ImGui::BulletText("5. Scenario: triggers Checkpoint/Win/Lose/Spawn — win = AllCheckpoints ou WinZone");
+    if (is_creator) {
+      ImGui::Separator();
+      std::string why; bool can = creator_manager ? creator_manager->ValidForPlay(why) : false;
+      ImGui::TextColored(can?ImVec4(0.18f,0.85f,0.45f,1.f):ImVec4(1.f,0.4f,0.4f,1.f), can?"Ready to play — %zu objects":"Not ready: %s", can?creator_manager->Current().objects.size():0, why.c_str());
+    }
     ImGui::EndTabItem();
   }
   if (ImGui::BeginTabItem("Test drive")) {
@@ -490,7 +562,32 @@ void DrawHud() {
   constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
       ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing;
   if (ImGui::Begin("##workshop-hud", nullptr, flags)) {
-    if (CurrentMode() == Mode::CampaignCoop) {
+    if (CurrentMode() == Mode::Creator) {
+      const auto* mgr = GetCreatorManager();
+      if (world.race == Race::Countdown)
+        ImGui::Text("CREATOR %s | Starts in %u", world.course.name.c_str(), (world.clock_ms + 999) / 1000);
+      else if (world.race == Race::Running || world.race == Race::Finished)
+        ImGui::Text("CREATOR %s | %u/%zu | %.2f s%s", world.course.name.c_str(), local->Passed(), world.course.points.size(),
+                    (local->finish_ms ? local->finish_ms : world.clock_ms) / 1000.0, local->finish_ms ? "  FINISHED" : "");
+      else {
+        const char* mapname = mgr ? mgr->Current().name.c_str() : "No map";
+        ImGui::Text("CREATOR MAP | %s | %zu objects [F6] [F7 Editor] [F8 Build] [F5 Cheats]", mapname,
+                    mgr ? mgr->Current().objects.size() : 0);
+      }
+      if (mgr) ImGui::TextDisabled("Map: %s  Triggers: %zu  —  F7 Unity-like editor  |  isole creator/", mgr->Current().name.c_str(), mgr->Current().triggers.size());
+      if (local->pose && mgr && !mgr->Current().triggers.empty()) {
+        // Show nearest trigger distance
+        float best = 1e9f; const CreatorTrigger* near=nullptr;
+        for(auto &t: mgr->Current().triggers){
+          float dx = t.pos.x - local->pose->position.x/100.f;
+          float dy = t.pos.y - local->pose->position.y/100.f;
+          float dz = t.pos.z - local->pose->position.z/100.f;
+          float d = std::sqrt(dx*dx+dy*dy+dz*dz);
+          if(d < best){ best=d; near=&t; }
+        }
+        if(near) ImGui::TextColored(ImVec4(1.f,0.85f,0.08f,1.f), "Nearest %s (%s): %.0f m", near->name.c_str(), TriggerLabel(near->type), best);
+      }
+    } else if (CurrentMode() == Mode::CampaignCoop) {
       const auto camp = ViewCampaign();
       const char* who = camp.self_character ? CharacterLabel(*camp.self_character) : "?";
       if (world.race == Race::Countdown)

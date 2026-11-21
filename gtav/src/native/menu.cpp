@@ -6,7 +6,9 @@
 #ifdef GTAV_DESKTOP_WORKSHOP
 #include "../phone/AdminCheatApp.h"
 #include "../sandbox/BuildMenuUI.h"
+#include "../sandbox/CreatorEditorUI.h"
 #include "../sandbox/CreativeRuntime.h"
+#include "../sandbox/CreatorManager.h"
 #include <SDL3/SDL.h>
 #endif
 
@@ -306,6 +308,32 @@ void BuildWorkshop() {
   ImGui::PopStyleVar();
   if (!open && g_panel == Panel::Workshop) Close();
 }
+
+void BuildCreator() {
+  const auto screen = ImGui::GetIO().DisplaySize;
+  if (screen.x <= 1 || screen.y <= 1) return;
+  // Fullscreen overlay Unity/Unreal style — no window chrome, uses CreatorEditorUI 3-panel layout
+  // We keep an invisible host window to own the ImGui context, real panels are inside DrawCreatorEditor
+  ImGui::SetNextWindowPos(ImVec2(0,0));
+  ImGui::SetNextWindowSize(screen);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0,0));
+  bool open = true;
+  ImGui::Begin("##creator-fullscreen", &open, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+  // Fetch state from sandbox
+  auto* mgr = sandbox::GetCreatorManager();
+  const auto wv = workshop::Snapshot();
+  sandbox::CreatorEditorView view{
+    mgr,
+    wv ? *wv : workshop::DesktopView{},
+    g_scale,
+    false
+  };
+  sandbox::DrawCreatorEditor(view);
+  ImGui::End();
+  ImGui::PopStyleVar(2);
+  if (!open) Close();
+}
 #endif
 
 void SwitchPanel(Panel wanted, std::optional<Panel> only_if = {}) {
@@ -323,10 +351,11 @@ void SwitchPanel(Panel wanted, std::optional<Panel> only_if = {}) {
 #ifdef GTAV_DESKTOP_WORKSHOP
   // Cheat panel (F5) uses same admin capture as Workshop so Submit works for cheats in all modes,
   // including Campaign where sandbox::Active() is false. Always update capture, not only when Active().
+  // Creator (F7) is a full editor — captures like Build+Workshop.
   {
-    const bool is_build = next == Panel::Build;
-    const bool is_admin = next == Panel::Workshop || next == Panel::Cheats;
-    const bool other = next != Panel::Closed && next != Panel::Build && next != Panel::Workshop && next != Panel::Cheats;
+    const bool is_build = next == Panel::Build || next == Panel::Creator;
+    const bool is_admin = next == Panel::Workshop || next == Panel::Cheats || next == Panel::Creator;
+    const bool other = next != Panel::Closed && next != Panel::Build && next != Panel::Workshop && next != Panel::Cheats && next != Panel::Creator;
     workshop::SetCapture(is_build, is_admin, other);
   }
 #endif
@@ -360,13 +389,21 @@ bool ToggleBuild() {
   else if (workshop::BuildAllowed()) SwitchPanel(Panel::Build);
   return true;
 }
+bool ToggleCreator() {
+  if (!sandbox::Active()) return false;
+  // Creator MAP editor — allowed in any Workshop mode, but ideal in Mode::Creator
+  // Still allow in Solo/Multi so players can prototype without restarting
+  SwitchPanel(Panel::Creator);
+  return true;
+}
+bool CreatorOpen() { return g_panel.load() == Panel::Creator; }
 void CloseCreative() {
   const auto panel = g_panel.load();
-  if (panel == Panel::Build || panel == Panel::Cheats) SwitchPanel(Panel::Closed, panel);
+  if (panel == Panel::Build || panel == Panel::Cheats || panel == Panel::Creator) SwitchPanel(Panel::Closed, panel);
 }
 bool TextPanel() {
   const auto panel = g_panel.load();
-  return panel == Panel::Workshop || panel == Panel::Build || panel == Panel::Cheats;
+  return panel == Panel::Workshop || panel == Panel::Build || panel == Panel::Cheats || panel == Panel::Creator;
 }
 void OnText(uint32_t ch) {
   if (ch >= 32 && ch != 127 && ch <= 0x10ffff && TextPanel()) Push({Input::kText, 0, 0, int(ch)});
@@ -453,6 +490,11 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const P
     case Panel::Cheats:
 #ifdef GTAV_DESKTOP_WORKSHOP
       BuildCheats();
+#endif
+      break;
+    case Panel::Creator:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      BuildCreator();
 #endif
       break;
     case Panel::Closed:

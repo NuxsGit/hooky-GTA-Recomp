@@ -123,7 +123,9 @@ BuildResult WorkshopCore::Build(PlayerId actor, const Command& c, WorkshopGame& 
   }
   if (!Ready(game, *p)) return BuildResult::Missing;
   std::optional<Pose> pose;
-  if (p->seat == Seat::Local && c.placement) {
+  // Creator MAP: allow explicit world pose for local too (Unity-like editor places at stored pose)
+  if (c.proposed && c.proposed->Valid()) pose = c.proposed;
+  else if (p->seat == Seat::Local && c.placement) {
     if (const auto ray = game.Camera(c.placement->lens)) pose = Project(game, *ray, *c.placement);
   } else if (p->seat != Seat::Local && c.proposed && c.proposed->Valid()) pose = c.proposed;
   if (!pose) return BuildResult::Missing;
@@ -144,9 +146,10 @@ BuildResult WorkshopCore::Build(PlayerId actor, const Command& c, WorkshopGame& 
     items.push_back({model->hash, model->kind, *pose, c.placement ? c.placement->lock : c.on});
   }
   const auto at = game.Locate(p->entity);
+  const float max_dist = c.proposed ? 500.f : 90.f; // Creator MAP allows large maps via explicit pose
   for (const auto& item : items) {
     if (!at || !item.pose.Valid() || !caps_.Has(ForKind(item.kind)) || (item.locked && !caps_.Has(Feature::Anchor)) ||
-        (item.pose.at - at->at).Dot(item.pose.at - at->at) > 90.f*90.f) return BuildResult::Invalid;
+        (item.pose.at - at->at).Dot(item.pose.at - at->at) > max_dist*max_dist) return BuildResult::Invalid;
   }
   return build_.Place(actor, std::move(items), limit, spawns_, frame, allowed);
 }

@@ -34,8 +34,9 @@ using Window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>;
 struct RGB { Uint8 r, g, b; };
 constexpr RGB kWhite{250, 243, 232}, kMuted{180, 178, 191}, kSoft{130, 135, 152},
               kOrange{255, 164, 199}, kMint{153, 234, 212}, kLavender{224, 171, 244},
+              kGold{255, 214, 98}, kSky{120, 200, 255},
               kInk{24, 16, 29}, kPanel{31, 24, 44}, kLine{67, 52, 79}, kBlack{14, 13, 22};
-constexpr RGB kAccents[] = {kOrange, kMint, kSoft, kLavender};
+constexpr RGB kAccents[] = {kOrange, kMint, kSoft, kLavender, kGold};
 
 using gfx::Text;
 struct Tile {
@@ -47,12 +48,15 @@ constexpr std::array kTiles{
          {"SOLO", "SOLO"}, {"Continue your story with your local campaign saves.", "Reprends ton histoire avec tes sauvegardes de campagne."}},
     Tile{{730, 284, 650, 251}, {"SANDBOX", "BAC À SABLE"}, {"02   /   WORKSHOP", "02   /   ATELIER"},
          {"SOLO", "SOLO"}, {"Free roam, place props and build courses. Uses a separate profile.", "Explore, place des objets et crée des parcours. Profil séparé."}},
-    Tile{{60, 555, 650, 163}, {"CAMPAIGN CO-OP", "CAMPAGNE COOP"}, {"03   /   STORY CO-OP", "03   /   HISTOIRE COOP"},
+    Tile{{60, 555, 426, 163}, {"CAMPAIGN CO-OP", "CAMPAGNE COOP"}, {"03   /   STORY CO-OP", "03   /   HISTOIRE COOP"},
          {"3 PLAYERS", "3 JOUEURS"}, {"Michael / Franklin / Trevor locked; 3-player story free-roam. Isolated save under campaign_coop.",
                                       "Micka\u00ebl / Franklin / Trevor verrouill\u00e9s ; free-roam histoire \u00e0 3. Sauvegarde isol\u00e9e campaign_coop."}},
-    Tile{{730, 555, 650, 163}, {"PRIVATE SESSION", "SESSION PRIVÉE"}, {"04   /   SANDBOX MULTIPLAYER", "04   /   BAC À SABLE MULTI"},
+    Tile{{507, 555, 426, 163}, {"PRIVATE SESSION", "SESSION PRIVÉE"}, {"04   /   SANDBOX MULTIPLAYER", "04   /   BAC À SABLE MULTI"},
          {"MULTIPLAYER", "MULTIJOUEUR"}, {"Open Workshop (F6) to host or join a friend. No public matchmaking.",
                                          "Ouvre l’Atelier (F6) pour héberger ou rejoindre un ami. Pas de matchmaking."}},
+    Tile{{954, 555, 426, 163}, {"CREATOR MAP", "CREATOR MAP"}, {"05   /   CREATOR MAP", "05   /   CREATOR MAP"},
+         {"EDITOR", "EDITEUR"}, {"Unity/Unreal style editor — build maps, scenarios, missions then play. Isolated saves.",
+                                "Editeur type Unity/Unreal — cree tes maps, scenarios, missions puis joue. Sauvegardes isolees."}},
 };
 
 Surface MakeSurface(int width, int height) {
@@ -210,8 +214,13 @@ class Hub {
   Card focus;
 
   bool GraphicsOpen() const { return graphics_; }
-  void ToggleGraphics() { SelectTab(graphics_ ? Column(focus) : 2); }
-  void CycleTab(int direction) { SelectTab(((graphics_ ? 2 : Column(focus)) + direction + 3) % 3); }
+  int TabForFocus() const {
+    if (focus == Card::Story || focus == Card::StoryCoop) return 0;
+    if (focus == Card::Creator) return 1;
+    return Column(focus);
+  }
+  void ToggleGraphics() { SelectTab(graphics_ ? TabForFocus() : 2); }
+  void CycleTab(int direction) { SelectTab(((graphics_ ? 2 : TabForFocus()) + direction + 3) % 3); }
   bool Scroll(int direction) {
     if (!graphics_ || !direction || GraphicsCount() <= kGraphicsVisible) return false;
     return SetScroll(std::clamp(int(scroll_) + direction, 0, int(GraphicsCount()) - kGraphicsVisible));
@@ -219,20 +228,38 @@ class Hub {
   void SelectTab(int tab) {
     graphics_ = tab == 2;
     rejected_ = false;
-    if (!graphics_) focus = SelectColumn(focus, tab);
+    if (!graphics_) {
+      const bool is_story = focus == Card::Story || focus == Card::StoryCoop;
+      const bool is_workshop = focus == Card::Sandbox || focus == Card::PrivateSession || focus == Card::Creator;
+      if (tab == 0 && is_story) return;
+      if (tab == 1 && is_workshop) return;
+      focus = SelectColumn(focus, tab);
+    }
   }
   bool Back() {
     if (!graphics_) return true;
-    SelectTab(Column(focus));
+    SelectTab(TabForFocus());
     return false;
   }
   void Horizontal(int direction) {
     if (graphics_) ChangeValue(direction);
-    else focus = SelectColumn(focus, direction > 0 ? 1 : 0);
+    else {
+      const int row = Row(focus);
+      const int col = Column(focus);
+      const int max_col = row == 0 ? 1 : 2;
+      const int next = std::clamp(col + direction, 0, max_col);
+      focus = CardAt(row, next);
+    }
   }
   void Vertical(int direction) {
     if (graphics_) AdvanceGraphics(direction);
-    else focus = SelectRow(focus, direction > 0 ? 1 : 0);
+    else {
+      const int col = Column(focus);
+      const int row = Row(focus);
+      const int next_row = std::clamp(row + direction, 0, 1);
+      const int max_col = next_row == 0 ? 1 : 2;
+      focus = CardAt(next_row, std::min(col, max_col));
+    }
   }
   void Next(bool backwards) {
     if (graphics_) AdvanceGraphics(backwards ? -1 : 1);
@@ -339,7 +366,7 @@ class Hub {
                    56, 160, 90, kWhite);
     body_.Label(out, graphics_ ? L({"Set up the native renderer before launch.", "Règle le rendu natif avant de jouer."}) :
         L({"One city. Your story or your rules.", "Une ville. Ton histoire ou tes règles."}), 60, 247, 27, kMuted);
-    const int active_tab = graphics_ ? 2 : Column(focus);
+    const int active_tab = graphics_ ? 2 : (focus == Card::Creator ? 1 : Column(focus));
     Tab(out, 0, "01  /  STORY", "01  /  HISTOIRE", {"Campaign", "Campagne"}, kOrange, active_tab, pointer);
     Tab(out, 1, "02  /  WORKSHOP", "02  /  ATELIER", {"Sandbox", "Bac à sable"}, kMint, active_tab, pointer);
     Tab(out, 2, "03  /  F1 · Y", "03  /  F1 · Y", {"Graphics", "Graphismes"}, kLavender, active_tab, pointer);
@@ -348,8 +375,8 @@ class Hub {
       return out;
     }
 
-    // Campaign co-op reuses the story art with a tint; keep the sandbox night art for the workshop card.
-    SDL_Surface* art[] = {story_.get(), sandbox_.get(), story_.get(), party_.get()};
+    // Campaign co-op reuses story art; Workshop cards share sandbox/party art — Creator uses party with gold tint.
+    SDL_Surface* art[] = {story_.get(), sandbox_.get(), story_.get(), party_.get(), party_.get()};
     for (size_t n = 0; n < kTiles.size(); ++n) {
       const auto card = Card(n);
       const auto& tile = kTiles[n];
@@ -364,6 +391,16 @@ class Hub {
             for (int x = 0; x < rect.w; ++x) {
               row[x*4] = Uint8(std::min(255, int(row[x*4]) + 10));
               row[x*4+1] = Uint8(std::min(255, int(row[x*4+1]) + 4));
+            }
+          }
+        } else if (card == Card::Creator) {
+          // Gold tint for Creator MAP — Unity/Unreal editor vibe
+          for (int y = 0; y < rect.h; ++y) {
+            auto* row = static_cast<Uint8*>(out->pixels) + (rect.y + y) * out->pitch + rect.x * 4;
+            for (int x = 0; x < rect.w; ++x) {
+              row[x*4] = Uint8(std::min(255, int(row[x*4]) + 18));
+              row[x*4+1] = Uint8(std::min(255, int(row[x*4+1]) + 14));
+              row[x*4+2] = Uint8(std::max(0, int(row[x*4+2]) - 12));
             }
           }
         }
@@ -687,13 +724,14 @@ class Controllers {
 
 std::optional<Mode> Fallback(bool workshop, bool french) {
   const Text campaign{"Campaign solo", "Campagne solo"}, sandbox{"Sandbox solo", "Bac à sable solo"},
-      multiplayer{"Sandbox multiplayer", "Bac à sable multi"}, close{"Back", "Retour"},
+      multiplayer{"Sandbox multiplayer", "Bac à sable multi"}, creator{"Creator MAP", "Creator MAP"}, close{"Back", "Retour"},
       help{"Choose a mode. Story co-op is not supported. Sandbox uses a separate profile.",
            "Choisis un mode. La campagne coop n’est pas disponible. Le bac à sable utilise un profil séparé."};
   std::vector<SDL_MessageBoxButtonData> buttons;
   if (workshop) {
     buttons.push_back({SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, sandbox.In(french)});
     buttons.push_back({0, 3, multiplayer.In(french)});
+    buttons.push_back({0, 4, creator.In(french)});
   }
   buttons.push_back({workshop ? 0u : SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, campaign.In(french)});
   buttons.push_back({SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, -1, close.In(french)});

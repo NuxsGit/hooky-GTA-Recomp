@@ -7,4 +7,5 @@ set(GTAV_WORKSHOP_CORE
     ${CMAKE_CURRENT_LIST_DIR}/src/core/EntitySpawnQueue.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/core/WorkshopCore.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/sandbox/BuildManager.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/sandbox/CreatorManager.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/utils/ConfigStorage.cpp)
