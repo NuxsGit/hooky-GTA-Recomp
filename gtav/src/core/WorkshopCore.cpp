@@ -146,7 +146,7 @@ BuildResult WorkshopCore::Build(PlayerId actor, const Command& c, WorkshopGame& 
     items.push_back({model->hash, model->kind, *pose, c.placement ? c.placement->lock : c.on});
   }
   const auto at = game.Locate(p->entity);
-  const float max_dist = c.proposed ? 500.f : 90.f; // Creator MAP allows large maps via explicit pose
+  const float max_dist = c.proposed && actor == kLocalOwner ? 500.f : 90.f; // Creator MAP uses local-owner poses.
   for (const auto& item : items) {
     if (!at || !item.pose.Valid() || !caps_.Has(ForKind(item.kind)) || (item.locked && !caps_.Has(Feature::Anchor)) ||
         (item.pose.at - at->at).Dot(item.pose.at - at->at) > max_dist*max_dist) return BuildResult::Invalid;
