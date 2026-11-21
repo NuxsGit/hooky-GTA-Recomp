@@ -54,7 +54,7 @@ int main() {
   CHECK(TextureSampleFrames(standard_t, false, 5) == 5);  // explicit cvar kept
   CHECK(TextureSampleFrames(potato_t, true, 1) == 2);
   CHECK(TextureSampleFrames(extra_t, true, 1) == 2);
-  CHECK(TextureSampleFrames(ultra_t, true, 1) == 3);
+  CHECK(TextureSampleFrames(ultra_t, true, 1) == 2);  // was 3, now 2 for stability (Franklin head fix)
   CHECK(TextureSampleFrames(ultra_t, false, 7) == 7);  // explicit cvar kept
   CHECK(TextureSampleFrames(potato_t, true, 0) == 2);  // default path is never below 2
 

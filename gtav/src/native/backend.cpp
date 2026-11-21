@@ -3230,9 +3230,13 @@ struct Backend::Impl {
     if (t.texture && (t.checked_frame == frame || t.sample_frame == frame)) return t.descriptor;
     // Large textures: the sampled check every N frames (iPhone: each check faults ~20 cold pages of
     // guest memory back in, 15-17 ms a frame in the open world).
+    // Stability fix 2026-11-21: pure time-based skip caused stale aliasing (Franklin head on car window).
+    // Even inside the N-frame window we now verify a sampled hash (4KB) before reusing.
     if (const uint64_t every = uint64_t(std::max(1, texture_sample_frames));
-        every > 1 && t.texture && t.bytes > kSmallTexture && t.sample_frame != ~0ull && frame - t.sample_frame < every)
-      return t.descriptor;
+        every > 1 && t.texture && t.bytes > kSmallTexture && t.sample_frame != ~0ull && frame - t.sample_frame < every) {
+      if (HashGuestTexture(words, GuestTextureMemory(), true) == t.sampled_hash) return t.descriptor;
+      // sampled mismatch -> fall through to full recheck (don't keep stale descriptor)
+    }
     const bool watching = write_watch::Enabled() && !REXCVAR_GET(gtav_native_exact_cache);
     // Watched copies still get a full check every 64 frames: writes the watch cannot see (the
     // SDK writing guest memory through its raw physical view) were seen about once in 3 million
