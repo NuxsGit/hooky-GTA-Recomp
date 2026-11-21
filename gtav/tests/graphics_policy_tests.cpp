@@ -45,6 +45,19 @@ int main() {
   coverage.Draw(1.0f);
   CHECK(coverage.GuestSamples(225) == 225);
 
+  // Large textures get a sampled check every `frames` frames in lean presets (N100: weak CPU).
+  const auto standard_t = MakeGraphicsMemoryPolicy(false, 64 * kMiB);
+  const auto potato_t = MakeGraphicsMemoryPolicy(true, 64 * kMiB);
+  const auto extra_t = MakeGraphicsMemoryPolicy(true, true, 64 * kMiB);
+  const auto ultra_t = MakeGraphicsMemoryPolicy(true, true, true, 64 * kMiB);
+  CHECK(TextureSampleFrames(standard_t, true, 1) == 1);
+  CHECK(TextureSampleFrames(standard_t, false, 5) == 5);  // explicit cvar kept
+  CHECK(TextureSampleFrames(potato_t, true, 1) == 2);
+  CHECK(TextureSampleFrames(extra_t, true, 1) == 2);
+  CHECK(TextureSampleFrames(ultra_t, true, 1) == 3);
+  CHECK(TextureSampleFrames(ultra_t, false, 7) == 7);  // explicit cvar kept
+  CHECK(TextureSampleFrames(potato_t, true, 0) == 2);  // default path is never below 2
+
   constexpr auto standard = MakeGraphicsMemoryPolicy(false, 64 * kMiB);
   constexpr auto potato = MakeGraphicsMemoryPolicy(true, 64 * kMiB);
   constexpr auto extra = MakeGraphicsMemoryPolicy(true, true, 64 * kMiB);

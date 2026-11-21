@@ -93,7 +93,7 @@ void MovementPage(const DesktopView& v, const PlayerView& local) {
   if (ImGui::Combo("Flight speed", &speed, "x1\0x3\0x8\0x15\0")) Submit({.op = Op::Speed, .value = speeds[speed]});
   ImGui::EndDisabled();
   if (!v.caps.Has(Effect::Noclip)) ImGui::TextDisabled("Noclip needs the extended TU27 ABI opt-in.");
-  ImGui::TextWrapped("Close Workshop to steer: ZQSD (WASD positions), Space up, Ctrl down. On foot only.");
+  ImGui::TextWrapped("Close this panel to steer: ZQSD (WASD positions), Space up, Ctrl down. On foot only.");
   GtaButton("Health 200 + armor 100", can && v.caps.Has(Tool::Heal), {Op::Heal});
   GtaButton("Clear blood and weapon damage", can && v.caps.Has(Tool::Damage), {Op::Damage});
 }
@@ -198,13 +198,27 @@ void PlayersPage(Panel& ui, const DesktopView& v, const PlayerView& local) {
 }
 }  // namespace
 
-void DrawAdminCheatApp(const DesktopView& v, const PlayerView& local) {
-  if (!v.admin || !LocalAuthority() || !PermissionManager::AdminOS(local.role)) return;
+void DrawAdminCheatApp(const DesktopView& v, const PlayerView& local, float scale) {
+  const bool authority = v.admin && LocalAuthority() && PermissionManager::AdminOS(local.role);
+  if (!authority) {
+    // Locked — never render a blank page. The panel stays open so the user sees why it is
+    // locked and what they need (owner/admin role in an authoritative/solo/host session).
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.55f, 0.35f, 1.f));
+    ImGui::BeginDisabled();
+    ImGui::Button("Cheats locked", ImVec2(-1.f, 32.f * scale));
+    ImGui::EndDisabled();
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+    ImGui::TextWrapped("Admin OS needs the owner or admin role in an authoritative session (solo or a host/home session).");
+    ImGui::TextWrapped("You are %s%s.", Label(local.role), !v.admin ? " (not admin)" : "");
+    ImGui::TextDisabled("Run solo, host a local session, or join with an owner/admin credential to unlock this panel.");
+    ImGui::TextDisabled("Cheats execute through the authoritative core, never over the network.");
+    return;
+  }
   static Panel ui;
-  // GTA pill tabs — remplace le combo terne
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.f * scale);
   constexpr const char* tabs[]{"MAP", "MOVE", "GIVE", "WORLD", "PLAYERS"};
   constexpr const char* tab_labels[]{"Gamemode & Map", "Movement", "Give", "Teleport & World", "Players & Moderation"};
-  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.f);
   for (unsigned i = 0; i < std::size(tabs); ++i) {
     if (i) ImGui::SameLine(0, 6);
     const bool active = ui.tab == i;
@@ -222,6 +236,10 @@ void DrawAdminCheatApp(const DesktopView& v, const PlayerView& local) {
   ImGui::PopStyleVar();
   ImGui::Separator();
   ImGui::TextColored(ImVec4(0.18f, 0.85f, 0.45f, 1.f), "%s", tab_labels[ui.tab]);
+  ImGui::TextDisabled("%s", v.build ? "Build allowed" : "Build disabled");
+  ImGui::SameLine();
+  ImGui::TextDisabled("%u/%u pieces", v.count, v.total);
+  ImGui::Separator();
   if (ImGui::BeginChild("admin-scroll", ImVec2(0, -ImGui::GetTextLineHeightWithSpacing() * 1.25f))) {
     if (!v.playable) ImGui::TextDisabled("Waiting for a controllable TU27 player in free roam.");
     if (v.storage_error) ImGui::TextColored({1.f, .65f, .27f, 1.f}, "Config save error / incompatible version");

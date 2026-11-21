@@ -211,7 +211,19 @@ void BuildDebug(uint32_t fps, double frame_ms) {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
   if (ImGui::Begin("HOOKY  //  DEBUG  [F2]", &open, ImGuiWindowFlags_NoCollapse)) {
     ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "LOS SANTOS  //  DEBUG & WORKSHOP");
-    ImGui::TextDisabled("F2 Debug | F6 Workshop | F8 Build | Esc fermer");
+    ImGui::TextDisabled("F2 Debug | F6 Workshop | F5 Cheats | F8 Build | Esc fermer");
+#ifdef GTAV_DESKTOP_WORKSHOP
+    // Quick Workshop shortcuts inside F2 — the Cheats panel (AdminOS) lives on F5
+    if (sandbox::Active()) {
+      ImGui::Separator();
+      if (ImGui::Button("Cheats (F5)")) { SwitchPanel(Panel::Cheats, Panel::Debug); }
+      ImGui::SameLine();
+      if (ImGui::Button("Workshop (F6)")) { SwitchPanel(Panel::Workshop, Panel::Debug); }
+      ImGui::SameLine();
+      if (workshop::BuildAllowed() && ImGui::Button("Build (F8)")) { SwitchPanel(Panel::Build, Panel::Debug); }
+      ImGui::Separator();
+    }
+#endif
     debug::DrawPanel(fps, frame_ms, g_scale);
   }
   ImGui::End();
@@ -220,6 +232,32 @@ void BuildDebug(uint32_t fps, double frame_ms) {
 }
 
 #ifdef GTAV_DESKTOP_WORKSHOP
+void BuildCheats() {
+  const auto screen = ImGui::GetIO().DisplaySize;
+  ImGui::SetNextWindowPos(ImVec2(screen.x * .5f, screen.y * .5f), ImGuiCond_Appearing, ImVec2(.5f, .5f));
+  ImGui::SetNextWindowSize(ImVec2(std::min(900.f * g_scale, screen.x - 16), std::min(660.f * g_scale, screen.y - 16)),
+                           ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(screen.x - 12, screen.y - 12));
+  bool open = true;
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
+  if (ImGui::Begin("CHEATS  //  ADMIN  [F5]", &open, ImGuiWindowFlags_NoCollapse)) {
+    ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "CHEATS  //  ADMIN OS");
+    ImGui::TextDisabled("F5 pour fermer  |  Esc pour fermer  |  admin OS = owner / admin, session authoritatif");
+    ImGui::Separator();
+    const auto view = workshop::Snapshot();
+    if (!view) {
+      ImGui::TextDisabled("Quick workshop bridge unavailable.");
+    } else {
+      auto self = std::find_if(view->players.begin(), view->players.end(), [](const workshop::PlayerView& p) { return p.id == workshop::kLocalOwner; });
+      const auto& local = self != view->players.end() ? *self : workshop::PlayerView{};
+      workshop::DrawAdminCheatApp(*view, local, g_scale);
+    }
+  }
+  ImGui::End();
+  ImGui::PopStyleVar();
+  if (!open && g_panel == Panel::Cheats) Close();
+}
+
 void BuildWorkshop() {
   const auto screen = ImGui::GetIO().DisplaySize;
   ImGui::SetNextWindowPos(ImVec2(screen.x * .5f, screen.y * .5f), ImGuiCond_Appearing, ImVec2(.5f, .5f));
@@ -229,18 +267,6 @@ void BuildWorkshop() {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
   if (ImGui::Begin("WORKSHOP  //  LOS SANTOS  [F6]", &open, ImGuiWindowFlags_NoCollapse)) {
     sandbox::DrawWorkshop();
-    const auto mode = sandbox::CurrentMode();
-    const auto view = workshop::Snapshot();
-    if (mode != sandbox::Mode::Campaign && mode != sandbox::Mode::CampaignCoop &&
-        workshop::Fresh(*view) && view->admin && workshop::LocalAuthority()) {
-      for (const auto& player : view->players) {
-        if (player.id == workshop::kLocalOwner && workshop::PermissionManager::AdminOS(player.role) &&
-            ImGui::CollapsingHeader("AdminOS")) {
-          workshop::DrawAdminCheatApp(*view, player);
-          break;
-        }
-      }
-    }
   }
   ImGui::End();
   ImGui::PopStyleVar();
@@ -262,7 +288,8 @@ void SwitchPanel(Panel wanted, std::optional<Panel> only_if = {}) {
   input::Reset();
 #ifdef GTAV_DESKTOP_WORKSHOP
   if (sandbox::Active()) {
-    workshop::SetCapture(next == Panel::Build, next == Panel::Workshop, next != Panel::Closed && next != Panel::Build && next != Panel::Workshop);
+    workshop::SetCapture(next == Panel::Build, next == Panel::Workshop || next == Panel::Cheats,
+                         next != Panel::Closed && next != Panel::Build && next != Panel::Workshop && next != Panel::Cheats);
   }
 #endif
 }
@@ -285,13 +312,21 @@ bool ToggleBuild() {
   else if (workshop::BuildAllowed()) SwitchPanel(Panel::Build);
   return true;
 }
+bool ToggleCheats() {
+  if (!sandbox::Active()) return false;
+  if (g_panel.load() == Panel::Cheats) { SwitchPanel(Panel::Closed, Panel::Cheats); return true; }
+  if (IsOpen()) return false;
+  SwitchPanel(Panel::Cheats, Panel::Closed);
+  return true;
+}
+bool CheatsOpen() { return g_panel.load() == Panel::Cheats; }
 void CloseCreative() {
   const auto panel = g_panel.load();
-  if (panel == Panel::Build) SwitchPanel(Panel::Closed, panel);
+  if (panel == Panel::Build || panel == Panel::Cheats) SwitchPanel(Panel::Closed, panel);
 }
 bool TextPanel() {
   const auto panel = g_panel.load();
-  return panel == Panel::Workshop || panel == Panel::Build;
+  return panel == Panel::Workshop || panel == Panel::Build || panel == Panel::Cheats;
 }
 void OnText(uint32_t ch) {
   if (ch >= 32 && ch != 127 && ch <= 0x10ffff && TextPanel()) Push({Input::kText, 0, 0, int(ch)});
@@ -366,6 +401,11 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const P
         // Desktop presents across the viewport; only the mobile renderer letterboxes.
         if (!workshop::DrawBuildMenu(*view, g_scale, {0, 0, {w, h}})) SwitchPanel(Panel::Closed, Panel::Build);
       }
+#endif
+      break;
+    case Panel::Cheats:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      BuildCheats();
 #endif
       break;
     case Panel::Closed:

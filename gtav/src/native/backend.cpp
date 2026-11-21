@@ -108,7 +108,8 @@ REXCVAR_DEFINE_INT32(gtav_native_texture_recheck_frames, 30, "GTAV",
 #define GTAV_TEXTURE_SAMPLE_FRAMES_DEFAULT 1
 #endif
 REXCVAR_DEFINE_INT32(gtav_native_texture_sample_frames, GTAV_TEXTURE_SAMPLE_FRAMES_DEFAULT, "GTAV",
-                     "Frames between the sampled checks of a large cached texture (1: every frame it is used)");
+                     "Frames between the sampled checks of a large cached texture (1: every frame it is used; "
+                     "lean presets use 2, N100 Ultra 3 when the default is left)");
 REXCVAR_DEFINE_BOOL(gtav_native_exact_cache, false, "GTAV",
                     "Check cached vertex/index buffers and textures with a full content hash every frame "
                     "(no sampled-hash shortcut for large ones)");
@@ -1908,7 +1909,7 @@ struct Backend::Impl {
   GraphicsMemoryPolicy memory;
   uint32_t material_filter_floor = 1;
   uint32_t device_anisotropy = 1;
-  int32_t sampler_anisotropy_cap = 16, sampler_skip_mips = 0;
+  int32_t sampler_anisotropy_cap = 16, sampler_skip_mips = 0, texture_sample_frames = 1;
   bool skip_material_mip = false;
   FogFilter fog;
   ContactRayStatus contact_status = ContactRayStatus::Off;
@@ -3229,7 +3230,7 @@ struct Backend::Impl {
     if (t.texture && (t.checked_frame == frame || t.sample_frame == frame)) return t.descriptor;
     // Large textures: the sampled check every N frames (iPhone: each check faults ~20 cold pages of
     // guest memory back in, 15-17 ms a frame in the open world).
-    if (const uint64_t every = uint64_t(std::max(1, REXCVAR_GET(gtav_native_texture_sample_frames)));
+    if (const uint64_t every = uint64_t(std::max(1, texture_sample_frames));
         every > 1 && t.texture && t.bytes > kSmallTexture && t.sample_frame != ~0ull && frame - t.sample_frame < every)
       return t.descriptor;
     const bool watching = write_watch::Enabled() && !REXCVAR_GET(gtav_native_exact_cache);
@@ -6283,6 +6284,11 @@ FrontBuffer Backend::Execute(const FramePacket& f, RenderCommandList* list) {
     s.sampler_skip_mips = std::max(s.sampler_skip_mips, 1);
   }
   s.skip_material_mip = (s.memory.ultra_potato || s.memory.extra_potato || s.memory.lean) && rex::cvar::GetFlagSource("gtav_native_texture_min_lod") == rex::cvar::Source::kDefault;
+  // N100 Ultra / Extra Potato / Potato: re-hash large textures less often (CPU is the bottleneck on
+  // 8 GB laptops). An explicit --gtav_native_texture_sample_frames value is kept.
+  s.texture_sample_frames = TextureSampleFrames(s.memory,
+      rex::cvar::GetFlagSource("gtav_native_texture_sample_frames") == rex::cvar::Source::kDefault,
+      uint32_t(std::max(1, REXCVAR_GET(gtav_native_texture_sample_frames))));
   s.PreHash();
   if (int threads = REXCVAR_GET(gtav_native_convert_threads); threads > 0 && !s.converter_pool)
     s.converter_pool = std::make_unique<StreamConverter>(std::min(threads, 6));

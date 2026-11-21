@@ -55,7 +55,7 @@ struct GraphicsMemoryPolicy {
   uint64_t upload_chunk = 64 * kMiB;
   bool lean = false;
   bool extra_potato = false;  // ultra-lean: GTA IV faces on 3x rien hardware
-  bool ultra_potato = false;  // N100 Cyberpunk ultra: 25% scene, 64/16 MiB, 4 MiB chunk, max LOD cull
+  bool ultra_potato = false;  // N100 ultra-low: 25% scene, 64/16 MiB, 4 MiB chunk, deep mip skip, sampled texture checks every 3 frames
 };
 
 constexpr GraphicsMemoryPolicy MakeGraphicsMemoryPolicy(bool lean, bool extra_potato, bool ultra_potato, uint64_t default_upload_chunk) {
@@ -109,6 +109,19 @@ constexpr bool FitsUpload(uint64_t capacity, uint64_t offset, uint64_t bytes) {
 }
 constexpr uint64_t UploadCapacity(uint64_t nominal, uint64_t bytes) {
   return std::max(nominal, bytes);
+}
+
+// Sampled guest-memory checks for large cached textures: the default (every frame) costs the
+// weak CPU of a Steam-deck-class laptop a few microseconds per texture per frame. Lean presets
+// (Extra/Ultra Potato for N100-class 8 GB machines) sample less often; the full hash of a large
+// texture still runs every texture_recheck_frames frames, so a change is caught within that
+// budget, just not at the last frame. An explicit cvar value is kept.
+constexpr uint32_t TextureSampleFrames(const GraphicsMemoryPolicy& policy, bool cvar_is_default, uint32_t frames) {
+  const uint32_t safe = std::max(1u, frames);
+  if (!cvar_is_default) return safe;
+  if (policy.ultra_potato) return 3;
+  if (policy.extra_potato || policy.lean) return 2;
+  return safe;
 }
 
 // Only strengthen trilinear, repeating material fetches with a real mip chain. Resolve views

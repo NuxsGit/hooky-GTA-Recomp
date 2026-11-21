@@ -304,6 +304,7 @@ void Keyboard(const SDL_KeyboardEvent& key) {
 #ifdef GTAV_DESKTOP_WORKSHOP
   if (scan == SDL_SCANCODE_F6 && down && !repeat && menu::ToggleWorkshop()) return;
   if (scan == SDL_SCANCODE_F8 && down && !repeat && !(key.mod & SDL_KMOD_SHIFT) && menu::ToggleBuild()) return;
+  if (scan == SDL_SCANCODE_F5 && down && !repeat && menu::ToggleCheats()) return;
 #endif
   if (scan == SDL_SCANCODE_F1 || scan == SDL_SCANCODE_AC_BACK || (kDesktop && scan == SDL_SCANCODE_F2)) {
     if (down && !repeat) {
@@ -572,6 +573,9 @@ bool HandleMessage(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     case WM_KEYUP: case WM_SYSKEYUP:
       if (const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
           !down || !(lp & (1L << 30))) {
+#ifdef GTAV_DESKTOP_WORKSHOP
+        if (down && wp == VK_F5 && menu::ToggleCheats()) return true;
+#endif
         if (menu::IsOpen()) DebugKey(PhysicalKey(wp, lp), down);
         else Key(PhysicalKey(wp, lp), down);
       }
