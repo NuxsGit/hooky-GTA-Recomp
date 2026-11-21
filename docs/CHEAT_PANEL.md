@@ -36,7 +36,8 @@ Débloquées **tous modes** (découplées de `Mode::Creative`) — `WorkshopCore
 |---|---|---|
 | **MAP** | Gamemode perso & map default, builder policy, map rules (PvP, fall damage, traffic, peds, police) | `Op::PlayerMode/MapMode/MapRule/BuildRule` |
 | **MOVE** | Noclip, Fly, God, Stamina, Super jump, Sprint 1.49x, Never wanted, Flight speed x1/x3/x8/x15, Heal 200+armor, Clear blood | `Effect::Noclip,Fly,God,Stamina,Jump,Sprint,Wanted,InfiniteAmmo` + `Tool::Heal/Damage` |
-| **GIVE** | Armory (60+ armes TU27 validées), Infinite clip, Quick vehicle (40+ véhicules + favs, warp driver), Repair/Clean, Wallet credits, Survival kit | `Tool::Weapon/Armory/Warp/Repair/Clean` `Op::QuickVehicle/Cash/Kit` |
+| **GIVE** | Armory (60+ armes TU27 validées), Infinite clip, Quick vehicle (60+ véhicules full roster + favs, warp driver), Repair/Clean, Wallet credits, Survival kit | `Tool::Weapon/Armory/Warp/Repair/Clean` `Op::QuickVehicle/Cash/Kit` |
+| **SPAWN** | **Nouveau 0.8.17** — Vehicules/Props/Models batiments/Entites (tout `BuildManager` kModels ~90) : recherche, filtre Tous/Props/Vehicle/Ped, Favoris, Spawn devant 6m (generic QuickVehicle), Toggle favori | `Op::QuickVehicle` générique `ForKind(kind)` + `playable&&CanAdmin` (marche même en Survival) |
 | **WORLD** | Waypoint, Landmarks (8), Weather (7), Clock 0-23 + Freeze, Lunar gravity | `Feature::Waypoint/Ground/Teleport`, `Tool::Weather/Clock/PauseClock/Gravity` |
 | **PLAYERS** | Practice peds, Freeze/Anchor, GoTo/Bring (streamed ground), Heal/Revive/Kit, Promote/Demote, Kick/Ban (reason + bans.json) | `Op::Freeze/GoTo/Bring/Promote/Kick/Ban/Unban` |
 
