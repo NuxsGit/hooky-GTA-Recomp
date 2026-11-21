@@ -302,7 +302,7 @@ float MenuPixelDensity(SDL_WindowID id) {
 void Keyboard(const SDL_KeyboardEvent& key) {
   const auto [scan, down, repeat] = std::tuple(key.scancode, key.down, key.repeat);
 #ifdef GTAV_DESKTOP_WORKSHOP
-  if (scan == SDL_SCANCODE_F5 && down && !repeat && menu::ToggleCheat()) return;
+  if (scan == SDL_SCANCODE_F5 && down && !repeat && menu::ToggleCheats()) return;
   if (scan == SDL_SCANCODE_F6 && down && !repeat && menu::ToggleWorkshop()) return;
   if (scan == SDL_SCANCODE_F8 && down && !repeat && !(key.mod & SDL_KMOD_SHIFT) && menu::ToggleBuild()) return;
 #endif
@@ -573,6 +573,9 @@ bool HandleMessage(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     case WM_KEYUP: case WM_SYSKEYUP:
       if (const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
           !down || !(lp & (1L << 30))) {
+#ifdef GTAV_DESKTOP_WORKSHOP
+        if (down && wp == VK_F5 && menu::ToggleCheats()) return true;
+#endif
         if (menu::IsOpen()) DebugKey(PhysicalKey(wp, lp), down);
         else Key(PhysicalKey(wp, lp), down);
       }

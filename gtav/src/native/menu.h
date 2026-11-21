@@ -19,7 +19,9 @@ void ToggleDebug();  // F2 (Fn + F2 on media-key keyboards)
 void OpenWorkshop();  // startup, before the native window appears
 bool ToggleWorkshop();  // F6, sandbox modes only
 bool WorkshopOpen();
-bool ToggleCheat();  // F5, all modes — host only by default, grantable via Promote
+bool ToggleCheats();  // F5: Cheats (Admin) panel — all modes, host-only by default, grantable via Promote (merged)
+bool CheatsOpen();
+bool ToggleCheat();  // Compat alias for ToggleCheats (singular naming from a2e60d43)
 bool CheatOpen();
 bool ToggleBuild();  // F8 on Workshop desktop, consumes the shortcut even when Build is denied
 void CloseCreative();  // focus lost: cancel placement and relinquish cursor

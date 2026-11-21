@@ -331,7 +331,7 @@ class Renderer {
       case WM_KEYUP: {
         bool down = msg == WM_KEYDOWN;
 #ifdef GTAV_DESKTOP_WORKSHOP
-        if (wp == VK_F5 && down && !(lp & (1L << 30)) && menu::ToggleCheat()) {
+        if (wp == VK_F5 && down && !(lp & (1L << 30)) && menu::ToggleCheats()) {
           input::UpdateMouseCapture(hwnd);
           return 0;
         }

@@ -59,7 +59,7 @@ const char* GuestLabel() {
   const bool campaign = CurrentMode() == Mode::CampaignCoop;
   switch (GuestState()) {
     case Guest::Loading: return campaign ? "Campaign co-op ready. All missions playable at 3 from start." : "Waiting for the TU27 world. Load a sandbox save and enter free roam.";
-    case Guest::Ready: return campaign ? "Campaign co-op ready. Missions at 3 - F6: Session | F8: Build | P / Up: phone." : "Free roam ready. F6: Workshop | F8: Creative Build | P / Up: phone.";
+    case Guest::Ready: return campaign ? "Campaign co-op ready. Missions at 3 - F6: Session | F8: Build | P / Up: phone | F5: Cheats." : "Free roam ready. F6: Workshop | F8: Creative Build | P / Up: phone | F5: Cheats.";
     case Guest::Busy: return campaign ? "Waiting for world (cutscene/pause) - missions stay synced at 3." : "Waiting for free roam (not during a cutscene, mission or pause).";
     default: return "TU27 native context unavailable. Local vehicles and map markers are disabled.";
   }

@@ -5,6 +5,7 @@
 #include "sandbox/CreativeRuntime.h"
 #include "sandbox/desktop.h"
 #include "phone/AdminCheatApp.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -44,10 +45,11 @@ void Frame() {
   if (admin) {
     ImGui::SetNextWindowSize(ImVec2(760, 565), ImGuiCond_Always);
     ImGui::Begin("Admin fixture");
-    DrawAdminCheatApp(v, v.players.front());
+    const auto self = std::find_if(v.players.begin(), v.players.end(), [](const PlayerView& p) { return p.id == kLocalOwner; });
+    CHECK(self != v.players.end());
+    DrawAdminCheatApp(v, *self, 1.f);
     ImGui::End();
-  }
-  else CHECK(DrawBuildMenu(v, 1.f, {0, 0, {unsigned(io.DisplaySize.x), unsigned(io.DisplaySize.y)}}));
+  } else CHECK(DrawBuildMenu(v, 1.f, {0, 0, {unsigned(io.DisplaySize.x), unsigned(io.DisplaySize.y)}}));
   ImGui::Render();
   if (!admin || owner) CHECK(ImGui::GetDrawData()->TotalVtxCount > 200);
 }
@@ -96,10 +98,13 @@ int main() {
   Click({975, 375}, 1); CHECK(preview.model == 0);
   io.AddKeyEvent(ImGuiKey_Z, true); Frame();
   io.AddKeyEvent(ImGuiKey_Z, false); Frame(); CHECK(sent.back().op == Op::Undo);
+  // Cheats is a first-class workshop panel, not a page of a phone.
   admin = true; Frame(); Frame();
+  CHECK(labels.contains("MAP"));
+  Click("MAP");
   CHECK(labels.contains("Allow Players to build in Creative") && labels.contains("Pieces / player"));
   owner = false; Frame();
-  CHECK(!labels.contains("Pieces / player"));
+  CHECK(labels.contains("Cheats locked") && !labels.contains("Allow Players to build in Creative"));
   ImGui::DestroyContext();
-  std::puts("ImGui: filter, Z typing guard, placement wheel/click/cancel, AdminOS and live revocation passed");
+  std::puts("ImGui: filter, Z typing guard, placement wheel/click/cancel, cheats panel and live revocation passed");
 }

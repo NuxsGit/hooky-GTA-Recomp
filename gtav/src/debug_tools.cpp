@@ -45,7 +45,7 @@ std::shared_ptr<rex::LogCaptureSink> log_sink;
 std::atomic<int64_t> last_script_ms{0};
 std::atomic<uint32_t> last_game_timer{0};
 std::atomic<bool> mode_running{false};
-enum class Status { Waiting, Unavailable, Blocked, Ready, Gave, Teleported, Flying, Camera, Rejected };
+enum class Status { Waiting, Unavailable, Blocked, Ready, Gave, Teleported, Flying, Camera, Rejected, Restocked };
 std::atomic<Status> status{Status::Waiting};
 
 int64_t NowMs() {
@@ -80,7 +80,8 @@ enum Native : uint32_t {
   kSetCoords = 0x82C9C000, kVelocity = 0x82C9C2A0, kNetworkGame = 0x82CDBB10,
   kNetworkSession = 0x82CDBB28, kPlayerControl = 0x82CE9818, kPlayer = 0x82CE9A20,
   kPlayerPed = 0x82CE9CA8, kSwitching = 0x82CF1220, kInVehicle = 0x82D0BF30,
-  kGive = 0x82D575F0,
+  kGive = 0x82D575F0, kSetHealth = 0x82C9C078, kMaxHealth = 0x82D0E0D8,
+  kSetArmor = 0x82D0C3C8, kMaxArmor = 0x82CE97B8,
 #ifdef GTAV_DESKTOP_WORKSHOP
   kAddBlip = 0x82C81950, kBlipCoords = 0x82C81A10, kBlipColor = 0x82C81CC8,
   kRemoveBlip = 0x82C82248, kBlipExists = 0x82C824D8,
@@ -114,7 +115,7 @@ Vec Horizontal(float yaw, float forward, float right, float up) {
   return {-s * forward + c * right, c * forward + s * right, up};
 }
 
-uint32_t PlayablePed(NativeCall& call) {
+uint32_t PlayablePed(NativeCall& call, bool mission_assist = false) {
   // Campaign co-op at 3: keep presence and workshop sync during missions (all story missions playable at 3)
   const bool campaign_missions = sandbox::CurrentMode() == sandbox::Mode::CampaignCoop;
   // Track mission state for GTA Online style death routing (solo open world vs shared missions).
@@ -123,7 +124,7 @@ uint32_t PlayablePed(NativeCall& call) {
     if (call.Okay()) sandbox::SetCampaignMissionState(in_mission);
   }
   if (gtav::InFailureEffect() || call.Flag(kNetworkGame) || call.Flag(kNetworkSession) ||
-      (!campaign_missions && call.Flag(kMission)) || call.Flag(kCutscene) || call.Flag(kPaused) ||
+      (!campaign_missions && !mission_assist && call.Flag(kMission)) || call.Flag(kCutscene) || call.Flag(kPaused) ||
       call.Flag(kSwitching) || !call.Flag(kFadedIn) || !call.Okay()) return 0;
   const auto player = call.Read(kPlayer);
   if (!call.Okay() || player >= 32 || !call.Flag(kPlayerControl, {player})) return 0;
@@ -164,12 +165,28 @@ struct Cheats {
     epoch = in.epoch;
     if (!in.armed) { status = Status::Ready; return; }
 
+    // Only this one-shot aid can run during a playable Story mission. It does not
+    // touch mission flags, checkpoints, wanted level, inventory, or save data directly.
+    if (in.action == Action::MissionRestock) {
+      if (Active()) { status = Status::Rejected; return; }
+      const auto ped = PlayablePed(call, true);
+      if (!ped) { status = Status::Blocked; return; }
+      const auto player = call.Read(kPlayer);
+      const auto health = call.Read(kMaxHealth, {ped});
+      const auto armor = call.Read(kMaxArmor, {player});
+      if (!call.Okay() || player >= 32 || health == 0 || health > 10000 || armor > 10000 ||
+          !controls.StillArmed(epoch)) { status = Status::Rejected; return; }
+      status = call.Invoke(kSetHealth, {ped, health}) && (!armor || call.Invoke(kSetArmor, {ped, armor}))
+                   ? Status::Restocked : Status::Rejected;
+      return;
+    }
+
     // Do not invoke actions from boot, a mission/cutscene, pause/load, or a network session.
     // Do not reapply a toggle when the world becomes playable again.
     const auto ped = PlayablePed(call);
     if (!ped) {
       Stop(call);
-      status = Status::Blocked;
+      if (in.action || status != Status::Restocked) status = Status::Blocked;
       return;
     }
     const bool on_foot = !call.Flag(kInVehicle, {ped, 0}) && call.Okay();
@@ -182,6 +199,7 @@ struct Cheats {
 
     if (in.action) {
       switch (*in.action) {
+        case Action::MissionRestock: break;  // handled before the free-roam gate
         case Action::Stop: status = Stop(call) ? Status::Ready : Status::Unavailable; return;
         case Action::Give:
           status = call.Invoke(kGive, {ped, HashName("weapon_pistol"), 60, 0}) ? Status::Gave : Status::Rejected;
@@ -661,12 +679,13 @@ const char* StatusText(Status value) {
   switch (value) {
     case Status::Waiting: return "Waiting for a live TU27 script thread.";
     case Status::Unavailable: return "Native ABI unavailable. No cheat actions enabled.";
-    case Status::Blocked: return "Unavailable during missions, transitions, pause or online play.";
+    case Status::Blocked: return "Free-roam tools blocked. Mission assist requires a controllable player.";
     case Status::Ready: return "Story tools ready. Only enable them in free roam.";
     case Status::Gave: return "Requested a pistol with 60 rounds.";
     case Status::Teleported: return "Teleported a short distance in the loaded world.";
     case Status::Flying: return "Fly active. Closing the panel releases control (you can fall).";
     case Status::Camera: return "Freecam active. Close F2 to return to the game camera.";
+    case Status::Restocked: return "Health and available armor restored.";
     case Status::Rejected: return "Action refused in the current world state.";
   }
   return "";
@@ -743,7 +762,7 @@ void DrawPanel(unsigned fps, double frame_ms, float scale) {
     bool armed = controls.Armed();
 #ifdef GTAV_DESKTOP_WORKSHOP
     const bool workshop_mode = sandbox::Active();
-    if (workshop_mode) ImGui::TextDisabled("Story tools are Campaign-only. Use F6 Workshop for AdminOS.");
+    if (workshop_mode) ImGui::TextDisabled("Story tools are Campaign-only. Use the Cheats panel (F5) for AdminOS.");
 #else
     constexpr bool workshop_mode = false;
 #endif
@@ -758,6 +777,11 @@ void DrawPanel(unsigned fps, double frame_ms, float scale) {
     if (ImGui::Button("Toggle freecam")) controls.Queue(Action::Freecam, now);
     ImGui::SameLine();
     if (ImGui::Button("Stop")) controls.Queue(Action::Stop, now);
+    ImGui::EndDisabled();
+    ImGui::SeparatorText("Mission assist / Prologue");
+    ImGui::TextWrapped("Restore health and armor during playable Story sections. This does not skip or complete objectives.");
+    ImGui::BeginDisabled(!armed || mode_running.load());
+    if (ImGui::Button("Restore health and armor")) controls.Queue(Action::MissionRestock, now);
     ImGui::EndDisabled();
     ImGui::EndDisabled();
     ImGui::Spacing();

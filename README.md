@@ -164,7 +164,7 @@ The desktop **Play** hub has illustrated cards for **Campaign solo**, **Sandbox 
 story missions and progress are not synchronized. Select a mode with mouse, keyboard or D-pad;
 Enter/A confirms and Esc/B closes. The two sandbox modes have a separate local profile. Press
 **F6** in free roam to save checkpoint layouts, run minigames, or host/join a private session.
-Try the [Creative Build overlay (F8) and AdminOS phone (P / Up)](docs/WORKSHOP_CREATIVE.md)
+Try the [Creative Build overlay (F8), the cheats/Admin panel (F5)](docs/WORKSHOP_CREATIVE.md)
 for local construction and Solo practice moderation.
 In a private room, the host can copy an `IPv4:port code` invitation from **F6 → Session**.
 Friends paste it into **Server** to join and see nearby ghost actors. This is not GTA Online or

@@ -11,6 +11,7 @@ by these tools. The launcher, updater and Campaign profile do not change.
 | --- | --- |
 | **F6** | Existing Workshop sessions, checkpoint layouts, test drive and minigames. Editing/test drive now also require Creative access. |
 | **F8** | Open/close the Creative Build overlay when the authority and free-roam checks allow it. |
+| **F5** | Open/close the cheats (Admin) panel — a first-class workshop panel, never a phone page. |
 | **Shift+F8** | Graphics replay when `--gtav_native_replay=true`. Campaign retains F8 for replay. |
 | **P**, **Up** or **D-pad Up** (SDL pad) | Open or navigate the original GTA V phone when gameplay allows it. No Workshop overlay uses this shortcut. |
 | **Mouse in Build** | Aim in the game view outside the panel. Left-click to place; right-click to cancel the preview. Wheel rotates, Shift+wheel changes distance, Ctrl+Shift+wheel changes height. |
@@ -49,8 +50,8 @@ respawning or going back to Creative.
   previews the anchor; if one member cannot spawn, the batch rolls back. Recent activity keeps
   the last 30 models spawned, and history retains up to 100 actions per builder. **Clean my
   build** is irreversible and clears undo/redo, not favorites, presets or F6 layouts.
-- **F6 Workshop** shows the session controls. Owner/Admin can expand **AdminOS** there.
-  **F8** is the only shortcut for Creative Build.
+- **F6 Workshop** shows the session controls. Owner/Admin use the dedicated **Cheats (Admin) panel (F5)** — 5 large tabs (MAP / MOVE / GIVE / WORLD / PLAYERS) — never a phone page. The fake-phone Admin was removed because it captured the whole game into a phone-shaped window and made gameplay impossible.
+  **F8** is the only shortcut for Creative Build. **P / Up** opens the original GTA V phone (restored, not intercepted).
 - **AdminOS → Players & Moderation → Load / respawn three practice players** creates Alex, Noa
   and Sam in Solo. Their rows are labeled simulated. Test mode overrides, nearby on-foot moves
   in both directions, anchoring, give/heal/revive, and kick/ban with a reason. A ban survives a
@@ -121,7 +122,7 @@ ctest --test-dir build/workshop-ui --output-on-failure
 Before release, repeat on genuine TU27 data: enter free roam; exercise F8 search, ghost,
 place/undo/redo/cleanup, verify that clicking or turning the wheel never fires or jumps the camera,
 and switch to Survival while streaming or flying. Test focus loss, return from a cutscene,
-controller polling and a ped change. Open AdminOS on a fresh and existing Workshop profile; run
+controller polling and a ped change. Open the cheats panel (F5) on a fresh and existing Workshop profile; run
 practice moderation, check the audit, restart and unban. Test the extended opt-in separately
 and confirm invalid models or unresolved travel leave the world unchanged. A two-PC test should
 confirm the old v2 room still works, and verify the original phone on both host and guest. Do not treat tests on

@@ -65,7 +65,7 @@ Il ajoute : un lanceur/installateur Windows complet, le mode **Desktop Workshop*
  │  ├─ sandbox/**             mode Campaign/Sandbox/private       │
  │  ├─ frontend/**            hub « Mode », assets, modes.h       │
  │  ├─ native/**              RENDERER NATIF (Plume, D3D hooks,..) │
- │  ├─ phone/**               AdminOS / PhoneShell UI             │
+ │  ├─ phone/**               AdminCheatApp (panel F5 Admin)      │
  │  └─ fs/**                  headers freestanding du DLL du jeu  │
  ├────────────────────────────────────────────────────────────────┤
  │  codegen (ReXGlue)         gtav_manifest.toml + partition      │  811 fichiers .cpp générés
@@ -102,7 +102,7 @@ codegen et les shims mobiles (sans aucune donnée de jeu).
 | `src/core/` | État de Workshop partagé : `WorkshopCore` (sessions, layout), `GamemodeManager`, `PermissionManager`, `PlayerRegistry`, `EntitySpawnQueue`, `CheatController`, `WorkshopGame.h`/`WorkshopTypes.h` |
 | `src/frontend/` | Hub « Choisir le mode » (`play_hub.cpp` ~720 lignes, `modes.h`), assets embarqués (Barlow, PNG) via `embed_assets.py` |
 | `src/native/` | **Renderer natif** — voir §6 |
-| `src/phone/` | `PhoneShellUI.cpp` (AdminOS imbriqué par la ferme, ~fixe) + `AdminCheatApp.cpp` (outils admin pour téléphone) |
+| `src/phone/` | `AdminCheatApp.cpp` (menu cheats / Admin, panel F5 dédié) |
 | `src/sandbox/` | Modes Campaign/Sandbox/Private : `desktop.cpp` (hub → configure), `session.cpp` (hôte/invitation TCP), `world.cpp`, `scene.cpp`, `protocol.cpp`, `courses.cpp`, `campaign.cpp`, `BuildManager.cpp`, `Tu27Workshop.cpp`, `BuildMenuUI.cpp`, `CreativeRuntime.cpp` |
 | `src/utils/ConfigStorage.cpp` | Persistance de config (settings localisées) |
 | `tests/` | 14 tests CI (voir §8) |
@@ -154,7 +154,7 @@ codegen et les shims mobiles (sans aucune donnée de jeu).
 | `RELEASE_CLEANROOM.md` (381) | Build/release Windows, scan de fuite, scrub d'historique (2026-10-29), procédure Linux |
 | `RELEASE_v0.3.0.md` | Notes de release v0.3.0 (build Windows) |
 | `d3d_map.md` (71) | Map D3D XDK TU27 (adresses, layout CDevice) — **référence renderer natif** |
-| `SANDBOX.md` (127) / `WORKSHOP_CREATIVE.md` (129) | Desktop Workshop : modes, Build overlay, AdminOS téléphone |
+| `SANDBOX.md` (127) / `WORKSHOP_CREATIVE.md` (129) | Desktop Workshop : modes, Build overlay, AdminOS panel |
 | `WINDOWS_GRAPHICS.md` (267) / `WINDOWS_PERF_2026-10-29.md` | Post FX, FSR1, contact rays, fog, perf Windows |
 | `GRAPHICS_REALISM.md` (105) | Options F1 (material filter, rays) |
 | `DEBUG_AND_UPDATES.md` (85) | F2 overlay, story tools, tests lanceur/mise à jour |
@@ -282,7 +282,7 @@ Avant le boot du guest, `play_hub.cpp` affiche les cartes « Campaign solo », �
 
 ### 7.2 Sandbox / Workshop (`gtav/src/sandbox/` + `gtav/src/core/`)
 Modes Campaign/Sandbox/Private, mode Private = session TCP multi-joueur (`session.cpp`, `protocol.cpp`).
-« Build overlay » F8 et « AdminOS » téléphone (P) sous F6 (voir `docs/WORKSHOP_CREATIVE.md`).
+« Build overlay » F8 et « AdminOS » panel dédié F5 (voir `docs/WORKSHOP_CREATIVE.md`). Le téléphone base GTA (P/Haut) est restauré, non intercepted.
 `GTAV_DESKTOP_WORKSHOP=ON` compile ce code ; sinon `core/sandbox/phone` sont absents.
 
 ---
