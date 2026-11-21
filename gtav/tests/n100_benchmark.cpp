@@ -21,17 +21,16 @@
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
 #if defined(__GNUC__) || defined(__clang__)
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
 #include <cpuid.h>
 #endif
 #endif
-#ifdef _WIN32
+#include <unistd.h>
+#else
 #include <windows.h>
 #include <intrin.h>
-#endif
-#ifndef _WIN32
-#include <unistd.h>
 #endif
 
 using namespace gtav::native;
