@@ -267,15 +267,20 @@ BuildResult WorkshopCore::Execute(PlayerId actor, const Command& c, WorkshopGame
         return Done(healed && given);
       }
       case Op::QuickVehicle: {
+        // Generic quick spawn: now supports Vehicles/Props/Peds/Buildings (models type batiments/Entitee) for F5 SPAWN.
+        // Keeps backward compat for vehicles (warp), but also allows props/peds via same front-spawn logic.
         const auto* car = FindModel(c.value);
         const auto from = game.Locate(ped);
-        if (actor != id || target->seat != Seat::Local ||
-            !caps_.Has(Feature::Vehicle) || (c.on && !caps_.Has(Tool::Warp)) || !car || car->kind != Kind::Vehicle || !from)
+        if (actor != id || target->seat != Seat::Local || !car || !from) return BuildResult::Invalid;
+        // Feature check per kind (was Vehicle only) + Warp only for vehicles
+        if (!caps_.Has(ForKind(car->kind)) || (c.on && (!caps_.Has(Tool::Warp) || car->kind != Kind::Vehicle)))
           return BuildResult::Invalid;
         const auto result = build_.Place(actor, {{car->hash, car->kind, Compose(*from, {{0, 6, .5f}, 0})}},
             permissions_.Settings().prop_limit, spawns_, frame, [this, actor, ped, rev = build_revision_] {
               const auto* p = players_.Find(actor);
-              return CanBuild(actor) && p && p->entity == ped && rev == build_revision_;
+              // Cheat spawn (F5 SPAWN) must work even when Build is disabled (Survival) — require Admin + playable, not Build.
+              // Keep revision check to cancel if permissions change mid-queue.
+              return playable_ && CanAdmin(actor) && p && p->entity == ped && rev == build_revision_;
             });
         if (result == BuildResult::Queued && c.on) warp_ped_ = ped;
         return result;
