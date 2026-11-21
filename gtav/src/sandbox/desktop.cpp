@@ -1,6 +1,7 @@
 #include "desktop.h"
 #include "CreativeRuntime.h"
 #include "campaign.h"
+#include "campaign_death.h"
 
 #include "courses.h"
 #include "../frontend/play_hub.h"
@@ -261,6 +262,16 @@ void ShowCampaignStatus() {
     for (auto &p : view.world.players) if (p.id == id) { name = p.name.c_str(); break; }
     ImGui::BulletText("%s -> %s", name, CharacterLabel(ch));
   }
+  ImGui::SeparatorText("Mort en coop - GTA Online adapte");
+  const bool in_mission = GetCampaignMissionState();
+  const auto mode = CampaignDeathMode(in_mission);
+  ImGui::Text("Mode actuel: %s", DeathModeLabel(mode));
+  if (IsCampaignSoloDeath(in_mission)) {
+    ImGui::TextWrapped("Open world: mort SOLO - seul le joueur Wasted respawn hopital (-2%% max $5000), les autres continuent. Style GTA Online.");
+    ImGui::TextDisabled("Exemple perte: $10k -> -$200, $300k -> -$5000 (cap)");
+  } else {
+    ImGui::TextWrapped("Mission: mort PARTAGEE - 30s pour revive, sinon Mission Failed pour tous (host authoritative, checkpoints partages).");
+  }
 }
 }  // namespace
 
@@ -464,6 +475,13 @@ void DrawHud() {
       }
       if (camp.self_character) {
         ImGui::TextDisabled("Locked protagonist: %s  |  Saves: campaign_coop (isolated)", who);
+      }
+      // GTA Online adapted death HUD: solo vs shared label
+      {
+        const bool in_mission = GetCampaignMissionState();
+        const auto mode = CampaignDeathMode(in_mission);
+        const char* death_hint = IsCampaignSoloDeath(in_mission) ? "Mort: SOLO (hopital, -2% max $5000)" : "Mort: MISSION PARTAGEE (30s revive)";
+        ImGui::TextDisabled("%s | %s", DeathModeLabel(mode), death_hint);
       }
     } else if (world.race == Race::Countdown)
       ImGui::Text("%s | Starts in %u", world.course.name.c_str(), (world.clock_ms + 999) / 1000);

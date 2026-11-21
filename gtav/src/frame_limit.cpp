@@ -8,6 +8,8 @@
 // tie it to the display, so uncapped play also wants --vsync=false.
 
 #include "frame_pacing.h"
+#include "sandbox/campaign_death.h"
+#include "sandbox/desktop.h"
 
 #include <rex/cvar.h>
 #include <rex/hook.h>
@@ -99,7 +101,16 @@ void NoteFailureEffect(int state) {
   std::lock_guard lock(failure_mutex);
   if (failure.Notify(state, NowMs())) {
     failure_until_ms.store(failure.until_ms, std::memory_order_relaxed);
-    REXLOG_INFO("[mission] death/failure camera state {}", state);
+    if (sandbox::CurrentMode() == sandbox::Mode::CampaignCoop) {
+      const bool in_mission = sandbox::GetCampaignMissionState();
+      const auto mode = sandbox::CampaignDeathMode(in_mission);
+      REXLOG_INFO("[campaign_death] {} state {} ({})", sandbox::DeathModeLabel(mode), state,
+                  sandbox::IsCampaignSoloDeath(in_mission) ?
+                  "solo: Wasted -> hospital 2%/max $5000 others continue" :
+                  "shared: 30s revive -> Mission Failed for all (host authoritative)");
+    } else {
+      REXLOG_INFO("[mission] death/failure camera state {}", state);
+    }
   }
 }
 
