@@ -211,7 +211,7 @@ void BuildDebug(uint32_t fps, double frame_ms) {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
   if (ImGui::Begin("HOOKY  //  DEBUG  [F2]", &open, ImGuiWindowFlags_NoCollapse)) {
     ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "LOS SANTOS  //  DEBUG & WORKSHOP");
-    ImGui::TextDisabled("F2 Debug | F6 Workshop | F8 Build | Esc fermer");
+    ImGui::TextDisabled("F2 Debug | F5 Cheat | F6 Workshop | F8 Build | Esc fermer");
     debug::DrawPanel(fps, frame_ms, g_scale);
   }
   ImGui::End();
@@ -229,22 +229,73 @@ void BuildWorkshop() {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
   if (ImGui::Begin("WORKSHOP  //  LOS SANTOS  [F6]", &open, ImGuiWindowFlags_NoCollapse)) {
     sandbox::DrawWorkshop();
-    const auto mode = sandbox::CurrentMode();
     const auto view = workshop::Snapshot();
-    if (mode != sandbox::Mode::Campaign && mode != sandbox::Mode::CampaignCoop &&
-        workshop::Fresh(*view) && view->admin && workshop::LocalAuthority()) {
+    // Cheat is now available for all game modes (Campaign, Solo, Multiplayer, CampaignCoop)
+    // Host-only by default, grantable via Promote. Show in Workshop as well for backward compat.
+    if (workshop::Fresh(*view) && view->admin && workshop::LocalAuthority()) {
       for (const auto& player : view->players) {
         if (player.id == workshop::kLocalOwner && workshop::PermissionManager::AdminOS(player.role) &&
-            ImGui::CollapsingHeader("AdminOS")) {
+            ImGui::CollapsingHeader("AdminOS — Cheat dev (aussi F5 pour tous les modes)")) {
           workshop::DrawAdminCheatApp(*view, player);
           break;
         }
       }
+    } else if (!workshop::Fresh(*view) || !view->admin) {
+      ImGui::TextDisabled("Cheat dev: ouvrir F5 (host uniquement, tous les modes). Le host peut promouvoir ses amis en Admin.");
     }
   }
   ImGui::End();
   ImGui::PopStyleVar();
   if (!open && g_panel == Panel::Workshop) Close();
+}
+
+void BuildCheat() {
+  const auto screen = ImGui::GetIO().DisplaySize;
+  ImGui::SetNextWindowPos(ImVec2(screen.x * .5f, screen.y * .5f), ImGuiCond_Appearing, ImVec2(.5f, .5f));
+  ImGui::SetNextWindowSize(ImVec2(std::min(820.f * g_scale, screen.x - 16), std::min(600.f * g_scale, screen.y - 16)),
+                           ImGuiCond_FirstUseEver);
+  bool open = true;
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
+  if (ImGui::Begin("CHEAT  //  DEV PANEL  [F5]  —  Tous les modes", &open, ImGuiWindowFlags_NoCollapse)) {
+    // Universal cheat: works in Campaign, Solo, Multiplayer, CampaignCoop.
+    // Host-only by default — LocalAuthority() true for Solo/Campaign solo, or Hosting/Idle for coop modes.
+    // Host can grant via Players tab Promote to Admin.
+    const auto view = workshop::Snapshot();
+    const bool fresh = workshop::Fresh(*view);
+    const bool authority = workshop::LocalAuthority();
+    // Find local player view
+    const workshop::PlayerView* local = nullptr;
+    for (const auto& p : view->players) if (p.id == workshop::kLocalOwner) { local = &p; break; }
+    const bool is_owner_or_admin = local && workshop::PermissionManager::AdminOS(local->role);
+    const bool allow = fresh && view->admin && authority && is_owner_or_admin;
+    if (!fresh) {
+      ImGui::TextColored(ImVec4(1.f,0.6f,0.2f,1.f), "En attente du monde TU27... entre en free roam (ou lance une partie).");
+      ImGui::TextDisabled("Le panel F5 est host-only par defaut. En solo tu es host. En coop/multi, seul l'hote voit ce panel.");
+      ImGui::TextDisabled("L'hote peut promouvoir un ami en Admin (onglet PLAYERS) pour lui donner le cheat.");
+    } else if (!authority) {
+      ImGui::TextColored(ImVec4(1.f,0.4f,0.4f,1.f), "Tu as rejoint une partie — seul l'hote a le cheat par defaut.");
+      ImGui::TextDisabled("Demande a l'hote de te promouvoir en Admin (F5 -> PLAYERS -> Promote).");
+      if (local) ImGui::Text("Ton role: %s", workshop::Label(local->role));
+    } else if (!is_owner_or_admin) {
+      ImGui::TextColored(ImVec4(1.f,0.85f,0.2f,1.f), "Role Player — pas de cheat. L'hote doit te promouvoir.");
+      if (local) ImGui::Text("Ton role: %s", workshop::Label(local->role));
+      ImGui::TextDisabled("Host: F5 -> PLAYERS -> selectionne le joueur -> Promote to Admin.");
+    } else {
+      ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "DEV CHEAT — Host/Admin  |  Tous les modes  |  F5");
+      ImGui::TextDisabled("Host-only par defaut, partageable. God, heal, wanted, armes, vehicules, teleport, meteo, temps, gravite, etc.");
+      ImGui::Separator();
+      // Render the full dev panel (MAP/MOVE/GIVE/WORLD/PLAYERS)
+      for (const auto& player : view->players) if (player.id == workshop::kLocalOwner) { workshop::DrawAdminCheatApp(*view, player); break; }
+    }
+    // Show quick hint when not allowed but authority exists and not yet admin (solo should always be allowed after fresh)
+    if (!allow && fresh && authority && local && !workshop::PermissionManager::AdminOS(local->role)) {
+      ImGui::Separator();
+      ImGui::TextDisabled("Astuce host: ce panel est aussi visible dans F6 Workshop > AdminOS quand tu es host.");
+    }
+  }
+  ImGui::End();
+  ImGui::PopStyleVar();
+  if (!open && g_panel == Panel::Cheat) Close();
 }
 #endif
 
@@ -261,8 +312,13 @@ void SwitchPanel(Panel wanted, std::optional<Panel> only_if = {}) {
   debug::PanelControls().SetOpen(next == Panel::Debug);
   input::Reset();
 #ifdef GTAV_DESKTOP_WORKSHOP
-  if (sandbox::Active()) {
-    workshop::SetCapture(next == Panel::Build, next == Panel::Workshop, next != Panel::Closed && next != Panel::Build && next != Panel::Workshop);
+  // Cheat panel (F5) uses same admin capture as Workshop so Submit works for cheats in all modes,
+  // including Campaign where sandbox::Active() is false. Always update capture, not only when Active().
+  {
+    const bool is_build = next == Panel::Build;
+    const bool is_admin = next == Panel::Workshop || next == Panel::Cheat;
+    const bool other = next != Panel::Closed && next != Panel::Build && next != Panel::Workshop && next != Panel::Cheat;
+    workshop::SetCapture(is_build, is_admin, other);
   }
 #endif
 }
@@ -279,6 +335,13 @@ bool ToggleWorkshop() {
   return true;
 }
 bool WorkshopOpen() { return g_panel.load() == Panel::Workshop; }
+bool ToggleCheat() {
+  // F5 cheat dev panel — available in ALL game modes (Campaign, Solo, Multiplayer, CampaignCoop)
+  // Host-only by default (LocalAuthority), grantable via Promote.
+  SwitchPanel(Panel::Cheat);
+  return true;
+}
+bool CheatOpen() { return g_panel.load() == Panel::Cheat; }
 bool ToggleBuild() {
   if (!sandbox::Active()) return false;
   if (g_panel.load() == Panel::Build) SwitchPanel(Panel::Closed, Panel::Build);
@@ -291,7 +354,7 @@ void CloseCreative() {
 }
 bool TextPanel() {
   const auto panel = g_panel.load();
-  return panel == Panel::Workshop || panel == Panel::Build;
+  return panel == Panel::Workshop || panel == Panel::Build || panel == Panel::Cheat;
 }
 void OnText(uint32_t ch) {
   if (ch >= 32 && ch != 127 && ch <= 0x10ffff && TextPanel()) Push({Input::kText, 0, 0, int(ch)});
@@ -356,6 +419,11 @@ ImDrawData* Frame(uint32_t w, uint32_t h, uint32_t fps, double frame_ms, const P
     case Panel::Workshop:
 #ifdef GTAV_DESKTOP_WORKSHOP
       BuildWorkshop();
+#endif
+      break;
+    case Panel::Cheat:
+#ifdef GTAV_DESKTOP_WORKSHOP
+      BuildCheat();
 #endif
       break;
     case Panel::Build:

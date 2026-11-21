@@ -302,6 +302,7 @@ float MenuPixelDensity(SDL_WindowID id) {
 void Keyboard(const SDL_KeyboardEvent& key) {
   const auto [scan, down, repeat] = std::tuple(key.scancode, key.down, key.repeat);
 #ifdef GTAV_DESKTOP_WORKSHOP
+  if (scan == SDL_SCANCODE_F5 && down && !repeat && menu::ToggleCheat()) return;
   if (scan == SDL_SCANCODE_F6 && down && !repeat && menu::ToggleWorkshop()) return;
   if (scan == SDL_SCANCODE_F8 && down && !repeat && !(key.mod & SDL_KMOD_SHIFT) && menu::ToggleBuild()) return;
 #endif
