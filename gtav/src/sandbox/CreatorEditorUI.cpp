@@ -345,7 +345,10 @@ bool DrawCreatorEditor(const CreatorEditorView& view){
     ImGui::TextDisabled("Creator MAP  |  F7 toggle editor  |  F8 Build still available  |  F5 Cheats  |  isole dans data/user/creator/");
     ImGui::SameLine();
     std::string why; bool ok=view.manager->ValidForPlay(why);
-    ImGui::TextColored(ok? ImVec4(0.18f,0.85f,0.45f,1.f):ImVec4(1.f,0.55f,0.35f,1.f), ok?"Ready to play":" %s", ok?"":why.c_str());
+    if (ok)
+      ImGui::TextColored(ImVec4(0.18f, 0.85f, 0.45f, 1.f), "Ready to play");
+    else
+      ImGui::TextColored(ImVec4(1.f, 0.55f, 0.35f, 1.f), "Not ready: %s", why.c_str());
   }
   ImGui::End(); ImGui::PopStyleColor();
 
