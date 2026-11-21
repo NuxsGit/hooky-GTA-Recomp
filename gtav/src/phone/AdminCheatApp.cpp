@@ -177,7 +177,7 @@ void SpawnPage(Panel& ui, const DesktopView& v) {
       const auto* m = filtered[size_t(i)];
       bool selected = ui.spawn_model == m->hash;
       char label[160];
-      std::snprintf(label, sizeof label, "%s  /  %s  [0x%08X]##spawn", m->name.data(), m.category.data(), unsigned(m->hash));
+      std::snprintf(label, sizeof label, "%s  /  %s  [0x%08X]##spawn", m->name.data(), m->category.data(), unsigned(m->hash));
       if (ImGui::Selectable(label, selected)) {
         ui.spawn_model = m->hash;
         picked = m;
