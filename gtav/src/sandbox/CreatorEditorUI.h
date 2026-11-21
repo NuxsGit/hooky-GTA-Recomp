@@ -1,9 +1,7 @@
 #pragma once
 
 #include "CreatorManager.h"
-#include "../core/WorkshopCore.h"
-
-#include <imgui.h>
+#include "CreativeRuntime.h"
 
 namespace gtav::sandbox {
 
