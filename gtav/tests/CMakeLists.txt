@@ -194,3 +194,11 @@ if(MSVC)
         endif()
     endforeach()
 endif()
+
+# Lenovo N100 prototype benchmark - asset-free, no retail data, runs on N100 4c/8Go/UHD or any host
+add_executable(gtav_n100_benchmark n100_benchmark.cpp)
+target_include_directories(gtav_n100_benchmark PRIVATE ../src)
+target_compile_features(gtav_n100_benchmark PRIVATE cxx_std_20)
+target_link_libraries(gtav_n100_benchmark PRIVATE Threads::Threads)
+add_test(NAME n100_prototype COMMAND gtav_n100_benchmark --quick)
+set_tests_properties(n100_prototype PROPERTIES TIMEOUT 30)
