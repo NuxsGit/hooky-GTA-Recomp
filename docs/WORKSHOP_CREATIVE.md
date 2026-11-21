@@ -11,8 +11,9 @@ by these tools. The launcher, updater and Campaign profile do not change.
 | --- | --- |
 | **F6** | Existing Workshop sessions, checkpoint layouts, test drive and minigames. Editing/test drive now also require Creative access. |
 | **F8** | Open/close the Creative Build overlay when the authority and free-roam checks allow it. |
+| **F5** | Open/close the cheats (Admin) panel — a first-class workshop panel, never a phone page. |
 | **Shift+F8** | Graphics replay when `--gtav_native_replay=true`. Campaign retains F8 for replay. |
-| **P**, **Up** or **D-pad Up** (SDL pad) | Open the Workshop phone when no other overlay is open. Esc or B puts it away. |
+| **O**, **F7** or **Y** (SDL pad) | Open the Workshop phone when no other overlay is open. Esc or B puts it away. Base GTA phone is P / Up / Haut. |
 | **Mouse in Build** | Aim in the game view outside the panel. Left-click to place; right-click to cancel the preview. Wheel rotates, Shift+wheel changes distance, Ctrl+Shift+wheel changes height. |
 | **Z / Shift+Z** | Undo / redo in Build, outside text fields. Ctrl+Y also redoes. |
 | **ZQSD / Space / Ctrl** | Steer Fly or Noclip after closing the phone. These are WASD physical positions on QWERTY. Flight is on foot. |
@@ -49,9 +50,12 @@ respawning or going back to Creative.
   previews the anchor; if one member cannot spawn, the batch rolls back. Recent activity keeps
   the last 30 models spawned, and history retains up to 100 actions per builder. **Clean my
   build** is irreversible and clears undo/redo, not favorites, presets or F6 layouts.
-- The phone has Session and Status tiles plus Build when authorized. Only Owner/Admin get the
-  **AdminOS** tile. Status shows the in-game hour, role, presented FPS and, for a joined private
-  room, the kernel TCP RTT if available (not a game-protocol ping).
+- The phone has Session and Status tiles plus Build when authorized (and Campaign/Invite in co-op).
+  It is a small workshop status tool, not the admin interface. **AdminOS is its own large panel
+  (F5), never a page of the phone** — the fake-phone Admin made gameplay impossible because it
+  forced a complete cheat console into a phone-shaped window that captured the whole game.
+  Status shows the in-game hour, role, presented FPS and, for a joined private room, the kernel
+  TCP RTT if available (not a game-protocol ping).
 - **AdminOS → Players & Moderation → Load / respawn three practice players** creates Alex, Noa
   and Sam in Solo. Their rows are labeled simulated. Test mode overrides, nearby on-foot moves
   in both directions, anchoring, give/heal/revive, and kick/ban with a reason. A ban survives a
@@ -122,7 +126,7 @@ ctest --test-dir build/workshop-ui --output-on-failure
 Before release, repeat on genuine TU27 data: enter free roam; exercise F8 search, ghost,
 place/undo/redo/cleanup, verify that clicking or turning the wheel never fires or jumps the camera,
 and switch to Survival while streaming or flying. Test focus loss, return from a cutscene,
-controller polling and a ped change. Open AdminOS on a fresh and existing Workshop profile; run
+controller polling and a ped change. Open the cheats panel (F5) on a fresh and existing Workshop profile; run
 practice moderation, check the audit, restart and unban. Test the extended opt-in separately
 and confirm invalid models or unresolved travel leave the world unchanged. A two-PC test should
 confirm the old v2 room still works, with a read-only phone on the guest. Do not treat tests on

@@ -313,6 +313,7 @@ void Keyboard(const SDL_KeyboardEvent& key) {
   if (scan == SDL_SCANCODE_F8 && down && !repeat && !(key.mod & SDL_KMOD_SHIFT) && menu::ToggleBuild()) return;
   // Base phone (P / Haut) restored to GTA - not intercepted. Workshop phone on O / F7.
   if ((key.key == SDLK_O || scan == SDL_SCANCODE_F7) && down && !repeat && menu::OpenPhone()) return;
+  if (scan == SDL_SCANCODE_F5 && down && !repeat && menu::ToggleCheats()) return;
 #endif
   if (scan == SDL_SCANCODE_F1 || scan == SDL_SCANCODE_AC_BACK || (kDesktop && scan == SDL_SCANCODE_F2)) {
     if (down && !repeat) {
@@ -587,6 +588,7 @@ bool HandleMessage(HWND window, UINT message, WPARAM wp, LPARAM lp) {
           if (wp == 'O' || wp == 'o' || wp == VK_F7) {
             if (menu::OpenPhone()) return true;
           }
+          if (wp == VK_F5 && menu::ToggleCheats()) return true;
         }
 #endif
         if (menu::IsOpen()) DebugKey(PhysicalKey(wp, lp), down);

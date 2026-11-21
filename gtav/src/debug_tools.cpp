@@ -743,7 +743,7 @@ void DrawPanel(unsigned fps, double frame_ms, float scale) {
     bool armed = controls.Armed();
 #ifdef GTAV_DESKTOP_WORKSHOP
     const bool workshop_mode = sandbox::Active();
-    if (workshop_mode) ImGui::TextDisabled("Story tools are Campaign-only. Use the Workshop phone for AdminOS.");
+    if (workshop_mode) ImGui::TextDisabled("Story tools are Campaign-only. Use the Cheats panel (F5) for AdminOS.");
 #else
     constexpr bool workshop_mode = false;
 #endif
