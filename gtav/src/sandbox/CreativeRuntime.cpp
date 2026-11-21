@@ -73,7 +73,7 @@ struct Runtime {
   void Publish(std::shared_ptr<const DesktopView> next) {
     { std::lock_guard lock(publication); view.swap(next); }  // release old snapshots outside the lock
   }
-  std::atomic<unsigned> keys{0}, capture{0};  // 1 = Build, 2 = Phone, 4 = another overlay
+  std::atomic<unsigned> keys{0}, capture{0};  // 1 = Build, 2 = Workshop, 4 = another overlay
   std::atomic<bool> pending{false}, ready{false}, work{false};
   uint64_t epoch{}, world_epoch{};  // protected by input mutex
   bool last_authority{};
@@ -134,10 +134,10 @@ bool Submit(Command c, bool build_panel) {
   s.pending = true;
   return true;
 }
-void SetCapture(bool build, bool phone, bool other) {
+void SetCapture(bool build, bool admin_panel, bool other) {
   auto& s = State();
   std::lock_guard lock(s.input);
-  s.capture = build ? 1u : phone ? 2u : other ? 4u : 0u;
+  s.capture = build ? 1u : admin_panel ? 2u : other ? 4u : 0u;
   ++s.epoch;
   s.preview.reset();
   s.keys = 0;

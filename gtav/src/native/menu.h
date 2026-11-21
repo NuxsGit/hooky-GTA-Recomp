@@ -20,7 +20,6 @@ void OpenWorkshop();  // startup, before the native window appears
 bool ToggleWorkshop();  // F6, sandbox modes only
 bool WorkshopOpen();
 bool ToggleBuild();  // F8 on Workshop desktop, consumes the shortcut even when Build is denied
-bool OpenPhone();  // O / F7 / Y only when no other overlay is handling input
 bool ToggleCheats();  // F5: Cheats (Admin) panel, sandbox modes only
 bool CheatsOpen();
 void CloseCreative();  // focus lost: cancel placement and relinquish cursor

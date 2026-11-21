@@ -17,12 +17,11 @@ profile first. The Workshop does not skip the prologue, import saves, or interru
 
 ## Build overlay and AdminOS
 
-In Workshop free roam, **F8** opens the permission-gated Creative Build overlay; **O / F7** opens
-the phone (a small workshop status tool); **F5** opens the cheats (Admin) panel — a first-class
-workshop panel, not a page of the phone. Use **F6** for the original checkpoint editor and
-private sessions. See the [Build, phone, controls, and runtime limits](WORKSHOP_CREATIVE.md)
-for the new tools. They are local to the host copy of the game; the private v2 room does not
-replicate them.
+In Workshop free roam, **F8** opens the permission-gated Creative Build overlay; **F5** opens the
+dedicated cheats (Admin) panel — 5 large tabs (MAP / MOVE / GIVE / WORLD / PLAYERS), never a phone
+page. **P / Up** opens the original GTA V phone (restored). Use **F6** for the original checkpoint
+editor and private sessions. See the [Build and AdminOS controls](WORKSHOP_CREATIVE.md) for the
+new tools. They are local to the host copy of the game; the private v2 room does not replicate them.
 
 ## Building a layout and playing
 

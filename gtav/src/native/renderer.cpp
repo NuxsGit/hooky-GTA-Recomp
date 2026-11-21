@@ -340,10 +340,6 @@ class Renderer {
           input::UpdateMouseCapture(hwnd);
           return 0;
         }
-        if (pressed && (wp == 'P' || wp == VK_UP) && menu::OpenPhone()) {
-          input::UpdateMouseCapture(hwnd);
-          return 0;
-        }
         if (menu::TextPanel()) {
           using K = menu::Key;
           switch (wp) {

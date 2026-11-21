@@ -201,14 +201,7 @@ bool GamepadEvent(const SDL_Event& event) {
   held[button] = down;
   const bool toggle = focused_menu && combo && down && held[SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER] &&
                       held[SDL_GAMEPAD_BUTTON_BACK];
-  bool workshop_phone = false;
-#ifdef GTAV_DESKTOP_WORKSHOP
-  // Base phone (GTA) on Haut/D-pad Up is restored - do not intercept. Workshop phone (Hooky) on Y/North.
-  if (focused_menu && !was_open && down && button == SDL_GAMEPAD_BUTTON_NORTH) workshop_phone = menu::OpenPhone();
-#endif
-  if (workshop_phone) {
-    // Consume Y for Workshop phone - base phone keeps D-pad Up.
-  } else if (toggle) {
+  if (toggle) {
     menu::Toggle();
   } else if (focused_menu && button == SDL_GAMEPAD_BUTTON_EAST && was_open && down) {
     menu::Close();
@@ -216,7 +209,7 @@ bool GamepadEvent(const SDL_Event& event) {
     menu::OnKey(*key, down);
   }
   if (held.none()) pads.erase(it);
-  return down && (was_open || toggle || workshop_phone);
+  return down && (was_open || toggle);
 }
 
 #ifdef _WIN32
@@ -311,8 +304,6 @@ void Keyboard(const SDL_KeyboardEvent& key) {
 #ifdef GTAV_DESKTOP_WORKSHOP
   if (scan == SDL_SCANCODE_F6 && down && !repeat && menu::ToggleWorkshop()) return;
   if (scan == SDL_SCANCODE_F8 && down && !repeat && !(key.mod & SDL_KMOD_SHIFT) && menu::ToggleBuild()) return;
-  // Base phone (P / Haut) restored to GTA - not intercepted. Workshop phone on O / F7.
-  if ((key.key == SDLK_O || scan == SDL_SCANCODE_F7) && down && !repeat && menu::OpenPhone()) return;
   if (scan == SDL_SCANCODE_F5 && down && !repeat && menu::ToggleCheats()) return;
 #endif
   if (scan == SDL_SCANCODE_F1 || scan == SDL_SCANCODE_AC_BACK || (kDesktop && scan == SDL_SCANCODE_F2)) {
@@ -462,7 +453,7 @@ void Configure() {
   Default("keybind_rstick_down", "K");
   Default("keybind_rstick_left", "J");
   Default("keybind_rstick_right", "L");
-  Default("keybind_dpad_up", "Up");
+  Default("keybind_dpad_up", "Up,P");
   Default("keybind_dpad_down", "Down");
   Default("keybind_dpad_left", "Left");
   Default("keybind_dpad_right", "Right");
@@ -583,13 +574,7 @@ bool HandleMessage(HWND window, UINT message, WPARAM wp, LPARAM lp) {
       if (const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
           !down || !(lp & (1L << 30))) {
 #ifdef GTAV_DESKTOP_WORKSHOP
-        // Base phone (P / Up) restored to GTA - not intercepted. Workshop phone on O / F7.
-        if (down) {
-          if (wp == 'O' || wp == 'o' || wp == VK_F7) {
-            if (menu::OpenPhone()) return true;
-          }
-          if (wp == VK_F5 && menu::ToggleCheats()) return true;
-        }
+        if (down && wp == VK_F5 && menu::ToggleCheats()) return true;
 #endif
         if (menu::IsOpen()) DebugKey(PhysicalKey(wp, lp), down);
         else Key(PhysicalKey(wp, lp), down);

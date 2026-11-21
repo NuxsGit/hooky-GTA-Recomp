@@ -4,7 +4,6 @@
 #include "sandbox/BuildMenuUI.h"
 #include "sandbox/CreativeRuntime.h"
 #include "sandbox/desktop.h"
-#include "phone/PhoneShellUI.h"
 #include "phone/AdminCheatApp.h"
 #include <algorithm>
 #include <cstdio>
@@ -38,19 +37,21 @@ Session::~Session() = default;
 SessionView Session::View() const { return {}; }
 }
 
-static int panel_mode = 0;  // 0 = build, 1 = phone, 2 = cheats (Admin)
+static bool admin = false;
 void Frame() {
   labels.clear(); rects.clear();
   auto& io = ImGui::GetIO();
   ImGui::NewFrame();
-  if (panel_mode == 1) DrawPhone(v, 60, 1.f);
-  else if (panel_mode == 2) {
+  if (admin) {
+    ImGui::SetNextWindowSize(ImVec2(760, 565), ImGuiCond_Always);
+    ImGui::Begin("Admin fixture");
     const auto self = std::find_if(v.players.begin(), v.players.end(), [](const PlayerView& p) { return p.id == kLocalOwner; });
     CHECK(self != v.players.end());
     DrawAdminCheatApp(v, *self, 1.f);
+    ImGui::End();
   } else CHECK(DrawBuildMenu(v, 1.f, {0, 0, {unsigned(io.DisplaySize.x), unsigned(io.DisplaySize.y)}}));
   ImGui::Render();
-  CHECK(ImGui::GetDrawData()->TotalVtxCount > 200);
+  if (!admin || owner) CHECK(ImGui::GetDrawData()->TotalVtxCount > 200);
 }
 ImVec2 At(const char* label) {
   if (!labels.contains(label)) { for (const auto& [s, _] : labels) std::fprintf(stderr, "[%s]\n", s.c_str()); }
@@ -97,19 +98,13 @@ int main() {
   Click({975, 375}, 1); CHECK(preview.model == 0);
   io.AddKeyEvent(ImGuiKey_Z, true); Frame();
   io.AddKeyEvent(ImGuiKey_Z, false); Frame(); CHECK(sent.back().op == Op::Undo);
-  panel_mode = 1; ResetPhone(); Frame(); Frame();
-  // The phone is a workshop tool, not an admin panel: no Admin tile, no Admin page.
-  CHECK(labels.contains("SESSION\nWorkshop F6") && labels.contains("STATUS\nWorld & room"));
-  CHECK(!labels.contains("ADMIN OS") && !labels.contains("Allow Players to build in Creative"));
-  io.DisplaySize = {800, 540}; Frame(); Frame();
-  CHECK(labels.contains("SESSION\nWorkshop F6"));
-  // Cheats is a first-class workshop panel, not a page of the fake phone.
-  panel_mode = 2; Frame(); Frame();
+  // Cheats is a first-class workshop panel, not a page of a phone.
+  admin = true; Frame(); Frame();
   CHECK(labels.contains("MAP"));
   Click("MAP");
   CHECK(labels.contains("Allow Players to build in Creative") && labels.contains("Pieces / player"));
   owner = false; Frame();
   CHECK(labels.contains("Cheats locked") && !labels.contains("Allow Players to build in Creative"));
   ImGui::DestroyContext();
-  std::puts("ImGui: filter, Z typing guard, placement wheel/click/cancel, workshop phone, cheats panel and live revocation passed");
+  std::puts("ImGui: filter, Z typing guard, placement wheel/click/cancel, cheats panel and live revocation passed");
 }

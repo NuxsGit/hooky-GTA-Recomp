@@ -65,7 +65,7 @@ Il ajoute : un lanceur/installateur Windows complet, le mode **Desktop Workshop*
  │  ├─ sandbox/**             mode Campaign/Sandbox/private       │
  │  ├─ frontend/**            hub « Mode », assets, modes.h       │
  │  ├─ native/**              RENDERER NATIF (Plume, D3D hooks,..) │
- │  ├─ phone/**               AdminOS / PhoneShell UI             │
+ │  ├─ phone/**               AdminCheatApp (panel F5 Admin)      │
  │  └─ fs/**                  headers freestanding du DLL du jeu  │
  ├────────────────────────────────────────────────────────────────┤
  │  codegen (ReXGlue)         gtav_manifest.toml + partition      │  811 fichiers .cpp générés
@@ -102,7 +102,7 @@ codegen et les shims mobiles (sans aucune donnée de jeu).
 | `src/core/` | État de Workshop partagé : `WorkshopCore` (sessions, layout), `GamemodeManager`, `PermissionManager`, `PlayerRegistry`, `EntitySpawnQueue`, `CheatController`, `WorkshopGame.h`/`WorkshopTypes.h` |
 | `src/frontend/` | Hub « Choisir le mode » (`play_hub.cpp` ~720 lignes, `modes.h`), assets embarqués (Barlow, PNG) via `embed_assets.py` |
 | `src/native/` | **Renderer natif** — voir §6 |
-| `src/phone/` | `PhoneShellUI.cpp` (mini-panneau Workshop : session/état/Build) + `AdminCheatApp.cpp` (menu cheats / Admin, panel F5 dédié) |
+| `src/phone/` | `AdminCheatApp.cpp` (menu cheats / Admin, panel F5 dédié) |
 | `src/sandbox/` | Modes Campaign/Sandbox/Private : `desktop.cpp` (hub → configure), `session.cpp` (hôte/invitation TCP), `world.cpp`, `scene.cpp`, `protocol.cpp`, `courses.cpp`, `campaign.cpp`, `BuildManager.cpp`, `Tu27Workshop.cpp`, `BuildMenuUI.cpp`, `CreativeRuntime.cpp` |
 | `src/utils/ConfigStorage.cpp` | Persistance de config (settings localisées) |
 | `tests/` | 14 tests CI (voir §8) |
@@ -282,7 +282,7 @@ Avant le boot du guest, `play_hub.cpp` affiche les cartes « Campaign solo », �
 
 ### 7.2 Sandbox / Workshop (`gtav/src/sandbox/` + `gtav/src/core/`)
 Modes Campaign/Sandbox/Private, mode Private = session TCP multi-joueur (`session.cpp`, `protocol.cpp`).
-« Build overlay » F8 et « AdminOS » panel dédié F5 sous F6 (voir `docs/WORKSHOP_CREATIVE.md`). Le téléphone (P) reste un panneau Workshop d'état.
+« Build overlay » F8 et « AdminOS » panel dédié F5 (voir `docs/WORKSHOP_CREATIVE.md`). Le téléphone base GTA (P/Haut) est restauré, non intercepted.
 `GTAV_DESKTOP_WORKSHOP=ON` compile ce code ; sinon `core/sandbox/phone` sont absents.
 
 ---

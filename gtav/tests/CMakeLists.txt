@@ -151,7 +151,7 @@ if(GTAV_IMGUI_SOURCE)
         IMGUI_DISABLE_WIN32_DEFAULT_CLIPBOARD_FUNCTIONS IMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS NOMINMAX WIN32_LEAN_AND_MEAN)
     add_executable(gtav_workshop_overlay_tests workshop_overlay_tests.cpp ${GTAV_WORKSHOP_CORE}
         ../src/sandbox/BuildMenuUI.cpp ../src/sandbox/world.cpp
-        ../src/phone/PhoneShellUI.cpp ../src/phone/AdminCheatApp.cpp)
+        ../src/phone/AdminCheatApp.cpp)
     target_include_directories(gtav_workshop_overlay_tests PRIVATE ../src)
     target_compile_definitions(gtav_workshop_overlay_tests PRIVATE GTAV_DESKTOP_WORKSHOP=1)
     target_link_libraries(gtav_workshop_overlay_tests PRIVATE gtav_test_imgui Threads::Threads)
@@ -194,3 +194,11 @@ if(MSVC)
         endif()
     endforeach()
 endif()
+
+# Lenovo N100 prototype benchmark - asset-free, no retail data, runs on N100 4c/8Go/UHD or any host
+add_executable(gtav_n100_benchmark n100_benchmark.cpp)
+target_include_directories(gtav_n100_benchmark PRIVATE ../src)
+target_compile_features(gtav_n100_benchmark PRIVATE cxx_std_20)
+target_link_libraries(gtav_n100_benchmark PRIVATE Threads::Threads)
+add_test(NAME n100_prototype COMMAND gtav_n100_benchmark --quick)
+set_tests_properties(n100_prototype PROPERTIES TIMEOUT 30)

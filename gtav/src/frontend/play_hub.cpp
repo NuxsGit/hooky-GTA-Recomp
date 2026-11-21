@@ -178,6 +178,12 @@ class Hub {
   Hub(bool workshop, bool french, gfx::Preferences& prefs)
       : focus(workshop ? kDefaultCard : Card::Story), workshop_(workshop), french_(french), prefs_(prefs) {
     for (const auto& row : gfx::kStartupRows) if (prefs.Available(row.key)) graphics_rows_.push_back(&row);
+    // GTA V PLAY launcher: expose advanced graphics like FrameGeneration etc (not only startup)
+    // Keep startup rows first, then realism/performance extras for N100 Ultra tuning
+    static const gfx::Row kFogRow{gfx::Key::ReduceFog, {"Distant fog", "Brouillard lointain"},
+        {"Hide one distant fog strip (live toggle)", "Cache un voile lointain (direct)"}, gfx::kSwitchChoices};
+    const gfx::Row* extras[] = {&gfx::kAnisotropyRow, &gfx::kContactRayRow, &gfx::kFrameGenRow, &kFogRow};
+    for (auto* row : extras) if (prefs.Available(row->key)) graphics_rows_.push_back(row);
     if (backdrop_) {
       for (int y = 0; y < kHeight; ++y) {
         auto* row = static_cast<Uint8*>(backdrop_->pixels) + y * backdrop_->pitch;
@@ -382,9 +388,20 @@ class Hub {
 
   bool HasPresets() const { return workshop_ && prefs_.Available(gfx::Key::LowMemory); }
   size_t GraphicsCount() const { return graphics_rows_.size() + HasPresets(); }
+  static constexpr int kGraphicsVisible = 7;
+  int GraphicsPitch() const { return HasPresets() ? 54 : 62; }
   SDL_Rect GraphicsRect(size_t i) const {
-    const int pitch = HasPresets() ? 54 : 62;
-    return {60, 284 + int(i) * pitch, 878, pitch - 5};
+    const int pitch = GraphicsPitch();
+    // scroll offset keeps focused row visible (for PLAY launcher with FrameGen etc)
+    int y = 284 + int(i) * pitch - int(scroll_) * pitch;
+    return {60, y, 878, pitch - 5};
+  }
+  void EnsureVisible() {
+    const int vis = kGraphicsVisible;
+    if (graphics_focus_ < scroll_) scroll_ = graphics_focus_;
+    else if (graphics_focus_ >= scroll_ + size_t(vis)) scroll_ = graphics_focus_ - vis + 1;
+    const size_t max_scroll = GraphicsCount() > size_t(vis) ? GraphicsCount() - vis : 0;
+    if (scroll_ > max_scroll) scroll_ = max_scroll;
   }
 
   SDL_Rect PresetRect(size_t i) const {
@@ -397,6 +414,7 @@ class Hub {
   void AdvanceGraphics(int direction) {
     const int count = int(GraphicsCount());
     graphics_focus_ = size_t((int(graphics_focus_) + direction + count) % count);
+    EnsureVisible();
   }
 
   void Save() {
@@ -446,26 +464,44 @@ class Hub {
 
   void DrawGraphics(SDL_Surface* out, SDL_Point pointer) {
     const auto preset = HasPresets() ? gfx::PresetIndex(prefs_) : std::size(gfx::kPresets);
+    const int pitch = GraphicsPitch();
+    const int visTop = 284, visBottom = visTop + kGraphicsVisible * pitch;
+    auto visible = [&](SDL_Rect r){ return r.y + r.h > visTop && r.y < visBottom; };
     if (HasPresets()) {
       const auto row = GraphicsRect(0);
-      const bool selected = graphics_focus_ == 0;
-      Fill(out, row, selected ? kPanel : kBlack);
-      Border(out, row, selected ? kLavender : kLine, 1);
-      if (selected) Fill(out, {row.x, row.y, 4, row.h}, kLavender);
-      body_.Label(out, L({"Graphics preset", "Préréglage graphique"}), row.x + 20, row.y + 12, 26, kWhite);
-      for (size_t i = 0; i < std::size(gfx::kPresets); ++i) {
-        const auto button = PresetRect(i);
-        const bool hover = SDL_PointInRect(&pointer, &button);
-        Tag(out, button, L(gfx::kPresets[i].title), i == preset,
-            !gfx::CanApplyPreset(prefs_) ? kSoft : hover ? kWhite : i == preset ? kMint : kLavender, 20);
+      if (visible(row)) {
+        const bool selected = graphics_focus_ == 0;
+        Fill(out, row, selected ? kPanel : kBlack);
+        Border(out, row, selected ? kLavender : kLine, 1);
+        if (selected) Fill(out, {row.x, row.y, 4, row.h}, kLavender);
+        body_.Label(out, L({"Graphics preset", "Préréglage graphique"}), row.x + 20, row.y + 12, 26, kWhite);
+        for (size_t i = 0; i < std::size(gfx::kPresets); ++i) {
+          const auto button = PresetRect(i);
+          if (!visible(button)) continue;
+          const bool hover = SDL_PointInRect(&pointer, &button);
+          Tag(out, button, L(gfx::kPresets[i].title), i == preset,
+              !gfx::CanApplyPreset(prefs_) ? kSoft : hover ? kWhite : i == preset ? kMint : kLavender, 20);
+        }
       }
     }
     for (size_t i = 0; i < graphics_rows_.size(); ++i) {
+      const size_t gi = i + HasPresets();
+      const auto rect = GraphicsRect(gi);
+      if (!visible(rect)) continue;
       const auto& row = *graphics_rows_[i];
       const auto value = prefs_.Value(row.key);
       const auto index = gfx::ChoiceIndex(row, value);
       const char* title = index < row.choices.size() ? L(row.choices[index].title) : value.c_str();
-      DrawGraphicsRow(out, pointer, i + HasPresets(), row.title, title, !prefs_.CanEdit(row.key));
+      DrawGraphicsRow(out, pointer, gi, row.title, title, !prefs_.CanEdit(row.key));
+    }
+    // Scrollbar for PLAY launcher extra rows (FrameGen etc)
+    if (GraphicsCount() > size_t(kGraphicsVisible)) {
+      const int trackY = visTop, trackH = kGraphicsVisible * pitch;
+      const size_t maxScroll = GraphicsCount() - kGraphicsVisible;
+      const int thumbH = std::max(18, trackH * kGraphicsVisible / int(GraphicsCount()));
+      const int thumbY = trackY + int(scroll_ * (trackH - thumbH) / (maxScroll ? maxScroll : 1));
+      Fill(out, {938, trackY, 6, trackH}, kLine);
+      Fill(out, {938, thumbY, 6, thumbH}, kLavender);
     }
     const SDL_Rect panel{960, 284, 420, 429};
     Fill(out, panel, kPanel);
@@ -485,10 +521,31 @@ class Hub {
       feature(405, {"Native Vulkan graphics", "Graphismes Vulkan natifs"}, {"Presets require native replay", "Préréglages réservés au rendu natif"}, kMuted);
       feature(475, {"Output and latency", "Sortie et latence"}, {"See in-game F1 for active values", "Valeurs actives dans F1 en jeu"}, kMuted);
     }
-    feature(545, {"Compatible Vulkan driver", "Pilote Vulkan compatible"},
-            {"Required for every preset", "Requis dans tous les modes"}, kMuted);
-    feature(615, {"DLSS / XeSS / temporal FSR", "DLSS / XeSS / FSR temporel"},
-            {"No frame generation", "Pas de génération d’images"}, kMuted);
+    // GTA V PLAY: show live status for PLAY-added rows (FrameGen etc) - dynamic, not static "No frame generation"
+    if (prefs_.Available(gfx::Key::ContactRays)) {
+      const auto cr = prefs_.Value(gfx::Key::ContactRays);
+      Text crState = (cr=="0"||cr.empty()) ? Text{"Contact rays: off","Rayons: désactivés"} :
+          cr=="1" ? Text{"Contact rays: Low (12)","Rayons: Faible (12)"} :
+          cr=="2" ? Text{"Contact rays: Medium (20)","Rayons: Moyen (20)"} :
+          Text{"Contact rays: High (40)","Rayons: Élevé (40)"};
+      RGB crAccent = (cr=="0"||cr.empty()) ? kMuted : kMint;
+      feature(545, {"Contact rays", "Rayons de contact"}, crState, crAccent);
+    } else {
+      feature(545, {"Compatible Vulkan driver", "Pilote Vulkan compatible"},
+              {"Required for every preset", "Requis dans tous les modes"}, kMuted);
+    }
+    {
+      const auto fg = prefs_.Value(gfx::Key::FrameGeneration);
+      Text fgState;
+      RGB fgAccent = kMuted;
+      if (fg=="0"||fg.empty()) fgState = Text{"No frame generation","Pas de génération"};
+      else if (fg=="2") { fgState = Text{"Frame generation x2","Génération x2"}; fgAccent=kMint; }
+      else if (fg=="3") { fgState = Text{"Frame generation x3","Génération x3"}; fgAccent=kMint; }
+      else if (fg=="4") { fgState = Text{"Frame generation x4","Génération x4"}; fgAccent=kMint; }
+      else if (fg=="8") { fgState = Text{"Frame generation x8","Génération x8"}; fgAccent=kMint; }
+      else fgState = Text{"Frame generation custom","Génération custom"};
+      feature(615, {"Frame generation","Génération d'images"}, fgState, fgAccent);
+    }
     Fill(out, {60, 741, 1320, 1}, kLine);
     const bool retry = prefs_.LastSave() == gfx::SaveState::Failed && !prefs_.ReadFailed();
     const Text status = prefs_.Ignored() ? Text{"BENCHMARK  /  NO SAVE", "BENCHMARK  /  SANS SAUVEGARDE"} :
@@ -520,6 +577,7 @@ class Hub {
   gfx::Preferences& prefs_;
   bool graphics_ = false, rejected_ = false;
   size_t graphics_focus_ = 0;
+  size_t scroll_ = 0;
   std::optional<size_t> preset_cursor_;
   std::vector<const gfx::Row*> graphics_rows_;
   Font body_{kBodyTtf}, display_{kDisplayTtf};

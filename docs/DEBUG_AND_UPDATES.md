@@ -54,7 +54,7 @@
 
 The native overlay has **Live logs** and **Story tools**. F1 still opens settings; F2, Esc or B
 closes Debug. Gameplay input is captured while the panel is open. Story tools are Campaign-only.
-Enable them in offline free roam on a spare save. In Workshop use the [Cheats panel (F5)](WORKSHOP_CREATIVE.md). Presets are **Give pistol + ammo**, **Teleport 10 m forward** (local,
+Enable them in offline free roam on a spare save. In Workshop use the [Cheats (Admin) panel (F5)](WORKSHOP_CREATIVE.md). Presets are **Give pistol + ammo**, **Teleport 10 m forward** (local,
 on foot, slightly raised), **Fly**, and **Freecam** (close-range camera; does not move the player).
 Fly applies short velocity changes, not god mode or permanent gravity/collision edits.
 
