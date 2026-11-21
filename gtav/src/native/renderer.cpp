@@ -1436,7 +1436,7 @@ class Renderer {
   }
 
   void PresentIdle() {
-    // Idle present while no guest frames are queued — avoids the Win32 window staying on its
+    // Idle present while no guest frames are queued - avoids the Win32 window staying on its
     // initial GDI gray brush for seconds during cold boot (N100, shader compile). Clear to black
     // and keep the swapchain alive; once the guest starts, normal Present takes over.
     if (vsync_ != REXCVAR_GET(gtav_native_vsync)) {
@@ -1511,7 +1511,7 @@ class Renderer {
     uint32_t w = swapchain_->getWidth(), h = swapchain_->getHeight();
     list_->setViewports(plume::RenderViewport(0, 0, float(w), float(h)));
     list_->setScissors(plume::RenderRect(0, 0, int32_t(w), int32_t(h)));
-    // Loading clear — black, not the magenta debug for missing front after boot
+    // Loading clear - black, not the magenta debug for missing front after boot
     list_->clearColor(0, plume::RenderColor(0.0f, 0.0f, 0.0f, 1.0f));
     auto now = std::chrono::steady_clock::now();
     fps_frames_++;
@@ -1546,7 +1546,7 @@ class Renderer {
       if (ImDrawData* menu_data = menu::Frame(w, h, fps_value_, frame_ms, presentation))
         backend_.DrawMenu(list_, menu_data, kSwapchainFormat);
     } else {
-      // Even without backend, keep ImGui HUD alive (workshop) — no DrawMenu, but avoid gray
+      // Even without backend, keep ImGui HUD alive (workshop) - no DrawMenu, but avoid gray
 #ifdef GTAV_DESKTOP_WORKSHOP
       if (menu::IsOpen() || sandbox::Active()) {
 #else
@@ -1555,7 +1555,7 @@ class Renderer {
         PresentationInfo presentation{};
         double frame_ms = fps_value_ ? 1000.0 / fps_value_ : 0.0;
         if (ImDrawData* menu_data = menu::Frame(w, h, fps_value_, frame_ms, presentation)) {
-          // No backend to draw menu — still clear keeps window non-gray
+          // No backend to draw menu - still clear keeps window non-gray
           (void)menu_data;
         }
       }
@@ -1706,10 +1706,10 @@ class Renderer {
         bool has_frame = cv_.wait_for(lock, std::chrono::milliseconds(50), [this] { return !queue_.empty(); });
         timing_.idle_sum += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - idle_start).count();
         if (!has_frame) {
-          // No guest frame yet (cold boot, shader compile, N100) — keep the window alive with a
+          // No guest frame yet (cold boot, shader compile, N100) - keep the window alive with a
           // black present instead of the Win32 GDI gray. Log once.
-          if (idle_frames++ == 0) REXLOG_INFO(\"[native] waiting for first guest frame — presenting idle (avoids ecran gris)\");
-          else if (idle_frames % 200 == 0) REXLOG_INFO(\"[native] still waiting for guest frame ({} idle presents)\", idle_frames);
+          if (idle_frames++ == 0) REXLOG_INFO("[native] waiting for first guest frame - presenting idle (avoids gray screen)");
+          else if (idle_frames % 200 == 0) REXLOG_INFO("[native] still waiting for guest frame ({} idle presents)", idle_frames);
           lock.unlock();
           PresentIdle();
           continue;
