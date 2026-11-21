@@ -102,10 +102,10 @@ HBRUSH g_field_brush;
 UINT g_dpi = 96;
 constexpr int kWidth = 1024, kHeight = 746;
 constexpr int kCampaignTop = 540, kStatusTop = 650;
-constexpr COLORREF kCanvas = RGB(15, 18, 25), kRail = RGB(19, 24, 34), kPanel = RGB(24, 31, 44),
-                   kHero = RGB(30, 42, 60), kField = RGB(12, 17, 27),
-                   kBorder = RGB(54, 66, 85), kText = RGB(246, 244, 242), kMuted = RGB(177, 189, 208),
-                   kAccent = RGB(255, 181, 112), kMint = RGB(122, 229, 194), kDark = RGB(30, 25, 24);
+constexpr COLORREF kCanvas = RGB(16, 13, 22), kRail = RGB(22, 17, 30), kPanel = RGB(32, 25, 44),
+                   kHero = RGB(37, 27, 52), kField = RGB(17, 13, 25),
+                   kBorder = RGB(66, 52, 82), kText = RGB(246, 244, 242), kMuted = RGB(192, 180, 204),
+                   kAccent = RGB(255, 164, 199), kMint = RGB(122, 229, 194), kDark = RGB(30, 25, 24);
 enum class Page { Always, Overview, Setup, Updates, Logs };
 struct Navigation { Page page; UINT id; const wchar_t* title; const wchar_t* subtitle; const wchar_t* number; };
 constexpr Navigation kNavigation[] = {
@@ -594,7 +594,7 @@ void CreateControls() {
     DwmSetWindowAttribute(g_wnd, 20, &dark, sizeof(dark));  // immersive dark title bar on supported Windows versions
   }
   Label(Always, L"HOOKY", 80, 34, 107, 25, &g_heading);
-  Label(Always, L"RECOMP", 81, 61, 115, 17, &g_small, kMuted);
+  Label(Always, L"LOS SANTOS", 81, 61, 115, 17, &g_small, kMuted);
   Label(Always, L"BIBLIOTHÈQUE", 26, 117, 150, 20, &g_small, kMuted);
   for (size_t i = 0; i < std::size(kNavigation); ++i) {
     const auto& nav = kNavigation[i];
@@ -710,10 +710,10 @@ void PaintCity(HDC dc) {
   IntersectClipRect(dc, Px(645), Px(120), Px(997), Px(376));
   for (int i = 0; i < 32; ++i) {
     auto mix = [i](int a, int b) { return (a * (31 - i) + b * i) / 31; };
-    const auto color = RGB(mix(30, 80), mix(42, 53), mix(60, 67));
+    const auto color = RGB(mix(37, 89), mix(27, 41), mix(52, 81));
     Box(dc, {Px(645 + i * 11), Px(120), Px(645 + (i + 1) * 11), Px(376)}, color, color);
   }
-  const auto sun = CreateSolidBrush(RGB(187, 101, 105));
+  const auto sun = CreateSolidBrush(RGB(222, 117, 167));
   auto old_brush = SelectObject(dc, sun);
   auto old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
   Ellipse(dc, Px(831), Px(151), Px(941), Px(261));
@@ -758,7 +758,7 @@ void PaintDashboard(HWND window) {
   Box(dc, {0, 0, Px(206), client.bottom}, kRail, kRail);
   Box(dc, {Px(205), 0, Px(206), client.bottom}, kBorder, kBorder);
   const int icon_size = Px(42);
-  if (auto icon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_SIDEBAR),
+  if (auto icon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_LAUNCHER),
                                                 IMAGE_ICON, icon_size, icon_size, 0))) {
     DrawIconEx(dc, Px(22), Px(34), icon, icon_size, icon_size, 0, nullptr, DI_NORMAL);
     DestroyIcon(icon);
@@ -795,7 +795,7 @@ void PaintButton(const DRAWITEMSTRUCT& item) {
   const bool primary = id == kIdPlay || id == kIdInstall || id == kIdDownload;
   const bool disabled = (item.itemState & ODS_DISABLED) != 0;
   const bool down = (item.itemState & ODS_SELECTED) != 0;
-  const auto fill = disabled ? kRail : primary ? (down ? RGB(229, 146, 85) : kAccent) : (selected || down) ? kHero : kPanel;
+  const auto fill = disabled ? kRail : primary ? (down ? RGB(231, 130, 182) : kAccent) : (selected || down) ? kHero : kPanel;
   Box(item.hDC, item.rcItem, fill, !disabled && (selected || primary) ? kAccent : kBorder);
   if (active_page) {
     auto bar = item.rcItem;

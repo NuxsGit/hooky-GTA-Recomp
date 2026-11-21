@@ -5,6 +5,9 @@ city at dusk, a rally coupe in a container yard and two cars on a coastal highwa
 No game frames, publisher art, or uploaded reference pixels were used. They ship as part of
 this repository and its corresponding source. The build embeds them into the desktop host only.
 
+`hooky-mark.png` is the 48 px image from `loader/assets/launcher.ico`, reused to match
+the Windows launcher branding.
+
 Barlow Medium and Barlow Condensed Bold are unmodified fonts by Jeremy Tribby and the Barlow
 Project Authors, licensed under the SIL Open Font License 1.1 (see `OFL-Barlow.txt`). Upstream:
 [google/fonts at 89f5431](https://github.com/google/fonts/tree/89f5431ff0db41bd2fe3f7ba21a723a01622428b/ofl/barlow)

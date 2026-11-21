@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 FILES = {
+    "kHookyMark": "hooky-mark.png",
     "kStoryArt": "harbor-story.png",
     "kSandboxArt": "sandbox-yard.png",
     "kPrivateArt": "sandbox-night.png",

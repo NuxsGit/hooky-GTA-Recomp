@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <unordered_map>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -32,8 +33,8 @@ using Window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>;
 
 struct RGB { Uint8 r, g, b; };
 constexpr RGB kWhite{250, 243, 232}, kMuted{180, 178, 191}, kSoft{130, 135, 152},
-              kOrange{255, 187, 127}, kMint{153, 234, 212}, kLavender{224, 171, 244},
-              kInk{21, 20, 27}, kPanel{26, 27, 39}, kLine{57, 55, 72}, kBlack{13, 14, 22};
+              kOrange{255, 164, 199}, kMint{153, 234, 212}, kLavender{224, 171, 244},
+              kInk{24, 16, 29}, kPanel{31, 24, 44}, kLine{67, 52, 79}, kBlack{14, 13, 22};
 constexpr RGB kAccents[] = {kOrange, kMint, kSoft, kLavender};
 
 using gfx::Text;
@@ -134,6 +135,12 @@ class Font {
     return int(std::round(cursor)) - x;
   }
 
+  void Fit(SDL_Surface* out, std::string_view text, int x, int y, int size, int width, RGB ink) const {
+    const int measured = Label(nullptr, text, 0, 0, size, ink);
+    if (measured > width) size = std::max(1, size * width / measured);
+    Label(out, text, x, y, size, ink);
+  }
+
   void Center(SDL_Surface* out, std::string_view text, SDL_Rect r, int size, RGB ink) const {
     Label(out, text, r.x + (r.w - Label(nullptr, text, 0, 0, size, ink)) / 2,
           r.y + (r.h - size) / 2, size, ink);
@@ -178,11 +185,10 @@ class Hub {
   Hub(bool workshop, bool french, gfx::Preferences& prefs)
       : focus(workshop ? kDefaultCard : Card::Story), workshop_(workshop), french_(french), prefs_(prefs) {
     for (const auto& row : gfx::kStartupRows) if (prefs.Available(row.key)) graphics_rows_.push_back(&row);
-    // GTA V PLAY launcher: expose advanced graphics like FrameGeneration etc (not only startup)
     // Keep startup rows first, then realism/performance extras for N100 Ultra tuning
     static const gfx::Row kFogRow{gfx::Key::ReduceFog, {"Distant fog", "Brouillard lointain"},
         {"Hide one distant fog strip (live toggle)", "Cache un voile lointain (direct)"}, gfx::kSwitchChoices};
-    const gfx::Row* extras[] = {&gfx::kAnisotropyRow, &gfx::kContactRayRow, &gfx::kFrameGenRow, &kFogRow};
+    const gfx::Row* extras[] = {&gfx::kAnisotropyRow, &gfx::kContactRayRow, &kFogRow};
     for (auto* row : extras) if (prefs.Available(row->key)) graphics_rows_.push_back(row);
     if (backdrop_) {
       for (int y = 0; y < kHeight; ++y) {
@@ -190,27 +196,34 @@ class Hub {
         for (int x = 0; x < kWidth; ++x) {
           const float u = float(x) / kWidth, v = float(y) / kHeight;
           const float warm = u * u * (1 - v) * (1 - v);
-          row[x * 4] = Uint8(14 + warm * 33);
-          row[x * 4 + 1] = Uint8(15 + warm * 5);
-          row[x * 4 + 2] = Uint8(24 + warm * 13);
+          row[x * 4] = Uint8(15 + warm * 51);
+          row[x * 4 + 1] = Uint8(12 + warm * 12);
+          row[x * 4 + 2] = Uint8(25 + warm * 44);
           row[x * 4 + 3] = 255;
         }
       }
     }
   }
 
+  SDL_Surface* Icon() const { return mark_.get(); }
   bool Okay() const { return backdrop_ && canvas_ && story_ && sandbox_ && party_ && body_.Okay() && display_.Okay(); }
   Card focus;
 
   bool GraphicsOpen() const { return graphics_; }
-  void ToggleGraphics() { graphics_ = !graphics_; }
+  void ToggleGraphics() { SelectTab(graphics_ ? Column(focus) : 2); }
+  void CycleTab(int direction) { SelectTab(((graphics_ ? 2 : Column(focus)) + direction + 3) % 3); }
+  bool Scroll(int direction) {
+    if (!graphics_ || !direction || GraphicsCount() <= kGraphicsVisible) return false;
+    return SetScroll(std::clamp(int(scroll_) + direction, 0, int(GraphicsCount()) - kGraphicsVisible));
+  }
   void SelectTab(int tab) {
     graphics_ = tab == 2;
+    rejected_ = false;
     if (!graphics_) focus = SelectColumn(focus, tab);
   }
   bool Back() {
     if (!graphics_) return true;
-    graphics_ = false;
+    SelectTab(Column(focus));
     return false;
   }
   void Horizontal(int direction) {
@@ -230,6 +243,23 @@ class Hub {
     ChangeValue(1);
     return false;
   }
+  enum class PadResult { Stay, Play, Exit };
+  PadResult GamepadButton(Uint8 button) {
+    switch (button) {
+      case SDL_GAMEPAD_BUTTON_SOUTH: if (Accept()) return PadResult::Play; break;
+      case SDL_GAMEPAD_BUTTON_EAST: if (Back()) return PadResult::Exit; break;
+      case SDL_GAMEPAD_BUTTON_NORTH:
+      case SDL_GAMEPAD_BUTTON_START: ToggleGraphics(); break;
+      case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: CycleTab(-1); break;
+      case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: CycleTab(1); break;
+      case SDL_GAMEPAD_BUTTON_DPAD_LEFT: Horizontal(-1); break;
+      case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: Horizontal(1); break;
+      case SDL_GAMEPAD_BUTTON_DPAD_UP: Vertical(-1); break;
+      case SDL_GAMEPAD_BUTTON_DPAD_DOWN: Vertical(1); break;
+      default: break;
+    }
+    return PadResult::Stay;
+  }
   bool Click(SDL_Point point, int clicks) {
     if (SDL_PointInRect(&point, &kAction)) {
       if (!graphics_) return true;
@@ -243,10 +273,16 @@ class Hub {
       return false;
     }
     if (graphics_) {
-      for (size_t i = 0; i < GraphicsCount(); ++i) {
+      const auto track = ScrollTrack();
+      if (GraphicsCount() > kGraphicsVisible && SDL_PointInRect(&point, &track)) {
+        const int max_scroll = int(GraphicsCount()) - kGraphicsVisible;
+        SetScroll((point.y - track.y) * max_scroll / (track.h - 1));
+        return false;
+      }
+      for (size_t i = scroll_; i < VisibleEnd(); ++i) {
         const auto row = GraphicsRect(i);
         if (!SDL_PointInRect(&point, &row)) continue;
-        graphics_focus_ = i;
+        SetGraphicsFocus(i);
         if (HasPresets() && i == 0) {
           for (size_t n = 0; n < std::size(gfx::kPresets); ++n) {
             const auto button = PresetRect(n);
@@ -273,7 +309,7 @@ class Hub {
     if (SDL_PointInRect(&point, &kAction)) return 2;
     for (int i = 0; i < 3; ++i) if (SDL_PointInRect(&point, &kTabs[i])) return 3 + i;
     if (graphics_) {
-      for (size_t i = 0; i < GraphicsCount(); ++i) {
+      for (size_t i = scroll_; i < VisibleEnd(); ++i) {
         const auto row = GraphicsRect(i);
         if (SDL_PointInRect(&point, &row)) return 16 + int(i);
       }
@@ -289,8 +325,8 @@ class Hub {
     const auto accent = kAccents[i];
     const bool playable = PlayMode(focus, workshop_).has_value();
     SDL_BlitSurface(backdrop_.get(), nullptr, out, nullptr);
-    Fill(out, {60, 47, 56, 37}, kOrange);
-    display_.Center(out, "V", {60, 45, 56, 38}, 34, kInk);
+    SDL_Rect mark{60, 37, 52, 52};
+    if (mark_) SDL_BlitSurfaceScaled(mark_.get(), nullptr, out, &mark, SDL_SCALEMODE_LINEAR);
     display_.Label(out, "GTA V   /   RECOMP", 131, 45, 35, kWhite);
     body_.Label(out, L({"DESKTOP EDITION", "ÉDITION PC"}), 335, 58, 18, kMuted);
     Tag(out, {1101, 40, 211, 42}, L({"PC   /   LOCAL PLAY", "PC   /   JEU LOCAL"}), false, kMint);
@@ -306,7 +342,7 @@ class Hub {
     const int active_tab = graphics_ ? 2 : Column(focus);
     Tab(out, 0, "01  /  STORY", "01  /  HISTOIRE", {"Campaign", "Campagne"}, kOrange, active_tab, pointer);
     Tab(out, 1, "02  /  WORKSHOP", "02  /  ATELIER", {"Sandbox", "Bac à sable"}, kMint, active_tab, pointer);
-    Tab(out, 2, "03  /  F1 or Y", "03  /  F1 ou Y", {"Graphics", "Graphismes"}, kLavender, active_tab, pointer);
+    Tab(out, 2, "03  /  F1 · Y", "03  /  F1 · Y", {"Graphics", "Graphismes"}, kLavender, active_tab, pointer);
     if (graphics_) {
       DrawGraphics(out, pointer);
       return out;
@@ -320,7 +356,7 @@ class Hub {
       auto rect = tile.rect;
       const bool ready = PlayMode(card, workshop_).has_value();
       if (art[n]) {
-        SDL_BlitSurface(art[n], nullptr, out, &rect);
+        SDL_BlitSurfaceScaled(art[n], nullptr, out, &rect, SDL_SCALEMODE_LINEAR);
         if (card == Card::StoryCoop) {
           // Subtle warm wash to distinguish the co-op tile from solo campaign
           for (int y = 0; y < rect.h; ++y) {
@@ -338,8 +374,7 @@ class Hub {
         display_.Label(out, "II", rect.x + rect.w - 160, rect.y + 30, 145, {40, 41, 57});
       }
       const bool hover = SDL_PointInRect(&pointer, &rect);
-      Border(out, rect, card == focus ? kAccents[n] : hover ? kMuted : kLine, card == focus ? 2 : 1);
-      if (card == focus) Fill(out, {rect.x, rect.y, rect.w, 5}, kAccents[n]);
+      Border(out, rect, card == focus ? kWhite : hover ? kMuted : kLine, card == focus ? 3 : 1);
       const auto state = ready ? L(tile.state) : L({"UNAVAILABLE", "INDISPONIBLE"});
       const int w = body_.Label(nullptr, state, 0, 0, 20, kMuted) + 27;
       Tag(out, {rect.x + rect.w - w - 20, rect.y + 18, w, 34}, state, false, ready ? kWhite : kMuted);
@@ -352,13 +387,13 @@ class Hub {
     body_.Label(out, L(kTiles[i].label), 77, 755, 21, accent);
     const char* description = playable ? L(kTiles[i].description) :
         L({"Sandbox requires the native renderer.", "Le bac à sable nécessite le moteur de rendu natif."});
-    body_.Label(out, description, 76, 783, 27, kWhite);
+    body_.Fit(out, description, 76, 783, 27, 1015, kWhite);
     Tag(out, kAction, playable ? L({"PLAY    >", "JOUER    >"}) : L({"UNAVAILABLE", "INDISPONIBLE"}),
         playable, playable ? (SDL_PointInRect(&pointer, &kAction) ? kWhite : accent) : kMuted, 26);
     Fill(out, {60, 835, 1320, 1}, kLine);
-    body_.Label(out, L({"ARROWS   Select      ENTER / A   Play      F1 / Y   Graphics      ESC / B   Back",
-                       "FLÈCHES   Choisir      ENTRÉE / A   Jouer      F1 / Y   Graphismes      ÉCHAP / B   Retour"}),
-                60, 852, 21, kMuted);
+    body_.Fit(out, L({"ARROWS   Select      ENTER / A   Play      F1 / Y / START   Graphics      ESC / B   Back",
+                       "FLÈCHES   Choisir      ENTRÉE / A   Jouer      F1 / Y / START   Graphismes      ÉCHAP / B   Retour"}),
+                60, 852, 21, 1050, kMuted);
     const auto local = L({"TU27   /   LOCAL PROFILES", "TU27   /   PROFILS LOCAUX"});
     body_.Label(out, local, 1380 - body_.Label(nullptr, local, 0, 0, 21, kSoft), 852, 21, kSoft);
     return out;
@@ -389,6 +424,18 @@ class Hub {
   bool HasPresets() const { return workshop_ && prefs_.Available(gfx::Key::LowMemory); }
   size_t GraphicsCount() const { return graphics_rows_.size() + HasPresets(); }
   static constexpr int kGraphicsVisible = 7;
+  size_t VisibleEnd() const { return std::min(GraphicsCount(), scroll_ + kGraphicsVisible); }
+  SDL_Rect ScrollTrack() const { return {938, 284, 12, kGraphicsVisible * GraphicsPitch()}; }
+  void SetGraphicsFocus(size_t index) {
+    if (graphics_focus_ != index) rejected_ = false;
+    graphics_focus_ = index;
+  }
+  bool SetScroll(int scroll) {
+    if (scroll_ == size_t(scroll)) return false;
+    scroll_ = size_t(scroll);
+    SetGraphicsFocus(std::clamp(graphics_focus_, scroll_, VisibleEnd() - 1));
+    return true;
+  }
   int GraphicsPitch() const { return HasPresets() ? 54 : 62; }
   SDL_Rect GraphicsRect(size_t i) const {
     const int pitch = GraphicsPitch();
@@ -413,7 +460,8 @@ class Hub {
 
   void AdvanceGraphics(int direction) {
     const int count = int(GraphicsCount());
-    graphics_focus_ = size_t((int(graphics_focus_) + direction + count) % count);
+    if (!count) return;
+    SetGraphicsFocus(size_t((int(graphics_focus_) + direction + count) % count));
     EnsureVisible();
   }
 
@@ -435,6 +483,7 @@ class Hub {
   }
 
   void ChangeValue(int direction) {
+    if (!GraphicsCount()) return;
     if (HasPresets() && graphics_focus_ == 0) {
       const auto index = preset_cursor_.value_or(gfx::PresetIndex(prefs_));
       SelectPreset(CycleChoice(index, int(std::size(gfx::kPresets)), direction));
@@ -474,7 +523,7 @@ class Hub {
         Fill(out, row, selected ? kPanel : kBlack);
         Border(out, row, selected ? kLavender : kLine, 1);
         if (selected) Fill(out, {row.x, row.y, 4, row.h}, kLavender);
-        body_.Label(out, L({"Graphics preset", "Préréglage graphique"}), row.x + 20, row.y + 12, 26, kWhite);
+        body_.Label(out, L({"Preset", "Profil"}), row.x + 8, row.y + 16, 17, kWhite);
         for (size_t i = 0; i < std::size(gfx::kPresets); ++i) {
           const auto button = PresetRect(i);
           if (!visible(button)) continue;
@@ -491,16 +540,17 @@ class Hub {
       const auto& row = *graphics_rows_[i];
       const auto value = prefs_.Value(row.key);
       const auto index = gfx::ChoiceIndex(row, value);
-      const char* title = index < row.choices.size() ? L(row.choices[index].title) : value.c_str();
+      const char* title = index < row.choices.size() ? L(row.choices[index].title) :
+                          value.empty() ? L({"Unavailable", "Indisponible"}) : value.c_str();
       DrawGraphicsRow(out, pointer, gi, row.title, title, !prefs_.CanEdit(row.key));
     }
-    // Scrollbar for PLAY launcher extra rows (FrameGen etc)
+    // Scrollbar shares its hit rectangle with the graphics list.
     if (GraphicsCount() > size_t(kGraphicsVisible)) {
       const int trackY = visTop, trackH = kGraphicsVisible * pitch;
       const size_t maxScroll = GraphicsCount() - kGraphicsVisible;
       const int thumbH = std::max(18, trackH * kGraphicsVisible / int(GraphicsCount()));
       const int thumbY = trackY + int(scroll_ * (trackH - thumbH) / (maxScroll ? maxScroll : 1));
-      Fill(out, {938, trackY, 6, trackH}, kLine);
+      Fill(out, ScrollTrack(), kLine);
       Fill(out, {938, thumbY, 6, thumbH}, kLavender);
     }
     const SDL_Rect panel{960, 284, 420, 429};
@@ -534,18 +584,8 @@ class Hub {
       feature(545, {"Compatible Vulkan driver", "Pilote Vulkan compatible"},
               {"Required for every preset", "Requis dans tous les modes"}, kMuted);
     }
-    {
-      const auto fg = prefs_.Value(gfx::Key::FrameGeneration);
-      Text fgState;
-      RGB fgAccent = kMuted;
-      if (fg=="0"||fg.empty()) fgState = Text{"No frame generation","Pas de génération"};
-      else if (fg=="2") { fgState = Text{"Frame generation x2","Génération x2"}; fgAccent=kMint; }
-      else if (fg=="3") { fgState = Text{"Frame generation x3","Génération x3"}; fgAccent=kMint; }
-      else if (fg=="4") { fgState = Text{"Frame generation x4","Génération x4"}; fgAccent=kMint; }
-      else if (fg=="8") { fgState = Text{"Frame generation x8","Génération x8"}; fgAccent=kMint; }
-      else fgState = Text{"Frame generation custom","Génération custom"};
-      feature(615, {"Frame generation","Génération d'images"}, fgState, fgAccent);
-    }
+    feature(615, {"Frame generation", "Génération d’images"},
+            {"Not integrated in this build", "Non intégrée dans ce build"}, kMuted);
     Fill(out, {60, 741, 1320, 1}, kLine);
     const bool retry = prefs_.LastSave() == gfx::SaveState::Failed && !prefs_.ReadFailed();
     const Text status = prefs_.Ignored() ? Text{"BENCHMARK  /  NO SAVE", "BENCHMARK  /  SANS SAUVEGARDE"} :
@@ -560,17 +600,17 @@ class Hub {
     if (HasPresets() && graphics_focus_ == 0) {
       help = !gfx::CanApplyPreset(prefs_) ? kLocked : preset < std::size(gfx::kPresets) ? gfx::kPresets[preset].help :
           Text{"Custom settings. Launch overrides stay locked.", "Réglages personnalisés. Les options forcées restent verrouillées."};
-    } else {
+    } else if (GraphicsCount()) {
       const auto& row = *graphics_rows_[graphics_focus_ - HasPresets()];
       help = prefs_.Forced(row.key) ? kLocked : row.help;
     }
     body_.Label(out, L(status), 60, 756, 21, (retry || prefs_.ReadFailed() || rejected_) ? kOrange : kMint);
-    body_.Label(out, L(help), 60, 785, 25, kWhite);
+    if (GraphicsCount()) body_.Fit(out, L(help), 60, 785, 25, 1030, kWhite);
     Tag(out, kAction, retry ? L({"RETRY SAVE", "RÉESSAYER"}) : L({"<    BACK TO MODES", "<    RETOUR AUX MODES"}),
         true, SDL_PointInRect(&pointer, &kAction) ? kWhite : kLavender, 24);
     Fill(out, {60, 835, 1320, 1}, kLine);
-    body_.Label(out, L({"UP / DOWN   Select      LEFT / RIGHT   Change      ESC / B   Back",
-                       "HAUT / BAS   Choisir      GAUCHE / DROITE   Modifier      ÉCHAP / B   Retour"}), 60, 852, 21, kMuted);
+    body_.Label(out, L({"WHEEL / STICK / D-PAD   Browse      LEFT / RIGHT   Change      ESC / B   Back",
+                       "MOLETTE / STICK / CROIX   Parcourir      GAUCHE / DROITE   Modifier      ÉCHAP / B   Retour"}), 60, 852, 21, kMuted);
   }
 
   bool workshop_, french_;
@@ -581,6 +621,7 @@ class Hub {
   std::optional<size_t> preset_cursor_;
   std::vector<const gfx::Row*> graphics_rows_;
   Font body_{kBodyTtf}, display_{kDisplayTtf};
+  Surface mark_{SDL_LoadPNG_IO(SDL_IOFromConstMem(kHookyMark, sizeof(kHookyMark)), true), SDL_DestroySurface};
   Surface backdrop_ = MakeSurface(kWidth, kHeight), canvas_ = MakeSurface(kWidth, kHeight);
   Surface story_ = Art(kStoryArt, kTiles[0].rect), sandbox_ = Art(kSandboxArt, kTiles[1].rect),
           party_ = Art(kPrivateArt, kTiles[3].rect);
@@ -673,6 +714,7 @@ std::optional<Mode> RunHub(bool workshop_enabled, gfx::Preferences& prefs) {
   Window window(hub.Okay() ? SDL_CreateWindow(kTitle, width, width * kHeight / kWidth,
       SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN) : nullptr, SDL_DestroyWindow);
   if (!window) return Fallback(workshop_enabled, french);
+  if (hub.Icon()) SDL_SetWindowIcon(window.get(), hub.Icon());
   SDL_SetWindowMinimumSize(window.get(), 480, 300);
   SDL_SetWindowPosition(window.get(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
   SDL_ShowWindow(window.get());
@@ -684,6 +726,8 @@ std::optional<Mode> RunHub(bool workshop_enabled, gfx::Preferences& prefs) {
   }
   const auto window_id = SDL_GetWindowID(window.get());
   Controllers controllers;
+  std::unordered_map<SDL_JoystickID, std::array<int, 2>> stick;
+  float wheel = 0;
   for (;;) {
     SDL_Event e{};
     if (!SDL_WaitEvent(&e)) return std::nullopt;
@@ -729,21 +773,41 @@ std::optional<Mode> RunHub(bool workshop_enabled, gfx::Preferences& prefs) {
         accept = hub.Click(pointer, e.button.clicks);
         redraw = true;
         break;
+      case SDL_EVENT_MOUSE_WHEEL:
+        if (e.wheel.windowID == window_id && hub.GraphicsOpen()) {
+          wheel += e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y;
+          const int steps = int(wheel);
+          wheel -= steps;
+          redraw = hub.Scroll(-steps);
+        }
+        break;
+      case SDL_EVENT_WINDOW_FOCUS_LOST:
+        if (e.window.windowID == window_id) { stick.clear(); wheel = 0; }
+        break;
+      case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+        if (!(SDL_GetWindowFlags(window.get()) & SDL_WINDOW_INPUT_FOCUS)) break;
+        if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX || e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
+          const bool vertical = e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY;
+          auto& previous = stick[e.gaxis.which][vertical];
+          const int value = e.gaxis.value;
+          const int direction = std::abs(value) >= 18000 ? (value > 0 ? 1 : -1) :
+                                std::abs(value) < 10000 ? 0 : previous;
+          if (direction && direction != previous) {
+            if (vertical) hub.Vertical(direction);
+            else hub.Horizontal(direction);
+            redraw = true;
+          }
+          previous = direction;
+        }
+        break;
       case SDL_EVENT_GAMEPAD_ADDED: controllers.Add(e.gdevice.which); break;
-      case SDL_EVENT_GAMEPAD_REMOVED: controllers.Remove(e.gdevice.which); break;
+      case SDL_EVENT_GAMEPAD_REMOVED: stick.erase(e.gdevice.which); controllers.Remove(e.gdevice.which); break;
       case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
         if (!(SDL_GetWindowFlags(window.get()) & SDL_WINDOW_INPUT_FOCUS)) break;
-        switch (e.gbutton.button) {
-          case SDL_GAMEPAD_BUTTON_SOUTH: accept = hub.Accept(); break;
-          case SDL_GAMEPAD_BUTTON_EAST: if (hub.Back()) return std::nullopt; break;
-          case SDL_GAMEPAD_BUTTON_NORTH: hub.ToggleGraphics(); break;
-          case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: hub.SelectTab(0); break;
-          case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: hub.SelectTab(1); break;
-          case SDL_GAMEPAD_BUTTON_DPAD_LEFT: hub.Horizontal(-1); break;
-          case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: hub.Horizontal(1); break;
-          case SDL_GAMEPAD_BUTTON_DPAD_UP: hub.Vertical(-1); break;
-          case SDL_GAMEPAD_BUTTON_DPAD_DOWN: hub.Vertical(1); break;
-          default: break;
+        switch (hub.GamepadButton(e.gbutton.button)) {
+          case Hub::PadResult::Exit: return std::nullopt;
+          case Hub::PadResult::Play: accept = true; break;
+          case Hub::PadResult::Stay: break;
         }
         redraw = true;
         break;
