@@ -1,4 +1,5 @@
 #include "presentation.h"
+#include "frame_generation_schedule.h"
 #include "replay_shader.h"
 
 #include <cstdlib>
@@ -15,6 +16,29 @@ using namespace gtav::native;
   } while (false)
 
 int main() {
+  using namespace std::chrono_literals;
+  using framegen::Plan;
+  constexpr framegen::SourceFrame older{42, 1, true}, newer{43, 1, true};
+  for (unsigned factor : {2u, 4u, 6u, 8u}) {
+    const auto plan = Plan(factor, older, newer, 48ms + 7ns, 6ms);
+    CHECK(plan.count == factor - 1);
+    auto previous = 0ns;
+    for (unsigned i = 1; i < factor; ++i) {
+      const auto& insertion = plan.insertions[i - 1];
+      CHECK(insertion.offset - previous >= 6ms);
+      CHECK(insertion.offset == (48ms + 7ns) * i / factor);
+      CHECK(insertion.phase == float(i) / float(factor));
+      previous = insertion.offset;
+    }
+    CHECK(48ms + 7ns - previous >= 6ms);
+  }
+  CHECK(!Plan(3, older, newer, 48ms, 6ms).count);
+  CHECK(!Plan(8, older, newer, 48ms - 1ns, 6ms).count);
+  CHECK(!Plan(2, older, newer, 48ms, 0ns).count);
+  CHECK(!Plan(2, older, older, 48ms, 6ms).count);
+  CHECK(!Plan(2, older, {44, 1, true}, 48ms, 6ms).count);
+  CHECK(!Plan(2, older, {43, 2, true}, 48ms, 6ms).count);
+  CHECK(!Plan(2, older, {43, 1, false}, 48ms, 6ms).count);
   CHECK(OutputPreset(ParseOutputMode(1080)) == Extent{1920, 1080});
   CHECK(OutputPreset(ParseOutputMode(1440)) == Extent{2560, 1440});
   CHECK(OutputPreset(ParseOutputMode(2160)) == Extent{3840, 2160});
