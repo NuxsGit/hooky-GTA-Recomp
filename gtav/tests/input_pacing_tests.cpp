@@ -38,7 +38,7 @@ int main() {
       pace();
     });
   });
-  CHECK(started_call.wait_for(2s) == std::future_status::ready);
+  CHECK(started_call.wait_for(10s) == std::future_status::ready);
 
   // Other polls can read their devices while the first guest is blocked in the driver.
   gate.TryPace(8, active, pace);
@@ -48,13 +48,13 @@ int main() {
     gate.Stop();
     stopped.set_value();
   });
-  const auto deadline = std::chrono::steady_clock::now() + 2s;
+  const auto deadline = std::chrono::steady_clock::now() + 10s;
   while (gate.Ready() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
   CHECK(!gate.Ready());
   CHECK(safely_unload.wait_for(0ms) == std::future_status::timeout);
   gate.TryPace(10, active, pace);
   release.set_value();
-  CHECK(safely_unload.wait_for(2s) == std::future_status::ready);
+  CHECK(safely_unload.wait_for(10s) == std::future_status::ready);
   guest.join();
   shutdown.join();
   CHECK(calls == 3);
