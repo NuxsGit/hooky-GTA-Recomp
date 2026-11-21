@@ -28,17 +28,6 @@ struct EditorState {
   float trigger_radius = 5.f;
 };
 
-const char* TriggerLabel(TriggerType t){
-  switch(t){
-    case TriggerType::Checkpoint: return "Checkpoint";
-    case TriggerType::SpawnPlayer: return "Spawn Player";
-    case TriggerType::SpawnVehicle: return "Spawn Vehicle";
-    case TriggerType::WinZone: return "Win Zone";
-    case TriggerType::LoseZone: return "Lose Zone";
-    case TriggerType::Script: return "Script";
-    default: return "?";
-  }
-}
 } // anon
 
 static EditorState* g_state = nullptr;
