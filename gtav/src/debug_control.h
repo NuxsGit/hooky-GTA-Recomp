@@ -13,7 +13,7 @@ constexpr Panel TogglePanel(Panel shown, Panel requested) {
   return shown == requested ? Panel::Closed : requested;
 }
 
-enum class Action { Give, Teleport, Fly, Freecam, Stop };
+enum class Action { Give, Teleport, Fly, Freecam, Stop, MissionRestock };
 enum class Key : unsigned { Forward, Left, Back, Right, Down, Up, LookUp, LookLeft, LookDown, LookRight };
 
 // Native-render and window threads can request *named* actions. Only the guest script thread
