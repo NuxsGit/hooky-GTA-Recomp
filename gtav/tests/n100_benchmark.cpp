@@ -27,7 +27,11 @@
 #include <cpuid.h>
 #endif
 #endif
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#else
 #include <unistd.h>
+#endif
 #else
 #include <windows.h>
 #include <intrin.h>
@@ -89,15 +93,24 @@ static uint64_t mem_total_mib() {
   MEMORYSTATUSEX st{}; st.dwLength = sizeof(st);
   if (GlobalMemoryStatusEx(&st)) return st.ullTotalPhys / (1<<20);
   return 0;
+#elif defined(__APPLE__)
+  // macOS/iOS: /proc does not exist - use the documented physical-memory sysctl.
+  uint64_t bytes = 0;
+  size_t len = sizeof(bytes);
+  if (sysctlbyname("hw.memsize", &bytes, &len, nullptr, 0) == 0 && bytes > 0)
+    return bytes / (1ull << 20);
+  return 0;
 #else
   std::ifstream f("/proc/meminfo");
   std::string k; uint64_t v; std::string unit;
   while (f >> k >> v >> unit) {
     if (k == "MemTotal:") return v / 1024;
   }
+#if defined(_SC_PHYS_PAGES) && defined(_SC_PAGE_SIZE)
   long pages = sysconf(_SC_PHYS_PAGES);
   long sz = sysconf(_SC_PAGE_SIZE);
   if (pages > 0 && sz > 0) return uint64_t(pages) * uint64_t(sz) / (1<<20);
+#endif
   return 0;
 #endif
 }
