@@ -1,0 +1,4 @@
+#include "launcher_resources.h"
+
+IDI_LAUNCHER ICON "launcher.ico"
+IDI_SIDEBAR ICON "sidebar.ico"

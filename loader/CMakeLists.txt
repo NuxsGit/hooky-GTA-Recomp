@@ -37,13 +37,16 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(WIN32)
+    enable_language(RC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     add_executable(gtav_launcher WIN32
         src/main.cpp
         src/windows_update.cpp
         src/install.cpp
         src/sources.cpp
+        src/launcher.rc
         src/launcher.manifest)  # visual styles, DPI awareness, long paths
+    target_include_directories(gtav_launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/assets")
     target_compile_definitions(gtav_launcher PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(gtav_launcher PRIVATE comctl32 gdi32 ole32 shell32 uuid bcrypt winhttp dwmapi)
     if(MSVC)
