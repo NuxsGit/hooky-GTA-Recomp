@@ -204,7 +204,7 @@ bool DrawCreatorEditor(const CreatorEditorView& view){
       char buf[64]; std::snprintf(buf,sizeof buf, "%s_copy", view.manager->Current().name.c_str());
       view.manager->SaveAs(buf, err);
     }
-    ImGui::SameLine(); ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+    ImGui::SameLine(0.f, 2.f * ImGui::GetStyle().ItemSpacing.x);
     ImGui::PushStyleColor(ImGuiCol_Button, view.is_playing? ImVec4(0.95f,0.25f,0.25f,1.f):ImVec4(0.18f,0.85f,0.45f,1.f));
     ImGui::PushStyleColor(ImGuiCol_Text, view.is_playing? ImVec4(1.f,1.f,1.f,1.f):ImVec4(0.05f,0.05f,0.05f,1.f));
     if(ImGui::Button(view.is_playing?" \u25A0 Stop":" \u25B6 Play")){
