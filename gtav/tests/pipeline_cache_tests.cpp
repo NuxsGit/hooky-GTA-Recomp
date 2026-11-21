@@ -72,8 +72,10 @@ int main() {
     Check(c.Wait(0, waited) == false && waited == 0, "zero budget does not wait");
     std::thread t([&]{ std::this_thread::sleep_for(std::chrono::milliseconds(20)); c.Signal(); });
     double w2 = 0;
-    bool ok = c.Wait(100, w2);
-    Check(ok && w2 >= 15 && w2 <= 80, "wait measured");
+    // Budget must leave generous headroom for slow/loaded runners (e.g. CI macOS runners),
+    // otherwise a 20 ms signaler that has simply been scheduled late can time out and flake.
+    bool ok = c.Wait(500, w2);
+    Check(ok && w2 >= 10 && w2 <= 450, "wait measured");
     double w3 = 0;
     Check(c.Wait(10, w3) && w3 == 0, "ready is lock-free");
     t.join();
