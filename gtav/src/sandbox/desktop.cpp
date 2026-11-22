@@ -68,18 +68,19 @@ const char* GuestLabel() {
     case Guest::Loading: return campaign ? "Campaign co-op ready. All missions playable at 3 from start." : "Waiting for the TU27 world. Load a sandbox save and enter free roam.";
     case Guest::Ready: {
       using namespace gtav::control_hints;
-      // Adapt to last-used device — keyboard vs PS4/PS5/Xbox/Switch (visually + functionally)
       static thread_local char buf[512];
-      std::snprintf(buf, sizeof buf, "%s - %s: Session | %s: Build | %s: phone | %s: Cheats",
-                    campaign ? "Campaign co-op ready. Missions at 3" : "Free roam ready.",
-                    GlyphFor(Action::Workshop, CurrentDevice()),
-                    GlyphFor(Action::Build, CurrentDevice()),
-                    GlyphFor(Action::Phone, CurrentDevice()),
-                    GlyphFor(Action::Cheats, CurrentDevice()));
-      // Append creative detail for free-roam variant
-      if (!campaign) {
-        // Keep same length; ImGui wraps
-        std::strncat(buf, " (Creative Build)", sizeof buf - std::strlen(buf) - 1);
+      if (campaign) {
+        std::snprintf(buf, sizeof buf, "Campaign co-op ready. Missions at 3 - %s: Session | %s: Build | %s: phone | %s: Cheats",
+                      GlyphFor(Action::Workshop, CurrentDevice()),
+                      GlyphFor(Action::Build, CurrentDevice()),
+                      GlyphFor(Action::Phone, CurrentDevice()),
+                      GlyphFor(Action::Cheats, CurrentDevice()));
+      } else {
+        std::snprintf(buf, sizeof buf, "Free roam ready. - %s: Workshop | %s: Creative Build | %s: phone | %s: Cheats",
+                      GlyphFor(Action::Workshop, CurrentDevice()),
+                      GlyphFor(Action::Build, CurrentDevice()),
+                      GlyphFor(Action::Phone, CurrentDevice()),
+                      GlyphFor(Action::Cheats, CurrentDevice()));
       }
       return buf;
     }

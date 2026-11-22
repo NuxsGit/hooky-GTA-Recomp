@@ -1,6 +1,5 @@
 #include "control_hints.h"
 
-#include <SDL3/SDL.h>
 #include <imgui.h>
 
 #include <atomic>

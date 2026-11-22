@@ -9,6 +9,8 @@
 #include "menu.h"
 #include "paths.h"
 
+#include <SDL3/SDL.h>
+
 #include <rex/cvar.h>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/input/sdl/sdl_input_driver.h>
