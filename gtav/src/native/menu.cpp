@@ -15,11 +15,14 @@
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
+#include "control_hints.h"
 #include "input.h"
 #include "touch_controls.h"
 
 #include "graphics_menu_ui.h"
 #include "settings_runtime.h"
+
+#include <cstdio>
 
 #include <imgui.h>
 
@@ -213,16 +216,30 @@ void BuildDebug(uint32_t fps, double frame_ms) {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
   if (ImGui::Begin("HOOKY  //  DEBUG  [F2]", &open, ImGuiWindowFlags_NoCollapse)) {
     ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "LOS SANTOS  //  DEBUG & WORKSHOP");
-    ImGui::TextDisabled("F2 Debug | F6 Workshop | F5 Cheats | F8 Build | Esc fermer");
+    {
+      using namespace gtav::control_hints;
+      ImGui::TextDisabled("%s Debug | %s Workshop | %s Cheats | %s Build | %s fermer (%s)",
+          GlyphFor(Action::Debug, CurrentDevice()),
+          GlyphFor(Action::Workshop, CurrentDevice()),
+          GlyphFor(Action::Cheats, CurrentDevice()),
+          GlyphFor(Action::Build, CurrentDevice()),
+          GlyphFor(Action::Close, CurrentDevice()),
+          DeviceLabel(CurrentDevice()));
+    }
 #ifdef GTAV_DESKTOP_WORKSHOP
-    // Quick Workshop shortcuts inside F2 — the Cheats panel (AdminOS) lives on F5
+    // Quick Workshop shortcuts inside F2 — the Cheats panel (AdminOS) lives on F5 — adapt to manette/clavier
     if (sandbox::Active()) {
       ImGui::Separator();
-      if (ImGui::Button("Cheats (F5)")) { SwitchPanel(Panel::Cheats, Panel::Debug); }
-      ImGui::SameLine();
-      if (ImGui::Button("Workshop (F6)")) { SwitchPanel(Panel::Workshop, Panel::Debug); }
-      ImGui::SameLine();
-      if (workshop::BuildAllowed() && ImGui::Button("Build (F8)")) { SwitchPanel(Panel::Build, Panel::Debug); }
+      {
+        using namespace gtav::control_hints;
+        if (DrawHint("Cheats", Action::Cheats)) { SwitchPanel(Panel::Cheats, Panel::Debug); }
+        ImGui::SameLine();
+        if (DrawHint("Workshop", Action::Workshop)) { SwitchPanel(Panel::Workshop, Panel::Debug); }
+        ImGui::SameLine();
+        if (workshop::BuildAllowed() && DrawHint("Build", Action::Build)) { SwitchPanel(Panel::Build, Panel::Debug); }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", DeviceLabel(CurrentDevice()));
+      }
       ImGui::Separator();
     }
 #endif
@@ -244,12 +261,19 @@ void BuildCheats() {
   ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(std::max(0.f, screen.x - 12), std::max(0.f, screen.y - 12)));
   bool open = true;
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
-  if (ImGui::Begin("CHEATS  //  ADMIN  [F5]  —  Tous les modes", &open, ImGuiWindowFlags_NoCollapse)) {
+  {
+    using namespace gtav::control_hints;
+    char title[128]; std::snprintf(title, sizeof title, "CHEATS  //  ADMIN  [%s]  -  Tous les modes###cheats", GlyphFor(Action::Cheats, CurrentDevice()));
+    if (ImGui::Begin(title, &open, ImGuiWindowFlags_NoCollapse)) {
     // Universal cheat: works in Campaign, Solo, Multiplayer, CampaignCoop (all modes).
-    // Host-only by default — LocalAuthority() true for Solo/Campaign (Always) or Hosting/Idle for coop.
+    // Host-only by default - LocalAuthority() true for Solo/Campaign (Always) or Hosting/Idle for coop.
     // Host can grant via Players tab Promote to Admin. Merged from main (dedicated F5 panel) + a2e60d43 (all-modes host logic).
-    ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "CHEATS  //  ADMIN OS");
-    ImGui::TextDisabled("F5/Esc pour fermer  |  host-only par defaut, partageable via Promote  |  tous les modes");
+    ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "CHEATS  //  ADMIN OS (%s)", DeviceLabel(CurrentDevice()));
+    {
+      using namespace gtav::control_hints;
+      ImGui::TextDisabled("%s/%s pour fermer  |  host-only par defaut, partageable via Promote  |  tous les modes (%s)",
+          GlyphFor(Action::Cheats, CurrentDevice()), GlyphFor(Action::Close, CurrentDevice()), DeviceLabel(CurrentDevice()));
+    }
     ImGui::Separator();
     const auto view = workshop::Snapshot();
     if (!view) {
@@ -268,28 +292,41 @@ void BuildCheats() {
       const bool allow = fresh && view->admin && authority && is_owner_or_admin;
       if (!fresh) {
         ImGui::TextColored(ImVec4(1.f,0.6f,0.2f,1.f), "En attente du monde TU27... entre en free roam (ou lance une partie).");
-        ImGui::TextDisabled("Le panel F5 est host-only par defaut. En solo tu es host. En coop/multi, seul l'hote voit ce panel.");
+        {
+          using namespace gtav::control_hints;
+          ImGui::TextDisabled("Le panel %s est host-only par defaut. En solo tu es host. En coop/multi, seul l'hote voit ce panel. (%s)", GlyphFor(Action::Cheats, CurrentDevice()), DeviceLabel(CurrentDevice()));
+        }
         ImGui::TextDisabled("L'hote peut promouvoir un ami en Admin (onglet PLAYERS) pour lui donner le cheat.");
       } else if (!authority) {
-        ImGui::TextColored(ImVec4(1.f,0.4f,0.4f,1.f), "Tu as rejoint une partie — seul l'hote a le cheat par defaut.");
-        ImGui::TextDisabled("Demande a l'hote de te promouvoir en Admin (F5 -> PLAYERS -> Promote).");
+        ImGui::TextColored(ImVec4(1.f,0.4f,0.4f,1.f), "Tu as rejoint une partie - seul l'hote a le cheat par defaut.");
+        {
+          using namespace gtav::control_hints;
+          ImGui::TextDisabled("Demande a l'hote de te promouvoir en Admin (%s -> PLAYERS -> Promote).", GlyphFor(Action::Cheats, CurrentDevice()));
+        }
         if (local) ImGui::Text("Ton role: %s", workshop::Label(local->role));
       } else if (!is_owner_or_admin) {
-        ImGui::TextColored(ImVec4(1.f,0.85f,0.2f,1.f), "Role Player — pas de cheat. L'hote doit te promouvoir.");
+        ImGui::TextColored(ImVec4(1.f,0.85f,0.2f,1.f), "Role Player - pas de cheat. L'hote doit te promouvoir.");
         if (local) ImGui::Text("Ton role: %s", workshop::Label(local->role));
-        ImGui::TextDisabled("Host: F5 -> PLAYERS -> selectionne le joueur -> Promote to Admin.");
+        {
+          using namespace gtav::control_hints;
+          ImGui::TextDisabled("Host: %s -> PLAYERS -> selectionne le joueur -> Promote to Admin.", GlyphFor(Action::Cheats, CurrentDevice()));
+        }
       } else {
         workshop::DrawAdminCheatApp(*view, local_ref, g_scale);
       }
       if (!allow && fresh && authority && local && !workshop::PermissionManager::AdminOS(local->role)) {
         ImGui::Separator();
-        ImGui::TextDisabled("Astuce: le meme panel est disponible via F6 Workshop quand tu es host.");
+        {
+          using namespace gtav::control_hints;
+          ImGui::TextDisabled("Astuce: le meme panel est disponible via %s Workshop quand tu es host.", GlyphFor(Action::Workshop, CurrentDevice()));
+        }
       }
     }
   }
   ImGui::End();
   ImGui::PopStyleVar();
   if (!open && g_panel == Panel::Cheats) Close();
+  }
 }
 
 void BuildWorkshop() {
@@ -300,13 +337,20 @@ void BuildWorkshop() {
                            ImGuiCond_FirstUseEver);
   bool open = true;
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f * g_scale);
-  if (ImGui::Begin("WORKSHOP  //  LOS SANTOS  [F6]", &open, ImGuiWindowFlags_NoCollapse)) {
-    // DrawWorkshop already guards Active() and empty world, but keep menu open even during tuto mission.
-    sandbox::DrawWorkshop();
+  {
+    using namespace gtav::control_hints;
+    char wtitle[128]; std::snprintf(wtitle, sizeof wtitle, "WORKSHOP  //  LOS SANTOS  [%s]###workshop", GlyphFor(Action::Workshop, CurrentDevice()));
+    if (ImGui::Begin(wtitle, &open, ImGuiWindowFlags_NoCollapse)) {
+      // DrawWorkshop already guards Active() and empty world, but keep menu open even during tuto mission.
+      // Hint bar adaptive — montre le glyph actuel
+      ImGui::TextDisabled("Atelier: %s / Build: %s / Cheats: %s (%s)", GlyphFor(Action::Workshop, CurrentDevice()), GlyphFor(Action::Build, CurrentDevice()), GlyphFor(Action::Cheats, CurrentDevice()), DeviceLabel(CurrentDevice()));
+      ImGui::Separator();
+      sandbox::DrawWorkshop();
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+    if (!open && g_panel == Panel::Workshop) Close();
   }
-  ImGui::End();
-  ImGui::PopStyleVar();
-  if (!open && g_panel == Panel::Workshop) Close();
 }
 
 void BuildCreator() {

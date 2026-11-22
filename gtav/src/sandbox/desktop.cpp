@@ -5,6 +5,7 @@
 
 #include "courses.h"
 #include "../frontend/play_hub.h"
+#include "../native/control_hints.h"
 #include "../native/menu.h"
 #include "../native/settings_runtime.h"
 
@@ -20,6 +21,8 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <utility>
 
 REXCVAR_DEFINE_STRING(gtav_mode, "campaign", "GTAV", "Desktop startup mode: menu | solo | multiplayer | campaign | campaign-coop | creator");
@@ -63,7 +66,23 @@ const char* GuestLabel() {
   const bool campaign = CurrentMode() == Mode::CampaignCoop;
   switch (GuestState()) {
     case Guest::Loading: return campaign ? "Campaign co-op ready. All missions playable at 3 from start." : "Waiting for the TU27 world. Load a sandbox save and enter free roam.";
-    case Guest::Ready: return campaign ? "Campaign co-op ready. Missions at 3 - F6: Session | F8: Build | P / Up: phone | F5: Cheats." : "Free roam ready. F6: Workshop | F8: Creative Build | P / Up: phone | F5: Cheats.";
+    case Guest::Ready: {
+      using namespace gtav::control_hints;
+      // Adapt to last-used device — keyboard vs PS4/PS5/Xbox/Switch (visually + functionally)
+      static thread_local char buf[512];
+      std::snprintf(buf, sizeof buf, "%s - %s: Session | %s: Build | %s: phone | %s: Cheats",
+                    campaign ? "Campaign co-op ready. Missions at 3" : "Free roam ready.",
+                    GlyphFor(Action::Workshop, CurrentDevice()),
+                    GlyphFor(Action::Build, CurrentDevice()),
+                    GlyphFor(Action::Phone, CurrentDevice()),
+                    GlyphFor(Action::Cheats, CurrentDevice()));
+      // Append creative detail for free-roam variant
+      if (!campaign) {
+        // Keep same length; ImGui wraps
+        std::strncat(buf, " (Creative Build)", sizeof buf - std::strlen(buf) - 1);
+      }
+      return buf;
+    }
     case Guest::Busy: return campaign ? "Waiting for world (cutscene/pause) - missions stay synced at 3." : "Waiting for free roam (not during a cutscene, mission or pause).";
     default: return "TU27 native context unavailable. Local vehicles and map markers are disabled.";
   }
@@ -253,7 +272,7 @@ void ShowNetwork(const SessionView& view) {
 
 void ShowCampaignStatus() {
   if (CurrentMode() != Mode::CampaignCoop) return;
-  // Tuto: assignments/world may be empty while loading — guard all vectors, never deref null.
+  // Tuto: assignments/world may be empty while loading - guard all vectors, never deref null.
   const auto view = ViewCampaign();
   ImGui::SeparatorText("Campaign co-op - Missions at 3");
   ImGui::Text("Save: isolated under data/user/campaign_coop (solo saves untouched)");
@@ -262,7 +281,7 @@ void ShowCampaignStatus() {
     ImGui::Text("You are: %s", CharacterLabel(*view.self_character));
   else if (view.link == Link::Joined || view.link == Link::Hosting)
     ImGui::TextDisabled("Assigning protagonist...");
-  // assignments may be empty during tuto loading — show nothing rather than crash.
+  // assignments may be empty during tuto loading - show nothing rather than crash.
   for (auto [id, ch] : view.assignments) {
     const char* name = "?";
     // Guard empty world.players (tuto not yet joined)
@@ -371,14 +390,14 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
     courses = creator->maps_root; // reuse courses var for legacy but maps is creator_maps
     creator_maps = creator->maps_root;
     creator_manager = std::make_unique<CreatorManager>(creator->maps_root);
-    // Creator uses full workshop authority: build, cheats, creative — like a Unity editor with play mode
+    // Creator uses full workshop authority: build, cheats, creative - like a Unity editor with play mode
     workshop::Start(creator->profile_root, true, {
-        [](std::string_view line) { REXLOG_INFO(\"{}\", line); },
-        [](uint8_t failed) { REXLOG_WARN(\"[creator] could not write config documents (mask {})\", unsigned(failed)); },
+        [](std::string_view line) { REXLOG_INFO("{}", line); },
+        [](uint8_t failed) { REXLOG_WARN("[creator] could not write config documents (mask {})", unsigned(failed)); },
     });
     mode.store(chosen, std::memory_order_relaxed);
     native::menu::OpenWorkshop();
-    REXLOG_INFO("[creator] MAP editor mode — Unity/Unreal style. Profile %s  Maps %s",
+    REXLOG_INFO("[creator] MAP editor mode - Unity/Unreal style. Profile %s  Maps %s",
                 creator->profile_root.string().c_str(), creator->maps_root.string().c_str());
     // Auto-open creator editor on start for immediate editing (user can close with F7/Esc)
     // Defer to next frame? We open workshop now, creator via F7
@@ -406,7 +425,7 @@ bool Configure(rex::PathConfig& paths, std::filesystem::path& installed_content_
 }
 
 void Shutdown() {
-  // Always stop workshop core if it was started — now also started for Campaign (F5 cheat).
+  // Always stop workshop core if it was started - now also started for Campaign (F5 cheat).
   workshop::Stop();
   if (Active()) Party().Stop();
   creator_manager.reset();
@@ -427,12 +446,12 @@ std::optional<VehicleRequest> TakeVehicleRequest() {
 void DrawWorkshop() {
   if (!Active()) return;
   // Tuto campagne multi: menu may be opened before Guest Ready or before SessionView fully populated.
-  // Keep workshop open but guard every world access — never crash, just show loading state.
+  // Keep workshop open but guard every world access - never crash, just show loading state.
   ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.12f,0.12f,0.13f,1.f));
   ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.18f,0.85f,0.45f,0.22f));
   ImGui::PushStyleColor(ImGuiCol_TabActive, ImVec4(0.18f,0.85f,0.45f,0.45f));
   ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.18f,0.85f,0.45f,0.18f));
-  // Guard against empty/invalid view during tuto loading — Party().View() always returns a valid struct but
+  // Guard against empty/invalid view during tuto loading - Party().View() always returns a valid struct but
   // world.players or course may be empty transiently.
   const auto view = Party().View();
   const auto* local = Myself(view.world);
@@ -478,10 +497,10 @@ void DrawWorkshop() {
     EditCourse(view, local);
     ImGui::EndTabItem();
   }
-  // Creator MAP — Unity/Unreal style editor (NEW Mode, also accessible as tab in any workshop for prototyping)
+  // Creator MAP - Unity/Unreal style editor (NEW Mode, also accessible as tab in any workshop for prototyping)
   if (ImGui::BeginTabItem("Creator MAP")) {
     const bool is_creator = IsCreatorMode();
-    ImGui::TextColored(ImVec4(1.f,0.85f,0.08f,1.f), is_creator ? "Mode Creator MAP actif — editeur complet" : "Editeur Creator MAP — prototype dans ce mode");
+    ImGui::TextColored(ImVec4(1.f,0.85f,0.08f,1.f), is_creator ? "Mode Creator MAP actif - editeur complet" : "Editeur Creator MAP - prototype dans ce mode");
     ImGui::TextWrapped("Unity/Unreal style: Hierarchy (objets), Inspector (transform / script), Asset Browser (Props/Vehicles/Peds/Triggers), Viewport ghost, Play test. Isole dans data/user/creator/.");
     if (is_creator && creator_manager) {
       ImGui::Text("Map: %s  |  %zu objects  |  %zu triggers  |  %s", creator_manager->Current().name.c_str(),
@@ -491,25 +510,39 @@ void DrawWorkshop() {
       if (!list.empty()) {
         ImGui::TextDisabled("%zu maps on disk:", list.size());
         for (auto &n : list) ImGui::BulletText("%s", n.c_str());
-      } else ImGui::TextDisabled("No maps yet — open the full editor with F7 to create one.");
+      } else ImGui::TextDisabled("No maps yet - open the full editor with F7 to create one.");
     } else {
       ImGui::TextDisabled("Lance le jeu en Creator MAP depuis le PLAY hub (tuile 05) pour l'isolation complete et le Start/Play dedie.");
     }
     ImGui::Separator();
-    if (ImGui::Button("Open Creator Editor [F7]")) { ::gtav::native::menu::ToggleCreator(); }
+    {
+      using namespace gtav::control_hints;
+      if (DrawHint("Open Creator Editor", Action::Creator)) { ::gtav::native::menu::ToggleCreator(); }
+    }
     ImGui::SameLine();
-    if (IsCreatorMode()) ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "F7: Unity-like 3-panel editor | F8: Build | F5: Cheats");
-    else ImGui::TextDisabled("F7 ouvre l'editeur meme hors Creator — mais tes maps restent dans data/user/creator/");
+    {
+      using namespace gtav::control_hints;
+      const char* g_creator = GlyphFor(Action::Creator, CurrentDevice());
+      const char* g_build = GlyphFor(Action::Build, CurrentDevice());
+      const char* g_cheats = GlyphFor(Action::Cheats, CurrentDevice());
+      if (IsCreatorMode()) ImGui::TextColored(ImVec4(0.18f,0.85f,0.45f,1.f), "%s: Unity-like 3-panel editor | %s: Build | %s: Cheats", g_creator, g_build, g_cheats);
+      else ImGui::TextDisabled("%s ouvre l'editeur meme hors Creator - mais tes maps restent dans data/user/creator/", g_creator);
+    }
     ImGui::SeparatorText("Workflow Creator");
-    ImGui::BulletText("1. F7 -> Asset Browser choisis Prop/Vehicle/Ped/Trigger -> click ajoute a Hierarchy");
+    {
+      using namespace gtav::control_hints;
+      const char* g_creator = GlyphFor(Action::Creator, CurrentDevice());
+      char w1[160]; std::snprintf(w1, sizeof w1, "1. %s -> Asset Browser choisis Prop/Vehicle/Ped/Trigger -> click ajoute a Hierarchy", g_creator);
+      ImGui::BulletText("%s", w1);
+    }
     ImGui::BulletText("2. Hierarchy selection -> Inspector: Position/Yaw/Scale, Lock, Duplicate/Delete");
     ImGui::BulletText("3. Viewport: vise hors panneau, clic place ghost, molette yaw, Shift distance, Ctrl+Shift hauteur");
-    ImGui::BulletText("4. Toolbar: Save / Save As / Play (spawn all) / Stop (cleanup) — puis joue ton scenario");
-    ImGui::BulletText("5. Scenario: triggers Checkpoint/Win/Lose/Spawn — win = AllCheckpoints ou WinZone");
+    ImGui::BulletText("4. Toolbar: Save / Save As / Play (spawn all) / Stop (cleanup) - puis joue ton scenario");
+    ImGui::BulletText("5. Scenario: triggers Checkpoint/Win/Lose/Spawn - win = AllCheckpoints ou WinZone");
     if (is_creator) {
       ImGui::Separator();
       std::string why; bool can = creator_manager ? creator_manager->ValidForPlay(why) : false;
-      ImGui::TextColored(can?ImVec4(0.18f,0.85f,0.45f,1.f):ImVec4(1.f,0.4f,0.4f,1.f), can?"Ready to play — %zu objects":"Not ready: %s", can?creator_manager->Current().objects.size():0, why.c_str());
+      ImGui::TextColored(can?ImVec4(0.18f,0.85f,0.45f,1.f):ImVec4(1.f,0.4f,0.4f,1.f), can?"Ready to play - %zu objects":"Not ready: %s", can?creator_manager->Current().objects.size():0, why.c_str());
     }
     ImGui::EndTabItem();
   }
@@ -546,14 +579,14 @@ void DrawWorkshop() {
 
 void DrawHud() {
   if (!Active()) return;
-  // Tuto first mission: world may be empty or loading — never crash HUD, just skip drawing when no local.
+  // Tuto first mission: world may be empty or loading - never crash HUD, just skip drawing when no local.
   const auto view = Party().View();
-  // Guard empty world or uninitialized course name — use .c_str() safely even if empty.
+  // Guard empty world or uninitialized course name - use .c_str() safely even if empty.
   const auto* local = Myself(view.world);
   if (!local) return;
   const auto& world = view.world;
-  // Defensive: world.course may be empty during tuto — NextCheckpoint guards, but keep HUD safe.
-  if (world.course.name.size() > 64) return; // corrupted course name — avoid ImGui crash on huge string
+  // Defensive: world.course may be empty during tuto - NextCheckpoint guards, but keep HUD safe.
+  if (world.course.name.size() > 64) return; // corrupted course name - avoid ImGui crash on huge string
   ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_Always);
   ImGui::SetNextWindowBgAlpha(.82f);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f,0.06f,0.07f,0.88f));
@@ -571,10 +604,20 @@ void DrawHud() {
                     (local->finish_ms ? local->finish_ms : world.clock_ms) / 1000.0, local->finish_ms ? "  FINISHED" : "");
       else {
         const char* mapname = mgr ? mgr->Current().name.c_str() : "No map";
-        ImGui::Text("CREATOR MAP | %s | %zu objects [F6] [F7 Editor] [F8 Build] [F5 Cheats]", mapname,
-                    mgr ? mgr->Current().objects.size() : 0);
+        using namespace gtav::control_hints;
+        ImGui::Text("CREATOR MAP | %s | %zu objects [%s] [%s Editor] [%s Build] [%s Cheats] (%s)",
+                    mapname, mgr ? mgr->Current().objects.size() : 0,
+                    GlyphFor(Action::Workshop, CurrentDevice()),
+                    GlyphFor(Action::Creator, CurrentDevice()),
+                    GlyphFor(Action::Build, CurrentDevice()),
+                    GlyphFor(Action::Cheats, CurrentDevice()),
+                    DeviceLabel(CurrentDevice()));
       }
-      if (mgr) ImGui::TextDisabled("Map: %s  Triggers: %zu  —  F7 Unity-like editor  |  isole creator/", mgr->Current().name.c_str(), mgr->Current().triggers.size());
+      if (mgr) {
+        using namespace gtav::control_hints;
+        ImGui::TextDisabled("Map: %s  Triggers: %zu  -  %s Unity-like editor  |  isole creator/",
+            mgr->Current().name.c_str(), mgr->Current().triggers.size(), GlyphFor(Action::Creator, CurrentDevice()));
+      }
       if (local->pose && mgr && !mgr->Current().triggers.empty()) {
         // Show nearest trigger distance
         float best = 1e9f; const CreatorTrigger* near=nullptr;
@@ -597,7 +640,9 @@ void DrawHud() {
                     (local->finish_ms ? local->finish_ms : world.clock_ms) / 1000.0, local->finish_ms ? "  FINISHED" : "");
       else {
         const size_t campaign_players = view.world.players.size();
-        ImGui::Text("Campaign %s | %zu/3  [F6] %s", who, campaign_players, LinkLabel(view.link));
+        using namespace gtav::control_hints;
+        ImGui::Text("Campaign %s | %zu/3  [%s] %s (%s)", who, campaign_players,
+                    GlyphFor(Action::Workshop, CurrentDevice()), LinkLabel(view.link), DeviceLabel(CurrentDevice()));
       }
       if (camp.self_character) {
         ImGui::TextDisabled("Locked protagonist: %s  |  Saves: campaign_coop (isolated)", who);
@@ -614,8 +659,15 @@ void DrawHud() {
     else if (world.race == Race::Running || world.race == Race::Finished)
       ImGui::Text("%s | %u/%zu | %.2f s%s", world.course.name.c_str(), local->Passed(), world.course.points.size(),
                   (local->finish_ms ? local->finish_ms : world.clock_ms) / 1000.0, local->finish_ms ? "  FINISHED" : "");
-    else ImGui::Text("%s | %zu player%s  [F6] [F8] [P]", CurrentMode() == Mode::Solo ? "SANDBOX" : LinkLabel(view.link),
-                     world.players.size(), world.players.size() == 1 ? "" : "s");
+    else {
+      using namespace gtav::control_hints;
+      ImGui::Text("%s | %zu player%s  [%s] [%s] [%s] (%s)", CurrentMode() == Mode::Solo ? "SANDBOX" : LinkLabel(view.link),
+                  world.players.size(), world.players.size() == 1 ? "" : "s",
+                  GlyphFor(Action::Workshop, CurrentDevice()),
+                  GlyphFor(Action::Build, CurrentDevice()),
+                  GlyphFor(Action::Phone, CurrentDevice()),
+                  DeviceLabel(CurrentDevice()));
+    }
     if (world.race == Race::Running && local->pose) {
       if (auto next = NextCheckpoint(world.course, *local)) {
         const auto distance = std::sqrt(double(DistanceSquared(world.course.points[*next], local->pose->position))) / 100;

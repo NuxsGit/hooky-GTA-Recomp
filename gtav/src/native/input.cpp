@@ -5,6 +5,7 @@
 #include "../sandbox/CreativeRuntime.h"
 #endif
 
+#include "control_hints.h"
 #include "menu.h"
 #include "paths.h"
 
@@ -168,7 +169,34 @@ std::optional<menu::Key> MenuKey(SDL_GamepadButton button) {
   }
 }
 
+void NotifyPadFromEvent(const SDL_Event& event) {
+  int sdl_type = 0; // GenericPad
+  SDL_JoystickID which = 0;
+  if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+    which = event.gbutton.which;
+  } else if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+    which = event.gaxis.which;
+  } else if (event.type == SDL_EVENT_GAMEPAD_ADDED || event.type == SDL_EVENT_GAMEPAD_REMOVED) {
+    which = event.gdevice.which;
+  } else {
+    which = 0;
+  }
+  if (which) {
+    if (auto* pad = SDL_GetGamepadFromID(which)) {
+      sdl_type = int(SDL_GetGamepadType(pad));
+    }
+  }
+  ::gtav::control_hints::NotifyGamepad(sdl_type);
+}
+
 bool GamepadEvent(const SDL_Event& event) {
+  if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+    NotifyPadFromEvent(event);
+  } else if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+    // Any stick movement switches to gamepad.
+    const float v = event.gaxis.value / 32767.f;
+    if (v > 0.5f || v < -0.5f) NotifyPadFromEvent(event);
+  }
   // The shortcut must come from one controller, and unplugging it must release its buttons.
   static std::mutex mutex;
   static std::unordered_map<SDL_JoystickID, std::bitset<SDL_GAMEPAD_BUTTON_COUNT>> pads;
@@ -301,6 +329,7 @@ float MenuPixelDensity(SDL_WindowID id) {
 
 void Keyboard(const SDL_KeyboardEvent& key) {
   const auto [scan, down, repeat] = std::tuple(key.scancode, key.down, key.repeat);
+  if (down && !repeat) ::gtav::control_hints::NotifyKeyboard();
 #ifdef GTAV_DESKTOP_WORKSHOP
   if (scan == SDL_SCANCODE_F5 && down && !repeat && menu::ToggleCheats()) return;
   if (scan == SDL_SCANCODE_F6 && down && !repeat && menu::ToggleWorkshop()) return;
@@ -574,6 +603,7 @@ bool HandleMessage(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     case WM_KEYUP: case WM_SYSKEYUP:
       if (const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
           !down || !(lp & (1L << 30))) {
+        if (down && !(lp & (1L << 30))) ::gtav::control_hints::NotifyKeyboard();
 #ifdef GTAV_DESKTOP_WORKSHOP
         if (down && wp == VK_F5 && menu::ToggleCheats()) return true;
         if (down && wp == VK_F7 && menu::ToggleCreator()) return true;
