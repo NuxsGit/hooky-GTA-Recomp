@@ -44,6 +44,19 @@ struct CreatorObject {
 
 enum class TriggerType : uint8_t { Checkpoint = 0, SpawnPlayer, SpawnVehicle, WinZone, LoseZone, Script, Count };
 
+constexpr const char* TriggerLabel(TriggerType t) {
+  switch (t) {
+    case TriggerType::Checkpoint: return "Checkpoint";
+    case TriggerType::SpawnPlayer: return "Spawn Player";
+    case TriggerType::SpawnVehicle: return "Spawn Vehicle";
+    case TriggerType::WinZone: return "Win Zone";
+    case TriggerType::LoseZone: return "Lose Zone";
+    case TriggerType::Script: return "Script";
+    default: return "?";
+  }
+}
+
+
 struct CreatorTrigger {
   std::string name = "Trigger";
   workshop::Vec3 pos{};

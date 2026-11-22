@@ -61,6 +61,7 @@ set(GTAV_SOURCES
     src/native/renderer.cpp
     src/native/shaders.cpp
     src/native/input.cpp
+    src/native/control_hints.cpp
     src/native/menu.cpp
     src/native/graphics_preferences.cpp
     src/native/graphics_menu_ui.cpp

@@ -130,7 +130,7 @@ int main() try {
   CHECK(PlayMode(SelectRow(Card::Sandbox, 1), true) == Mode::Multiplayer);
   CHECK(PlayMode(Card::StoryCoop, true) == Mode::CampaignCoop && !PlayMode(Card::PrivateSession, false));
   CHECK(!PlayMode(Card::StoryCoop, false) && PlayMode(Card::PrivateSession, true) == Mode::Multiplayer);
-  CHECK(Cycle(Card::Story, true) == Card::PrivateSession && SelectColumn(Card::PrivateSession, 0) == Card::StoryCoop);
+  CHECK(Cycle(Card::Story, true) == Card::Creator && Cycle(Card::Creator, false) == Card::Story && SelectColumn(Card::PrivateSession, 0) == Card::StoryCoop);
   return 0;
 } catch (const std::exception& e) {
   std::cerr << "Desktop fixture: " << e.what() << '\n';
