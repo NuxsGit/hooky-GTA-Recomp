@@ -27,18 +27,6 @@ struct EditorState {
   int trigger_type = 0;
   float trigger_radius = 5.f;
 };
-
-const char* TriggerLabel(TriggerType t){
-  switch(t){
-    case TriggerType::Checkpoint: return "Checkpoint";
-    case TriggerType::SpawnPlayer: return "Spawn Player";
-    case TriggerType::SpawnVehicle: return "Spawn Vehicle";
-    case TriggerType::WinZone: return "Win Zone";
-    case TriggerType::LoseZone: return "Lose Zone";
-    case TriggerType::Script: return "Script";
-    default: return "?";
-  }
-}
 } // anon
 
 static EditorState* g_state = nullptr;
@@ -215,7 +203,7 @@ bool DrawCreatorEditor(const CreatorEditorView& view){
       char buf[64]; std::snprintf(buf,sizeof buf, "%s_copy", view.manager->Current().name.c_str());
       view.manager->SaveAs(buf, err);
     }
-    ImGui::SameLine(); ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+    ImGui::SameLine(0.f, 2.f * ImGui::GetStyle().ItemSpacing.x);
     ImGui::PushStyleColor(ImGuiCol_Button, view.is_playing? ImVec4(0.95f,0.25f,0.25f,1.f):ImVec4(0.18f,0.85f,0.45f,1.f));
     ImGui::PushStyleColor(ImGuiCol_Text, view.is_playing? ImVec4(1.f,1.f,1.f,1.f):ImVec4(0.05f,0.05f,0.05f,1.f));
     if(ImGui::Button(view.is_playing?" \u25A0 Stop":" \u25B6 Play")){
@@ -345,7 +333,10 @@ bool DrawCreatorEditor(const CreatorEditorView& view){
     ImGui::TextDisabled("Creator MAP  |  F7 toggle editor  |  F8 Build still available  |  F5 Cheats  |  isole dans data/user/creator/");
     ImGui::SameLine();
     std::string why; bool ok=view.manager->ValidForPlay(why);
-    ImGui::TextColored(ok? ImVec4(0.18f,0.85f,0.45f,1.f):ImVec4(1.f,0.55f,0.35f,1.f), ok?"Ready to play":" %s", ok?"":why.c_str());
+    if (ok)
+      ImGui::TextColored(ImVec4(0.18f, 0.85f, 0.45f, 1.f), "Ready to play");
+    else
+      ImGui::TextColored(ImVec4(1.f, 0.55f, 0.35f, 1.f), "Not ready: %s", why.c_str());
   }
   ImGui::End(); ImGui::PopStyleColor();
 
